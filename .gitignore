@@ -1,0 +1,58 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug and test files
+test_*.py
+debug_*.py
+fix_*.py
+comprehensive_*.py
+final_*.py
+error_*.py
+simple_*.py
+*_test_results.json
+*_logging_test_results.json
+*_quick_test_results.json
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Logs
+*.log
+logs/
+
+# Upload and output directories (keep structure but ignore content)
+uploads/*
+outputs/*
+!uploads/.gitkeep
+!outputs/.gitkeep
+
+# S3 credentials (if any)
+*.pem
+*.key
+
+# Environment variables
+.env
+.env.*
+
+# TikTok credentials
+tiktok_credentials.json

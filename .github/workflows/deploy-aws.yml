@@ -1,0 +1,114 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_WEB: clip-it-web
+  ECR_REPOSITORY_WORKER: clip-it-worker
+  ECS_SERVICE_WEB: clip-it-web-service
+  ECS_SERVICE_WORKER: clip-it-worker-service
+  ECS_CLUSTER: clip-it-cluster
+  ECS_TASK_DEFINITION_WEB: clip-it-web-task
+  ECS_TASK_DEFINITION_WORKER: clip-it-worker-task
+  CONTAINER_NAME_WEB: clip-it-web
+  CONTAINER_NAME_WORKER: clip-it-worker
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, tag, and push web image to Amazon ECR
+      id: build-web-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build web image
+        docker build -f Dockerfile.web -t $ECR_REGISTRY/$ECR_REPOSITORY_WEB:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_WEB:$IMAGE_TAG
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY_WEB:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_WEB:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_WEB:latest
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_WEB:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Build, tag, and push worker image to Amazon ECR
+      id: build-worker-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build worker image
+        docker build -f Dockerfile.worker -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Download task definition
+      run: |
+        aws ecs describe-task-definition --task-definition $ECS_TASK_DEFINITION_WEB --query taskDefinition > task-definition-web.json
+        aws ecs describe-task-definition --task-definition $ECS_TASK_DEFINITION_WORKER --query taskDefinition > task-definition-worker.json
+
+    - name: Fill in the new image ID in the Amazon ECS task definition (web)
+      id: task-def-web
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition-web.json
+        container-name: ${{ env.CONTAINER_NAME_WEB }}
+        image: ${{ steps.build-web-image.outputs.image }}
+
+    - name: Fill in the new image ID in the Amazon ECS task definition (worker)
+      id: task-def-worker
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition-worker.json
+        container-name: ${{ env.CONTAINER_NAME_WORKER }}
+        image: ${{ steps.build-worker-image.outputs.image }}
+
+    - name: Deploy Amazon ECS task definition (web)
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.task-def-web.outputs.task-definition }}
+        service: ${{ env.ECS_SERVICE_WEB }}
+        cluster: ${{ env.ECS_CLUSTER }}
+        wait-for-service-stability: true
+
+    - name: Deploy Amazon ECS task definition (worker)
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.task-def-worker.outputs.task-definition }}
+        service: ${{ env.ECS_SERVICE_WORKER }}
+        cluster: ${{ env.ECS_CLUSTER }}
+        wait-for-service-stability: true
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Deployment successful!"
+          echo "Web service: ${{ env.ECS_SERVICE_WEB }}"
+          echo "Worker service: ${{ env.ECS_SERVICE_WORKER }}"
+        else
+          echo "❌ Deployment failed!"
+        fi
