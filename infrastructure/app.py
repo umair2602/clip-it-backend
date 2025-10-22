@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 import os
+
 import aws_cdk as cdk
-from aws_cdk import (
-    Stack,
-    aws_ecs as ecs,
-    aws_ec2 as ec2,
-    aws_elasticache as elasticache,
-    aws_ecr as ecr,
-    aws_iam as iam,
-    aws_logs as logs,
-    aws_applicationloadbalancer as alb,
-    aws_applicationloadbalancer_targets as alb_targets,
-    aws_s3 as s3,
-    aws_ssm as ssm,
-    aws_cloudwatch as cloudwatch,
-    aws_autoscaling as autoscaling,
-)
+from aws_cdk import Stack
+from aws_cdk import aws_applicationloadbalancer as alb
+from aws_cdk import aws_applicationloadbalancer_targets as alb_targets
+from aws_cdk import aws_autoscaling as autoscaling
+from aws_cdk import aws_cloudwatch as cloudwatch
+from aws_cdk import aws_ec2 as ec2
+from aws_cdk import aws_ecr as ecr
+from aws_cdk import aws_ecs as ecs
+from aws_cdk import aws_elasticache as elasticache
+from aws_cdk import aws_iam as iam
+from aws_cdk import aws_logs as logs
+from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_ssm as ssm
 from constructs import Construct
+
 
 class ClipItStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
