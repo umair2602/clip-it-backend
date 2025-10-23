@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:  # Manual trigger
 
 env:
   AWS_REGION: us-east-1
@@ -34,6 +35,37 @@ jobs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
+
+    - name: Debug AWS credentials
+      run: |
+        echo "🔍 Debugging AWS credentials..."
+        echo "AWS_ACCESS_KEY_ID length: ${#AWS_ACCESS_KEY_ID}"
+        echo "AWS_SECRET_ACCESS_KEY length: ${#AWS_SECRET_ACCESS_KEY}"
+        echo "AWS_REGION: $AWS_REGION"
+        echo "Testing AWS connection..."
+        aws sts get-caller-identity
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install AWS CDK
+      run: npm install -g aws-cdk
+
+    - name: Deploy Infrastructure
+      run: |
+        echo "🏗️ Deploying infrastructure..."
+        cd infrastructure
+        pip install -r requirements.txt
+        cdk bootstrap
+        cdk deploy --require-approval never
+        echo "✅ Infrastructure deployed successfully!"
 
     - name: Login to Amazon ECR
       id: login-ecr

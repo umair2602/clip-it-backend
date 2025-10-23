@@ -18,10 +18,18 @@ if ! command -v cdk &> /dev/null; then
     npm install -g aws-cdk
 fi
 
-# Set temporary AWS credentials (these will be used for this session only)
+# Check if AWS credentials are configured
+echo "🔐 Checking AWS credentials..."
+if ! aws sts get-caller-identity &> /dev/null; then
+    echo "❌ AWS credentials not configured. Please run 'aws configure' first."
+    echo "Or set these environment variables:"
+    echo "export AWS_ACCESS_KEY_ID=your_access_key"
+    echo "export AWS_SECRET_ACCESS_KEY=your_secret_key"
+    echo "export AWS_DEFAULT_REGION=us-east-1"
+    exit 1
+fi
 
-
-echo "🔐 Using temporary AWS credentials for deployment"
+echo "✅ AWS credentials configured"
 
 # Navigate to infrastructure directory
 cd infrastructure
