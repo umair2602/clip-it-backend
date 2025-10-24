@@ -3,14 +3,14 @@ import os
 
 import aws_cdk as cdk
 from aws_cdk import Stack
-from aws_cdk import aws_elasticloadbalancingv2 as elbv2
-from aws_cdk import aws_elasticloadbalancingv2_targets as targets
 from aws_cdk import aws_autoscaling as autoscaling
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_ecs as ecs
 from aws_cdk import aws_elasticache as elasticache
+from aws_cdk import aws_elasticloadbalancingv2 as elbv2
+from aws_cdk import aws_elasticloadbalancingv2_targets as targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
@@ -296,19 +296,19 @@ class ClipItStack(Stack):
 
         # Store important values in SSM Parameter Store
         ssm.StringParameter(
-            self, "S3BucketName",
+            self, "S3BucketNameParam",
             parameter_name="/clip-it/s3-bucket-name",
             string_value=s3_bucket.bucket_name
         )
 
         ssm.StringParameter(
-            self, "RedisEndpoint",
+            self, "RedisEndpointParam",
             parameter_name="/clip-it/redis-endpoint",
             string_value=redis_cluster.attr_redis_endpoint_address
         )
 
         ssm.StringParameter(
-            self, "LoadBalancerDNS",
+            self, "LoadBalancerDNSParam",
             parameter_name="/clip-it/load-balancer-dns",
             string_value=load_balancer.load_balancer_dns_name
         )
