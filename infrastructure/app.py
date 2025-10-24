@@ -244,6 +244,9 @@ class ClipItStack(Stack):
             default_target_groups=[web_target_group]
         )
 
+        # Create shared security group for ECS services
+        ecs_security_group = self.create_ecs_security_group(vpc)
+
         # Create ECS services
         web_service = ecs.FargateService(
             self, "WebService",
@@ -252,7 +255,7 @@ class ClipItStack(Stack):
             desired_count=1,
             service_name="clip-it-web-service",
             assign_public_ip=True,
-            security_groups=[self.create_ecs_security_group(vpc)],
+            security_groups=[ecs_security_group],
             health_check_grace_period=cdk.Duration.seconds(60)
         )
 
@@ -263,7 +266,7 @@ class ClipItStack(Stack):
             desired_count=1,
             service_name="clip-it-worker-service",
             assign_public_ip=True,
-            security_groups=[self.create_ecs_security_group(vpc)]
+            security_groups=[ecs_security_group]
         )
 
         # Register web service with target group

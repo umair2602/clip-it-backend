@@ -29,19 +29,6 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
  
-    - name: Debug AWS credentials
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
-      run: |
-        echo "🔍 Debugging AWS credentials..."
-        echo "AWS_ACCESS_KEY_ID length: ${#AWS_ACCESS_KEY_ID}"
-        echo "AWS_SECRET_ACCESS_KEY length: ${#AWS_SECRET_ACCESS_KEY}"
-        echo "AWS_REGION: $AWS_REGION"
-        echo "Testing AWS connection..."
-        aws sts get-caller-identity
-
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
