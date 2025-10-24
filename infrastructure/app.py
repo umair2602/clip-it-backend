@@ -3,8 +3,8 @@ import os
 
 import aws_cdk as cdk
 from aws_cdk import Stack
-from aws_cdk import aws_applicationloadbalancer as alb
-from aws_cdk import aws_applicationloadbalancer_targets as alb_targets
+from aws_cdk import aws_elasticloadbalancingv2 as elbv2
+from aws_cdk import aws_elasticloadbalancingv2_targets as targets
 from aws_cdk import aws_autoscaling as autoscaling
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_ec2 as ec2
@@ -213,7 +213,7 @@ class ClipItStack(Stack):
             description="Allow HTTPS traffic"
         )
 
-        load_balancer = alb.ApplicationLoadBalancer(
+        load_balancer = elbv2.ApplicationLoadBalancer(
             self, "ClipItALB",
             vpc=vpc,
             internet_facing=True,
@@ -221,17 +221,17 @@ class ClipItStack(Stack):
         )
 
         # Create target group for web service
-        web_target_group = alb.ApplicationTargetGroup(
+        web_target_group = elbv2.ApplicationTargetGroup(
             self, "WebTargetGroup",
             port=8000,
-            protocol=alb.ApplicationProtocol.HTTP,
+            protocol=elbv2.ApplicationProtocol.HTTP,
             vpc=vpc,
-            target_type=alb.TargetType.IP,
-            health_check=alb.HealthCheck(
+            target_type=elbv2.TargetType.IP,
+            health_check=elbv2.HealthCheck(
                 enabled=True,
                 healthy_http_codes="200",
                 path="/health",
-                protocol=alb.Protocol.HTTP,
+                protocol=elbv2.Protocol.HTTP,
                 timeout=cdk.Duration.seconds(5),
                 interval=cdk.Duration.seconds(30)
             )
