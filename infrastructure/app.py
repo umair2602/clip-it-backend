@@ -247,26 +247,36 @@ class ClipItStack(Stack):
         # Create shared security group for ECS services
         ecs_security_group = self.create_ecs_security_group(vpc)
 
-        # Create ECS services
+        # Create ECS services with better configuration
         web_service = ecs.FargateService(
             self, "WebService",
             cluster=cluster,
             task_definition=web_task_definition,
-            desired_count=1,
+            desired_count=0,  # Start with 0 tasks to avoid immediate failures
             service_name="clip-it-web-service",
             assign_public_ip=True,
             security_groups=[ecs_security_group],
-            health_check_grace_period=cdk.Duration.seconds(60)
+            health_check_grace_period=cdk.Duration.seconds(300),  # 5 minutes
+            enable_execute_command=True,  # Enable debugging
+            deployment_configuration=ecs.DeploymentConfiguration(
+                maximum_percent=200,
+                minimum_healthy_percent=0  # Allow 0% during deployment
+            )
         )
 
         worker_service = ecs.FargateService(
             self, "WorkerService",
             cluster=cluster,
             task_definition=worker_task_definition,
-            desired_count=1,
+            desired_count=0,  # Start with 0 tasks to avoid immediate failures
             service_name="clip-it-worker-service",
             assign_public_ip=True,
-            security_groups=[ecs_security_group]
+            security_groups=[ecs_security_group],
+            enable_execute_command=True,  # Enable debugging
+            deployment_configuration=ecs.DeploymentConfiguration(
+                maximum_percent=200,
+                minimum_healthy_percent=0  # Allow 0% during deployment
+            )
         )
 
         # Register web service with target group

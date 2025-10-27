@@ -110,6 +110,17 @@ jobs:
         container-name: ${{ env.CONTAINER_NAME_WORKER }}
         image: ${{ steps.build-worker-image.outputs.image }}
 
+    - name: Start ECS Services
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+      run: |
+        echo "🚀 Starting ECS services..."
+        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WEB }} --desired-count 1
+        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WORKER }} --desired-count 1
+        echo "✅ ECS services started"
+
     - name: Deploy Amazon ECS task definition (web)
       uses: aws-actions/amazon-ecs-deploy-task-definition@v1
       with:
