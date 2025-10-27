@@ -51,8 +51,23 @@ jobs:
         echo "🏗️ Deploying infrastructure..."
         cd infrastructure
         pip install -r requirements.txt
-        cdk bootstrap
-        cdk deploy --require-approval never
+        
+        # Get AWS Account ID
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "AWS Account ID: $AWS_ACCOUNT_ID"
+        
+        # Check if CDK is already bootstrapped
+        echo "🔍 Checking CDK bootstrap status..."
+        if cdk bootstrap --list | grep -q "aws://$AWS_ACCOUNT_ID/$AWS_DEFAULT_REGION"; then
+          echo "✅ CDK already bootstrapped for this region"
+        else
+          echo "🔧 Bootstrapping CDK..."
+          cdk bootstrap --require-approval never
+        fi
+        
+        # Deploy the infrastructure
+        echo "🚀 Deploying ClipItStack..."
+        cdk deploy --require-approval never --outputs-file outputs.json
         echo "✅ Infrastructure deployed successfully!"
 
     - name: Login to Amazon ECR
