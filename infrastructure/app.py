@@ -257,11 +257,7 @@ class ClipItStack(Stack):
             assign_public_ip=True,
             security_groups=[ecs_security_group],
             health_check_grace_period=cdk.Duration.seconds(300),  # 5 minutes
-            enable_execute_command=True,  # Enable debugging
-            deployment_configuration=ecs.DeploymentConfiguration(
-                maximum_percent=200,
-                minimum_healthy_percent=0  # Allow 0% during deployment
-            )
+            enable_execute_command=True  # Enable debugging
         )
 
         worker_service = ecs.FargateService(
@@ -272,11 +268,7 @@ class ClipItStack(Stack):
             service_name="clip-it-worker-service",
             assign_public_ip=True,
             security_groups=[ecs_security_group],
-            enable_execute_command=True,  # Enable debugging
-            deployment_configuration=ecs.DeploymentConfiguration(
-                maximum_percent=200,
-                minimum_healthy_percent=0  # Allow 0% during deployment
-            )
+            enable_execute_command=True  # Enable debugging
         )
 
         # Register web service with target group
