@@ -47,6 +47,7 @@ jobs:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        JSII_SILENCE_WARNING_DEPRECATED_NODE_VERSION: 1
       run: |
         echo "🏗️ Deploying infrastructure..."
         cd infrastructure
@@ -56,13 +57,16 @@ jobs:
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         echo "AWS Account ID: $AWS_ACCOUNT_ID"
         
-        # Check if CDK is already bootstrapped
+        # Check if CDK is properly bootstrapped by checking SSM parameter
         echo "🔍 Checking CDK bootstrap status..."
-        if cdk bootstrap --list | grep -q "aws://$AWS_ACCOUNT_ID/$AWS_DEFAULT_REGION"; then
+        if aws ssm get-parameter --name "/cdk-bootstrap/hnb659fds/version" --region $AWS_DEFAULT_REGION >/dev/null 2>&1; then
           echo "✅ CDK already bootstrapped for this region"
         else
           echo "🔧 Bootstrapping CDK..."
-          cdk bootstrap --require-approval never
+          cdk bootstrap --require-approval never || {
+            echo "⚠️ Bootstrap failed, trying to force bootstrap..."
+            cdk bootstrap --force --require-approval never
+          }
         fi
         
         # Deploy the infrastructure
