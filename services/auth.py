@@ -5,14 +5,15 @@ Authentication service for user management and JWT token handling.
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
+
+from bson import ObjectId
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from config import settings
 from database.connection import get_users_collection
-from models.user import UserCreate, UserInDB, User, TokenData
+from models.user import TokenData, User, UserCreate, UserInDB
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ class AuthService:
             if existing_email:
                 raise ValueError("Email already exists")
 
-            # Create user document
+            # Create user document (password is already sanitized by Pydantic)
             hashed_password = AuthService.get_password_hash(user_create.password)
             user_doc = {
                 "username": user_create.username,

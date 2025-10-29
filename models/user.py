@@ -3,10 +3,11 @@ User models for the authentication system.
 """
 
 from datetime import datetime, timezone
-from typing import Optional, Annotated, List, Dict, Any
-from pydantic import BaseModel, EmailStr, Field, BeforeValidator
-from bson import ObjectId
 from enum import Enum
+from typing import Annotated, Any, Dict, List, Optional
+
+from bson import ObjectId
+from pydantic import BaseModel, BeforeValidator, EmailStr, Field, field_validator
 
 
 def utc_now():
@@ -107,6 +108,50 @@ class UserCreate(UserBase):
     """User creation model"""
     password: str = Field(..., min_length=6, max_length=100)
     privacy_accepted: bool = Field(..., description="User must accept privacy policy")
+    
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v):
+        """Validate and sanitize password"""
+        if not v:
+            raise ValueError("Password is required")
+        
+        # Strip whitespace and check length
+        clean_password = v.strip()
+        if len(clean_password) < 6:
+            raise ValueError("Password must be at least 6 characters long")
+        
+        # Check byte length for bcrypt (max 72 bytes)
+        if len(clean_password.encode("utf-8")) > 72:
+            raise ValueError("Password cannot be longer than 72 bytes")
+        
+        return clean_password
+    
+    @field_validator('username', 'first_name', 'last_name')
+    @classmethod
+    def validate_string_fields(cls, v):
+        """Validate and sanitize string fields"""
+        if not v:
+            raise ValueError("Field cannot be empty")
+        
+        clean_value = v.strip()
+        if not clean_value:
+            raise ValueError("Field cannot be empty after trimming whitespace")
+        
+        return clean_value
+    
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v):
+        """Validate and normalize email"""
+        if not v:
+            raise ValueError("Email is required")
+        
+        clean_email = v.strip().lower()
+        if not clean_email:
+            raise ValueError("Email cannot be empty after trimming whitespace")
+        
+        return clean_email
 
 
 class UserUpdate(BaseModel):
