@@ -133,7 +133,7 @@ async def identify_engaging_segments(
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-4.1",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",

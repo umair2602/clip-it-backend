@@ -15,11 +15,17 @@ from typing import Any, Dict, List, Optional, Union
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Annotated
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, HttpUrl
+
+# Import logging configuration
+from logging_config import setup_logging
+
+# Set up logging to file and console
+setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
 
 # Import configuration
 from config import settings
@@ -67,9 +73,8 @@ def generate_video_thumbnail(video_path, thumbnail_path, timestamp=1.0):
     cap.release()
     return False
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Logging is now configured in logging_config.py (imported above)
+# The old basicConfig has been removed to avoid conflicts
 
 # Create FastAPI app
 app = FastAPI(
