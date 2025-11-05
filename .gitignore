@@ -56,3 +56,6 @@ outputs/*
 
 # TikTok credentials
 tiktok_credentials.json
+
+# virutal
+.venv
