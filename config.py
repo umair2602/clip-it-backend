@@ -63,9 +63,10 @@ class Settings:
     S3_OUTPUT_PREFIX = "outputs/"
     
     # Processing settings
-    MIN_CLIP_DURATION = 20 # Minimum clip duration in seconds
-    PREFERRED_CLIP_DURATION = 180  # Preferred clip duration in seconds
-    MAX_CLIPS_PER_EPISODE = 10  # Maximum number of clips to extract per episode
+    MIN_CLIP_DURATION = 20 # Minimum clip duration in seconds (20-60 second range for proper context)
+    MAX_CLIP_DURATION = 60 # Maximum clip duration in seconds (20-60 second range, ideal for social media)
+    PREFERRED_CLIP_DURATION = 30  # Preferred clip duration in seconds (30 sec for social media)
+    MAX_CLIPS_PER_EPISODE = 20  # Maximum number of clips to extract per episode
     
     # Video settings
     OUTPUT_WIDTH = 1080  # Width for vertical video (9:16 aspect ratio)

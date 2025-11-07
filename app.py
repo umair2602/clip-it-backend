@@ -479,6 +479,39 @@ async def get_status(task_id: str):
 async def get_clips(video_id: str):
     """Get clips for a video from the database"""
     try:
+        # First try the new user video service structure
+        from services.user_video_service import get_user_video_by_video_id
+        video_info = await get_user_video_by_video_id(video_id)
+        
+        if video_info:
+            # Get clips from the video document
+            clips_data = video_info.get('clips', [])
+            clips = []
+            
+            for clip_doc in clips_data:
+                clip = {
+                    "id": str(clip_doc.get("id")),
+                    "title": clip_doc.get("title"),
+                    "start_time": clip_doc.get("start_time", 0),
+                    "end_time": clip_doc.get("end_time", 0),
+                    "duration": clip_doc.get("duration", 0),
+                    "s3_key": clip_doc.get("s3_key"),
+                    "s3_url": clip_doc.get("s3_url"),
+                    "thumbnail_url": clip_doc.get("thumbnail_url"),
+                    "transcription": clip_doc.get("transcription", ""),
+                    "created_at": clip_doc.get("created_at").isoformat() if clip_doc.get("created_at") else None
+                }
+                clips.append(clip)
+            
+            response = {"clips": clips}
+            
+            # Validate response URLs
+            assert_response_urls(response, "clips endpoint response")
+            
+            logging.info(f"Retrieved {len(clips)} clips for video {video_id}")
+            return response
+        
+        # Fallback to old structure if video not found in new structure
         db = get_database()
         clips_collection = db.clips
         
