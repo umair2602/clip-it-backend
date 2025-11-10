@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables from .env file
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 def clean_env_value(value):
     """Clean environment variable value by removing surrounding quotes if present"""
@@ -90,14 +92,19 @@ class Settings:
     # TikTok settings - Clean any quotes that might be accidentally added
     TIKTOK_CLIENT_KEY = clean_env_value(os.getenv("TIKTOK_CLIENT_KEY", "sbawq3ct99ep10ssn9"))
     TIKTOK_CLIENT_SECRET = clean_env_value(os.getenv("TIKTOK_CLIENT_SECRET", "your_client_secret_here"))
+    
+
+    
+    
     # Force trailing slash to match console; also expose a no-trailing route
-    TIKTOK_REDIRECT_URI = clean_env_value(os.getenv("TIKTOK_REDIRECT_URI", "https://social-viper-accepted.ngrok-free.app/tiktok/callback/"))
+    TIKTOK_REDIRECT_URI = clean_env_value(os.getenv("TIKTOK_REDIRECT_URI", "http://localhost:8000/tiktok/callback/"))
     TIKTOK_SCOPES = clean_env_value(os.getenv("TIKTOK_SCOPES", "user.info.basic,user.info.profile,video.publish,video.upload"))
     TIKTOK_API_BASE = clean_env_value(os.getenv("TIKTOK_API_BASE", "https://open.tiktokapis.com/v2"))
     TIKTOK_AUTH_BASE = clean_env_value(os.getenv("TIKTOK_AUTH_BASE", "https://www.tiktok.com/v2"))
 
 # Create settings instance
 settings = Settings()
+
 
 # Create necessary directories
 settings.UPLOAD_DIR.mkdir(exist_ok=True)
