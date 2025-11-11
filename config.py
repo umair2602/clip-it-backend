@@ -102,6 +102,9 @@ class Settings:
     TIKTOK_API_BASE = clean_env_value(os.getenv("TIKTOK_API_BASE", "https://open.tiktokapis.com/v2"))
     TIKTOK_AUTH_BASE = clean_env_value(os.getenv("TIKTOK_AUTH_BASE", "https://www.tiktok.com/v2"))
 
+    # Proxy base URL
+    PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
+
 # Create settings instance
 settings = Settings()
 
