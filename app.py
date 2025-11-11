@@ -39,6 +39,7 @@ from services.user_video_service import create_user_video, update_video_s3_url, 
 
 # Import S3 client and validator
 from utils.s3_storage import s3_client
+from utils.s3_storage_multipart import multipart_s3_client  # For optimized multipart uploads
 from utils.s3_validator import assert_s3_url, validate_response_urls, sanitize_urls_for_response, assert_response_urls
 from utils.sieve_downloader import download_youtube_video_sieve
 
@@ -72,6 +73,138 @@ def generate_video_thumbnail(video_path, thumbnail_path, timestamp=1.0):
         return True
     cap.release()
     return False
+
+
+# ============================================================================
+# PARALLEL CLIP PROCESSING FUNCTIONS
+# ============================================================================
+
+async def process_single_clip_async(
+    clip: dict,
+    index: int,
+    file_path: str,
+    video_id: str,
+    output_dir: str,
+    s3_client_instance
+) -> tuple:
+    """
+    Process a single clip completely (creation + thumbnail + upload).
+    
+    Returns tuple of (index, result_dict) for result tracking
+    """
+    try:
+        logging.info(f"[PARALLEL] Starting async processing of clip {index}: {clip.get('id')}")
+        
+        # Step 1: Create the clip
+        clip_path = await create_clip(
+            video_path=file_path,
+            output_dir=output_dir,
+            start_time=clip["start_time"],
+            end_time=clip["end_time"],
+            clip_id=clip.get("id"),
+        )
+        
+        if not clip_path:
+            logging.warning(f"[PARALLEL] Failed to create clip {index}")
+            return index, None
+        
+        logging.info(f"[PARALLEL] Clip {index} created at {clip_path}")
+        
+        # Step 2: Generate thumbnail
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_thumb:
+            thumbnail_path = temp_thumb.name
+        
+        clip_duration = clip.get("end_time", 0) - clip.get("start_time", 0)
+        thumbnail_timestamp = (
+            min(clip_duration / 3, clip_duration - 0.5)
+            if clip_duration > 1.5
+            else 0
+        )
+        
+        generated_path = await generate_thumbnail(
+            clip_path, thumbnail_path, thumbnail_timestamp
+        )
+        
+        logging.info(f"[PARALLEL] Clip {index} thumbnail generated: {generated_path}")
+        
+        # Step 3: Upload to S3 (clip and thumbnail in parallel)
+        clip_upload = asyncio.create_task(
+            _upload_clip_to_s3_async(clip_path, video_id, clip.get("id"), s3_client_instance)
+        )
+        
+        thumbnail_upload = None
+        if generated_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+            thumbnail_upload = asyncio.create_task(
+                _upload_thumbnail_to_s3_async(thumbnail_path, video_id, clip.get("id"), s3_client_instance)
+            )
+        
+        # Wait for both uploads
+        clip_result = await clip_upload
+        thumb_result = await thumbnail_upload if thumbnail_upload else (False, None)
+        
+        logging.info(f"[PARALLEL] Clip {index} upload: {clip_result[0]}, Thumbnail upload: {thumb_result[0]}")
+        
+        # Step 4: Cleanup
+        try:
+            if os.path.exists(clip_path):
+                os.unlink(clip_path)
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.unlink(thumbnail_path)
+        except Exception as cleanup_err:
+            logging.warning(f"[PARALLEL] Cleanup error for clip {index}: {cleanup_err}")
+        
+        # Return results
+        return index, {
+            'clip_s3_key': clip_result[1],
+            'thumbnail_s3_key': thumb_result[1],
+            'title': clip.get('title'),
+            'start_time': clip.get('start_time'),
+            'end_time': clip.get('end_time'),
+        }
+        
+    except Exception as e:
+        logging.error(f"[PARALLEL] Error processing clip {index}: {str(e)}")
+        import traceback
+        logging.error(f"[PARALLEL] Traceback: {traceback.format_exc()}")
+        return index, None
+
+
+async def _upload_clip_to_s3_async(clip_path: str, video_id: str, clip_id: str, s3_client_instance) -> tuple:
+    """Wrapper for async S3 clip upload (runs in thread pool)
+    
+    Automatically uses multipart upload for large files (>50MB)
+    """
+    loop = asyncio.get_event_loop()
+    
+    # Check file size to decide upload method
+    file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+    
+    # Use multipart for files > 50MB, regular for smaller
+    if file_size > 50 * 1024 * 1024:
+        logging.info(f"[PARALLEL] File size {file_size / 1024 / 1024:.1f}MB - using optimized multipart upload")
+        return await loop.run_in_executor(
+            None,
+            lambda: multipart_s3_client.upload_clip_to_s3_optimized(clip_path, video_id, clip_id)
+        )
+    else:
+        logging.info(f"[PARALLEL] File size {file_size / 1024 / 1024:.1f}MB - using standard upload")
+        return await loop.run_in_executor(
+            None,
+            lambda: s3_client_instance.upload_clip_to_s3(clip_path, video_id, clip_id)
+        )
+
+
+async def _upload_thumbnail_to_s3_async(thumb_path: str, video_id: str, clip_id: str, s3_client_instance) -> tuple:
+    """Wrapper for async S3 thumbnail upload (runs in thread pool)"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: s3_client_instance.upload_thumbnail_to_s3(thumb_path, video_id, clip_id)
+    )
+
+# ============================================================================
+# END PARALLEL CLIP PROCESSING FUNCTIONS
+# ============================================================================
 
 # Logging is now configured in logging_config.py (imported above)
 # The old basicConfig has been removed to avoid conflicts
@@ -1287,128 +1420,87 @@ async def process_podcast(
             # Continue with empty clips list
             clips = []
 
-        # Upload clips to S3 and generate thumbnails
-        for i, clip in enumerate(clips):
-            # Update progress
-            progress_increment = 30 / max(len(clips), 1)
-            progress = 60 + (i * progress_increment)
-
+        # ====================================================================
+        # PARALLEL CLIP PROCESSING - Process multiple clips at same time
+        # ====================================================================
+        
+        if clips:
+            logging.info(f"[PARALLEL] Starting parallel processing of {len(clips)} clips")
+            
+            import time
+            parallel_start_time = time.time()
+            
+            # Prepare for parallel processing
+            MAX_CONCURRENT_CLIPS = 3  # Adjust based on system resources
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIPS)
+            
+            async def bounded_process_clip(clip, idx):
+                """Process clip with concurrency limit"""
+                async with semaphore:
+                    return await process_single_clip_async(
+                        clip, idx, file_path, video_id, output_dir, s3_client
+                    )
+            
+            # Update progress - starting parallel processing
             tasks[task_id].update(
                 {
-                    "progress": progress,
-                    "message": f"Processing clip {i + 1}/{len(clips)}",
+                    "progress": "60",
+                    "message": f"Processing {len(clips)} clips in parallel...",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }
             )
-
-            # Also update the original task if it exists
+            
             if original_task_id and original_task_id in tasks:
                 tasks[original_task_id].update(
                     {
-                        "progress": progress,
-                        "message": f"Processing clip {i + 1}/{len(clips)}",
+                        "progress": "60",
+                        "message": f"Processing {len(clips)} clips in parallel...",
                         "updated_at": datetime.datetime.now().isoformat(),
                     }
                 )
-
-            # Upload clip to S3
-            clip_path = clip.get("path")
-            if clip_path and os.path.exists(clip_path):
-                # Generate thumbnail for this clip BEFORE uploading to S3
-                thumbnail_filename = f"{clip.get('id')}_thumbnail.jpg"
-                
-                # Create temporary thumbnail file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_thumb:
-                    thumbnail_path = temp_thumb.name
-
-                try:
-                    # Generate thumbnail at 1/3 of the clip duration
-                    clip_duration = clip.get("end_time", 0) - clip.get("start_time", 0)
-                    thumbnail_timestamp = (
-                        min(clip_duration / 3, clip_duration - 0.5)
-                        if clip_duration > 1.5
-                        else 0
-                    )
-
-                    # Generate thumbnail
-                    logging.info(
-                        f"Generating thumbnail for clip {clip.get('id')} at path {thumbnail_path}"
-                    )
-                    generated_path = await generate_thumbnail(
-                        clip_path, thumbnail_path, thumbnail_timestamp
-                    )
-
-                    # Verify the thumbnail exists and has content
-                    if (
-                        generated_path
-                        and os.path.exists(thumbnail_path)
-                        and os.path.getsize(thumbnail_path) > 0
-                    ):
-                        # Upload thumbnail to S3
-                        try:
-                            thumb_success, thumb_s3_key = s3_client.upload_thumbnail_to_s3(
-                                thumbnail_path, video_id, clip.get("id")
-                            )
-                            
-                            if thumb_success:
-                                thumb_s3_url = s3_client.get_object_url(thumb_s3_key)
-                                clips[i]["thumbnail_s3_key"] = thumb_s3_key
-                                clips[i]["thumbnail_url"] = thumb_s3_url
-                                logging.info(f"Thumbnail uploaded to S3: {thumb_s3_url}")
-                            else:
-                                logging.warning("Failed to upload thumbnail to S3, using default")
-                                clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
-                        except Exception as thumb_upload_error:
-                            logging.error(f"Exception during thumbnail upload for clip {clip.get('id')}: {thumb_upload_error}")
-                            clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
+            
+            # Create all clip processing tasks
+            clip_tasks = [
+                bounded_process_clip(clip, i)
+                for i, clip in enumerate(clips)
+            ]
+            
+            # Run all tasks in parallel
+            logging.info(f"[PARALLEL] Running {len(clip_tasks)} clips in parallel (max {MAX_CONCURRENT_CLIPS} concurrent)")
+            results = await asyncio.gather(*clip_tasks, return_exceptions=True)
+            
+            # Process results
+            logging.info(f"[PARALLEL] All clips processed, updating results...")
+            for result in results:
+                if result and isinstance(result, tuple):
+                    index, data = result[0], result[1]
+                    if data:
+                        clips[index]['s3_key'] = data['clip_s3_key']
+                        clips[index]['s3_url'] = s3_client.get_object_url(data['clip_s3_key']) if data['clip_s3_key'] else None
+                        clips[index]['thumbnail_s3_key'] = data['thumbnail_s3_key']
+                        clips[index]['thumbnail_url'] = s3_client.get_object_url(data['thumbnail_s3_key']) if data['thumbnail_s3_key'] else "/static/default_thumbnail.jpg"
+                        logging.info(f"[PARALLEL] ✅ Clip {index} complete - S3 URL: {clips[index].get('s3_url')}")
                     else:
-                        logging.warning(
-                            f"Thumbnail generation returned success but file doesn't exist or is empty: {thumbnail_path}"
-                        )
-                        clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
-                except Exception as thumb_error:
-                    logging.error(f"Error generating thumbnail: {str(thumb_error)}")
-                    clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
-                finally:
-                    # Clean up temporary thumbnail file
-                    try:
-                        os.unlink(thumbnail_path)
-                    except:
-                        pass
-
-                # Upload clip to S3
-                logging.info(f"Uploading clip {clip.get('id')} to S3...")
-                logging.info(f"Clip path: {clip_path}")
-                logging.info(f"Clip exists: {os.path.exists(clip_path) if clip_path else False}")
-                
-                try:
-                    success, clip_s3_key = s3_client.upload_clip_to_s3(
-                        clip_path, video_id, clip.get("id"), clip.get("title")
-                    )
-                    
-                    if success:
-                        clip_s3_url = s3_client.get_object_url(clip_s3_key)
-                        clips[i]["s3_key"] = clip_s3_key
-                        clips[i]["s3_url"] = clip_s3_url
-                        logging.info(f"✅ Clip uploaded to S3: {clip_s3_url}")
-                        
-                        # Clean up local clip file after successful S3 upload
-                        try:
-                            os.unlink(clip_path)
-                            logging.info(f"Deleted local clip file: {clip_path}")
-                        except Exception as cleanup_error:
-                            logging.warning(f"Failed to delete local clip file {clip_path}: {cleanup_error}")
-                    else:
-                        logging.error(f"❌ Failed to upload clip {clip.get('id')} to S3")
-                        clips[i]["s3_url"] = None
-                except Exception as s3_upload_error:
-                    logging.error(f"❌ Exception during S3 upload for clip {clip.get('id')}: {s3_upload_error}")
+                        logging.warning(f"[PARALLEL] ❌ Clip {index} returned None results")
+                        clips[index]['thumbnail_url'] = "/static/default_thumbnail.jpg"
+                elif isinstance(result, Exception):
+                    logging.error(f"[PARALLEL] ❌ Clip raised exception: {result}")
                     import traceback
-                    logging.error(f"Traceback: {traceback.format_exc()}")
-                    clips[i]["s3_url"] = None
-            else:
-                logging.warning(f"Clip file doesn't exist or is invalid: {clip_path}")
-                clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
+                    logging.error(f"[PARALLEL] Traceback: {traceback.format_exc()}")
+                else:
+                    logging.warning(f"[PARALLEL] ❌ Clip returned invalid result type")
+            
+            parallel_elapsed = time.time() - parallel_start_time
+            logging.info(f"[PARALLEL] ⏱️  Total time: {parallel_elapsed:.1f}s")
+            logging.info(f"[PARALLEL] 📊 Average per clip: {parallel_elapsed/len(clips):.1f}s")
+            if len(clips) > 1:
+                sequential_estimate = parallel_elapsed * len(clips) / MAX_CONCURRENT_CLIPS
+                speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
+                logging.info(f"[PARALLEL] 📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
+            
+            logging.info(f"[PARALLEL] ✅ Parallel processing complete for all {len(clips)} clips")
+        else:
+            logging.info("No clips to process")
 
         # Validate S3 URLs in clips
         logging.info(f"Starting S3 URL validation for {len(clips)} clips")

@@ -57,3 +57,6 @@ outputs/*
 
 # TikTok credentials
 tiktok_credentials.json
+
+# Documentation files (optimization guides and performance analysis)
+docs/optimization/
