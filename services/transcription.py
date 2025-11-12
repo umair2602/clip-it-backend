@@ -200,15 +200,6 @@ def transcribe_audio_sync(
                             
                             logger.info("="*70)
                             
-                            # Also save to a dedicated transcript file
-                            try:
-                                transcript_file = os.path.join("logs", f"transcript_{int(time.time())}.txt")
-                                with open(transcript_file, "w", encoding="utf-8") as f:
-                                    f.write(result["transcript_for_ai"])
-                                logger.info(f"Transcript saved to: {transcript_file}")
-                            except Exception as e:
-                                logger.warning(f"Could not save transcript file: {str(e)}")
-                            
                             # Also log to file for immediate visibility
                             logger.info("\n" + "="*70)
                             logger.info("AI-READY TRANSCRIPT (for clip generation)")
@@ -385,22 +376,6 @@ async def transcribe_audio(
                     logger.info(f"Segment {i}: [{seg.get('start', 0):.2f}s - {seg.get('end', 0):.2f}s] {seg.get('text', '')}")
                 logger.info("="*70)
                 
-                # Also save raw transcript to file
-                try:
-                    os.makedirs("logs", exist_ok=True)
-                    raw_transcript_file = os.path.join("logs", f"raw_transcript_{int(time.time())}.txt")
-                    with open(raw_transcript_file, "w", encoding="utf-8") as f:
-                        f.write("RAW WHISPER TRANSCRIPT\n")
-                        f.write("="*70 + "\n")
-                        f.write(f"Language: {result.get('language', 'unknown')}\n")
-                        f.write(f"Full Text: {result.get('text', '')}\n\n")
-                        f.write("SEGMENTS:\n")
-                        f.write("-"*70 + "\n")
-                        for i, seg in enumerate(result.get('segments', [])):
-                            f.write(f"[{seg.get('start', 0):.2f}s - {seg.get('end', 0):.2f}s] {seg.get('text', '')}\n")
-                    logger.info(f"Raw transcript saved to: {raw_transcript_file}")
-                except Exception as e:
-                    logger.warning(f"Could not save raw transcript file: {str(e)}")
             except Exception as e:
                 error_str = str(e).lower()
 
@@ -541,15 +516,6 @@ async def transcribe_audio(
                                 logger.info(line)
                         
                         logger.info("="*70)
-                        
-                        # Also save to a dedicated transcript file
-                        try:
-                            transcript_file = os.path.join("logs", f"transcript_{int(time.time())}.txt")
-                            with open(transcript_file, "w", encoding="utf-8") as f:
-                                f.write(result["transcript_for_ai"])
-                            logger.info(f"Transcript saved to: {transcript_file}")
-                        except Exception as e:
-                            logger.warning(f"Could not save transcript file: {str(e)}")
                         
                         # Also print to console for immediate visibility
                         print("\n" + "="*70)

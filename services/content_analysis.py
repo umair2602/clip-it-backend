@@ -107,18 +107,6 @@ async def identify_engaging_segments_from_text(
     logger.info("="*70)
     logger.info(transcript_text)
     logger.info("="*70)
-    
-    # Also save to file for easy reference
-    try:
-        os.makedirs("logs", exist_ok=True)
-        ai_input_file = os.path.join("logs", f"ai_input_{int(time.time())}.txt")
-        with open(ai_input_file, "w", encoding="utf-8") as f:
-            f.write("TRANSCRIPT SENT TO AI FOR CLIP GENERATION (WITH SPEAKER LABELS)\n")
-            f.write("="*70 + "\n\n")
-            f.write(transcript_text)
-        logger.info(f"AI input transcript saved to: {ai_input_file}")
-    except Exception as e:
-        logger.warning(f"Could not save AI input file: {str(e)}")
 
     # Create prompt for OpenAI
     prompt = f"""
@@ -300,18 +288,6 @@ async def identify_engaging_segments(
     logger.info("="*70)
     logger.info(transcript_text)
     logger.info("="*70)
-    
-    # Also save to file for easy reference
-    try:
-        os.makedirs("logs", exist_ok=True)
-        ai_input_file = os.path.join("logs", f"ai_input_{int(time.time())}.txt")
-        with open(ai_input_file, "w", encoding="utf-8") as f:
-            f.write("TRANSCRIPT SENT TO AI FOR CLIP GENERATION\n")
-            f.write("="*70 + "\n\n")
-            f.write(transcript_text)
-        logger.info(f"AI input transcript saved to: {ai_input_file}")
-    except Exception as e:
-        logger.warning(f"Could not save AI input file: {str(e)}")
 
     # Create prompt for OpenAI
     prompt = f"""
