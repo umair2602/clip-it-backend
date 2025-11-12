@@ -1,9 +1,11 @@
 import json
+import logging
 import os
 import subprocess
 # Import configuration
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +18,9 @@ from services.face_tracking import get_face_coordinates, track_faces
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import settings
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 async def process_video(
     video_path: str, transcript: Dict[str, Any], segments: List[Dict[str, Any]]
@@ -31,22 +36,40 @@ async def process_video(
         List of processed clips with paths
     """
     try:
+        logger.info("="*70)
+        logger.info(f"📹 STARTING VIDEO CLIP CREATION")
+        logger.info(f"Video path: {video_path}")
+        logger.info(f"Number of segments to process: {len(segments)}")
+        logger.info("="*70)
+        
         # Create temporary output directory for processing
         import tempfile
         temp_dir = tempfile.mkdtemp(prefix="clip_processing_")
         output_dir = Path(temp_dir)
-        print(f"Created temporary output directory: {output_dir}")
+        logger.info(f"Created temporary output directory: {output_dir}")
 
-        print("\n\n\n--------------------------------")
-        print("segments in video processing:--", segments)
-        print("--------------------------------\n\n\n")
+        logger.info("\n" + "="*70)
+        logger.info("SEGMENTS TO PROCESS:")
+        for i, seg in enumerate(segments):
+            duration = seg.get('end_time', 0) - seg.get('start_time', 0)
+            logger.info(f"  Segment {i+1}: {seg.get('title', 'Untitled')} ({seg.get('start_time', 0):.1f}s - {seg.get('end_time', 0):.1f}s, duration: {duration:.1f}s)")
+        logger.info("="*70 + "\n")
 
         # Process each segment
         processed_clips = []
+        total_segments = len(segments)
+        
         for i, segment in enumerate(segments):
+            segment_start_time = time.time()
             clip_id = f"clip_{i}"
+            
+            logger.info(f"\n{'='*70}")
+            logger.info(f"🎬 Processing Clip {i+1}/{total_segments}: {segment.get('title', 'Untitled')}")
+            logger.info(f"   Timestamp: {segment['start_time']:.1f}s - {segment['end_time']:.1f}s")
+            logger.info(f"{'='*70}")
 
             # Create the clip
+            logger.info(f"   ⏳ Step 1/3: Creating video clip...")
             clip_path = await create_clip(
                 video_path=video_path,
                 output_dir=str(output_dir),
@@ -57,7 +80,10 @@ async def process_video(
 
             # Only add to processed clips if a clip was created (faces were detected)
             if clip_path is not None:
+                logger.info(f"   ✅ Clip created successfully: {clip_path}")
+                
                 # Generate thumbnail for this clip
+                logger.info(f"   ⏳ Step 2/3: Generating thumbnail...")
                 thumbnail_filename = f"{clip_id}_thumbnail.jpg"
                 thumbnail_path = str(output_dir / thumbnail_filename)
 
@@ -66,25 +92,25 @@ async def process_video(
                     await generate_thumbnail(
                         video_path=clip_path, output_path=thumbnail_path
                     )
-                    print(f"Generated thumbnail at {thumbnail_path}")
+                    logger.info(f"   ✅ Thumbnail generated: {thumbnail_path}")
 
                     # Verify the thumbnail exists
                     if not os.path.exists(thumbnail_path):
-                        print(
-                            f"WARNING: Thumbnail file does not exist at {thumbnail_path} despite successful generation"
+                        logger.warning(
+                            f"   ⚠️  Thumbnail file does not exist at {thumbnail_path} despite successful generation"
                         )
                         thumbnail_path = None
                 except Exception as thumb_error:
-                    print(f"Failed to generate thumbnail: {str(thumb_error)}")
+                    logger.error(f"   ❌ Failed to generate thumbnail: {str(thumb_error)}")
                     thumbnail_path = None
 
                 # Construct the thumbnail URL properly (will be set to S3 URL later)
                 thumbnail_url = None
                 if thumbnail_path and os.path.exists(thumbnail_path):
-                    print(f"Thumbnail generated at: {thumbnail_path}")
+                    logger.info(f"   ✅ Thumbnail ready at: {thumbnail_path}")
                 else:
-                    print(
-                        f"Thumbnail doesn't exist at {thumbnail_path}, not setting URL"
+                    logger.warning(
+                        f"   ⚠️  Thumbnail doesn't exist at {thumbnail_path}, not setting URL"
                     )
 
                 processed_clips.append(
@@ -101,14 +127,22 @@ async def process_video(
                     }
                 )
 
-                print(f"Added clip with thumbnail URL: {thumbnail_url}")
+                segment_elapsed = time.time() - segment_start_time
+                logger.info(f"   ⏱️  Clip {i+1}/{total_segments} completed in {segment_elapsed:.2f}s")
+                logger.info(f"   ✅ Successfully processed: {segment.get('title', 'Untitled')}")
             else:
-                print(f"Skipping clip {clip_id} as no faces were detected.")
+                logger.warning(f"   ❌ Clip {i+1}/{total_segments} SKIPPED - No faces detected or creation failed")
+                logger.warning(f"   Segment: {segment.get('title', 'Untitled')}")
+
+        logger.info("\n" + "="*70)
+        logger.info(f"✅ VIDEO PROCESSING COMPLETE")
+        logger.info(f"Total clips created: {len(processed_clips)} out of {total_segments} segments")
+        logger.info("="*70 + "\n")
 
         return processed_clips
 
     except Exception as e:
-        print(f"Error in video processing: {str(e)}")
+        logger.error(f"Error in video processing: {str(e)}", exc_info=True)
         raise
 
 

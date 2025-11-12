@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 
 # Import configuration
 import sys
@@ -22,7 +23,8 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Analyze transcript to identify engaging segments.
 
     Args:
-        transcript: Transcript from Whisper with segments and timestamps
+        transcript: Transcript from Whisper with segments and timestamps.
+                   May include 'transcript_for_ai' field with speaker-labeled text.
 
     Returns:
         List of engaging segments with start and end times
@@ -50,25 +52,222 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
                 }
             ]
 
-        # Prepare segments with timestamps for analysis
-        formatted_segments = []
-        for segment in segments:
-            formatted_segments.append(
-                {
-                    "text": segment.get("text", ""),
-                    "start": segment.get("start", 0),
-                    "end": segment.get("end", 0),
-                }
+        # Check if we have the AI-ready transcript with speaker labels
+        # This is the preferred format for clip generation
+        if "transcript_for_ai" in transcript and transcript["transcript_for_ai"]:
+            logger.info("Using speaker-labeled transcript (transcript_for_ai) for AI analysis")
+            # Use the pre-formatted AI transcript directly
+            engaging_segments = await identify_engaging_segments_from_text(
+                transcript["transcript_for_ai"],
+                segments  # Pass original segments for timestamp reference
             )
+        else:
+            logger.info("Using basic transcript segments (no speaker labels) for AI analysis")
+            # Prepare segments with timestamps for analysis
+            formatted_segments = []
+            for segment in segments:
+                formatted_segments.append(
+                    {
+                        "text": segment.get("text", ""),
+                        "start": segment.get("start", 0),
+                        "end": segment.get("end", 0),
+                    }
+                )
 
-        # Use OpenAI to identify engaging segments
-        engaging_segments = await identify_engaging_segments(formatted_segments)
+            # Use OpenAI to identify engaging segments
+            engaging_segments = await identify_engaging_segments(formatted_segments)
 
         return engaging_segments
 
     except Exception as e:
         logger.error(f"Error in content analysis: {str(e)}")
         raise
+
+
+async def identify_engaging_segments_from_text(
+    transcript_text: str,
+    segments: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Use OpenAI to identify engaging segments from pre-formatted transcript text.
+    
+    This function is used when we have the speaker-labeled transcript ready.
+    
+    Args:
+        transcript_text: Pre-formatted transcript with speaker labels (e.g., transcript_for_ai)
+        segments: Original segments for reference
+        
+    Returns:
+        List of engaging segments with start and end times
+    """
+    logger.info(f"Identifying engaging segments from pre-formatted transcript")
+    
+    # Log the exact transcript being sent to AI
+    logger.info("="*70)
+    logger.info("TRANSCRIPT SENT TO AI (for clip generation)")
+    logger.info("="*70)
+    logger.info(transcript_text)
+    logger.info("="*70)
+    
+    # Also save to file for easy reference
+    try:
+        os.makedirs("logs", exist_ok=True)
+        ai_input_file = os.path.join("logs", f"ai_input_{int(time.time())}.txt")
+        with open(ai_input_file, "w", encoding="utf-8") as f:
+            f.write("TRANSCRIPT SENT TO AI FOR CLIP GENERATION (WITH SPEAKER LABELS)\n")
+            f.write("="*70 + "\n\n")
+            f.write(transcript_text)
+        logger.info(f"AI input transcript saved to: {ai_input_file}")
+    except Exception as e:
+        logger.warning(f"Could not save AI input file: {str(e)}")
+
+    # Create prompt for OpenAI
+    prompt = f"""
+        You are an AI assistant that helps extract engaging video clips from podcast audio transcripts. You will be given a transcript with speaker labels and timestamps in the format:
+
+        [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
+
+        Your job is to:
+        1. Read through the full transcript carefully.
+        2. Identify COMPLETE conversations, stories, or discussions that make compelling standalone clips.
+        3. Select engaging content that tells a FULL STORY from beginning to end.
+        
+        WHAT MAKES A GREAT CLIP:
+        - Contains a COMPLETE conversation, story, or idea from START to FINISH
+        - Has all necessary context - viewers can understand it without hearing anything before
+        - Has a natural conclusion - doesn't end abruptly mid-thought
+        - Includes engaging content: stories, debates, explanations, insights, humor, strong opinions
+        - For multi-speaker clips: includes the ENTIRE exchange (question AND answer, statement AND response)
+        - Stands alone as valuable, entertaining, or informative content
+
+        CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
+        - Each clip should capture COMPLETE conversations, stories, or thoughts from START to FINISH
+        - MINIMUM: 15 seconds (for quick insights or short exchanges)
+        - MAXIMUM: 180 seconds (3 minutes - for in-depth discussions or longer stories)
+        - Target range: 30-90 seconds for most clips
+        - PRIORITY: Completeness over duration - NEVER cut off mid-conversation or mid-thought
+        
+        CONVERSATION BOUNDARY DETECTION (USE SPEAKER LABELS):
+        - Look for natural conversation boundaries using speaker changes
+        - A clip should start when a topic/story BEGINS (even if speaker was mid-sentence before)
+        - A clip should end when the topic/story is FULLY RESOLVED or naturally concludes
+        - If multiple speakers discuss a topic, include the ENTIRE exchange from first mention to resolution
+        - DO NOT cut in the middle of back-and-forth dialogue
+        - Example: If SPEAKER_00 asks a question and SPEAKER_01 answers, include BOTH parts
+        
+        CONTEXT PRESERVATION RULES:
+        1. Find where a NEW topic, story, or idea is introduced
+        2. Trace that topic through ALL speaker contributions until it naturally concludes
+        3. Include setup/context at the beginning (don't start abruptly)
+        4. Include conclusion/resolution at the end (don't end abruptly)
+        5. For debates/discussions: capture the full exchange, not just one side
+        6. For stories: capture from setup through climax to conclusion
+        7. For explanations: capture the question AND the complete answer
+        
+        TIMESTAMP CALCULATION GUIDELINES:
+        1. Identify a complete conversational unit (topic introduction → discussion → resolution)
+        2. Find the EARLIEST point where this topic is mentioned or introduced
+        3. Find the LATEST point where this topic is concluded or naturally transitions
+        4. Set start_time at the topic introduction (even if it's 5-10 seconds before the main content)
+        5. Set end_time when the topic is FULLY resolved (include any follow-up or reactions)
+        6. Duration = end_time - start_time (must be 15-180 seconds)
+        7. If a topic naturally takes 120 seconds, use all 120 seconds - don't artificially truncate
+
+        IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many complete, engaging moments as possible (up to 20 clips).
+        Prioritize COMPLETENESS and quality over quantity - each clip must tell a full story.
+        
+        DO NOT pick random segments or partial conversations. Only select clips where the topic has a clear beginning and end.
+
+        For each selected clip, return a JSON object with:
+        - "start_time": in seconds (where the topic/conversation STARTS)
+        - "end_time": in seconds (where the topic/conversation ENDS completely)
+        - "title": a short, compelling title (4–10 words) that describes the COMPLETE content
+
+        MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
+        - Duration >= 15 seconds (MINIMUM - only for complete quick exchanges)
+        - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
+        - COMPLETE conversation/topic from start to finish
+        - Includes ALL context needed to understand the clip standalone
+        - No abrupt starts or endings - natural entry and exit points
+        - If speakers have back-and-forth, include the ENTIRE exchange
+        - The clip tells a COMPLETE story, not a fragment
+
+        Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
+
+        Transcript:
+        {transcript_text}
+        """
+
+    # Call OpenAI API
+    response = await aclient.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an AI assistant that analyzes podcast transcripts with speaker labels to find engaging segments for social media clips.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.6,
+        max_tokens=4000,
+        n=1,
+        stop=None,
+    )
+
+    # Parse response
+    try:
+        response_content = response.choices[0].message.content
+        logger.info("OpenAI Response Content:")
+        logger.info(response_content)
+
+        # Try to extract JSON from the response
+        # Sometimes the model might include markdown code blocks
+        import re
+
+        json_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", response_content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # If no code block, assume the entire response is JSON
+            json_str = response_content
+
+        segments = json.loads(json_str)
+        
+        logger.info(f"📊 Parsed {len(segments)} segments from OpenAI")
+
+        # Validate and filter segments
+        valid_segments = []
+        for seg in segments:
+            duration = seg.get("end_time", 0) - seg.get("start_time", 0)
+            
+            # Log segment info for debugging
+            logger.info(f"Segment: {seg.get('title')} | Duration: {duration:.1f}s | Start: {seg.get('start_time')}s | End: {seg.get('end_time')}s")
+            
+            if duration < 15:
+                logger.warning(
+                    f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < 15s minimum)"
+                )
+                continue
+            
+            if duration > 180:
+                logger.warning(
+                    f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > 180s maximum, 3 minutes)"
+                )
+                continue
+            
+            valid_segments.append(seg)
+
+        logger.info(f"✅ Validated {len(valid_segments)} segments (filtered out {len(segments) - len(valid_segments)} invalid)")
+        
+        return valid_segments
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing OpenAI response as JSON: {str(e)}")
+        logger.error(f"Response content: {response_content}")
+        # Return empty list instead of failing
+        return []
+    except Exception as e:
+        logger.error(f"Error parsing OpenAI response: {str(e)}")
+        return []
 
 
 async def identify_engaging_segments(
@@ -94,6 +293,25 @@ async def identify_engaging_segments(
         )
 
     logger.debug(f"Transcript text length: {len(transcript_text)} characters")
+    
+    # Log the exact transcript being sent to AI
+    logger.info("="*70)
+    logger.info("TRANSCRIPT SENT TO AI (for clip generation)")
+    logger.info("="*70)
+    logger.info(transcript_text)
+    logger.info("="*70)
+    
+    # Also save to file for easy reference
+    try:
+        os.makedirs("logs", exist_ok=True)
+        ai_input_file = os.path.join("logs", f"ai_input_{int(time.time())}.txt")
+        with open(ai_input_file, "w", encoding="utf-8") as f:
+            f.write("TRANSCRIPT SENT TO AI FOR CLIP GENERATION\n")
+            f.write("="*70 + "\n\n")
+            f.write(transcript_text)
+        logger.info(f"AI input transcript saved to: {ai_input_file}")
+    except Exception as e:
+        logger.warning(f"Could not save AI input file: {str(e)}")
 
     # Create prompt for OpenAI
     prompt = f"""
@@ -112,39 +330,38 @@ async def identify_engaging_segments(
         - Be valuable or entertaining to people
 
         CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
-        - Each clip should be between 20-60 seconds long to ensure proper context and engagement
-        - Target around 30-40 seconds for optimal social media performance
-        - MINIMUM: 20 seconds (clips shorter than this will be REJECTED)
-        - MAXIMUM: 60 seconds (1 minute - ideal for TikTok, Instagram Reels, YouTube Shorts)
-        - Choose duration based on the content: expand timestamps to capture complete thoughts/stories
-        - Example: If an interesting moment spans 25 seconds, set start_time and end_time to capture those 25 seconds
-        - Example: If a story takes 45 seconds to tell completely, use the full 45 seconds
-        - Example: For a quick insight at 500s that takes 35 seconds: start_time=500, end_time=535
+        - Each clip should capture COMPLETE conversations, stories, or thoughts from START to FINISH
+        - MINIMUM: 15 seconds (for quick insights or short exchanges)
+        - MAXIMUM: 180 seconds (3 minutes - for in-depth discussions or longer stories)
+        - Target range: 30-90 seconds for most clips
+        - PRIORITY: Completeness over duration - NEVER cut off mid-conversation or mid-thought
 
         TIMESTAMP CALCULATION GUIDELINES:
-        1. Identify the most interesting moment or topic in a section
-        2. Find where the topic/story BEGINS (include a bit of context if needed)
-        3. Find where the topic/story ENDS (ensure the thought is complete)
-        4. Calculate duration = end_time - start_time
-        5. Ensure duration is >= 20 seconds AND <= 60 seconds
-        6. If a topic is naturally shorter than 20 seconds, expand to include surrounding context
-        7. If a topic is longer than 60 seconds, select the most compelling 30-60 second portion
+        1. Identify a complete conversational unit (topic introduction → discussion → resolution)
+        2. Find the EARLIEST point where this topic is mentioned or introduced
+        3. Find the LATEST point where this topic is concluded or naturally transitions
+        4. Set start_time at the topic introduction (even if it's 5-10 seconds before the main content)
+        5. Set end_time when the topic is FULLY resolved (include any follow-up or reactions)
+        6. Duration = end_time - start_time (must be 15-180 seconds)
+        7. If a topic naturally takes 120 seconds, use all 120 seconds - don't artificially truncate
 
         IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many interesting moments as possible (up to 20 clips).
-        Prioritize quality over quantity - each clip should be genuinely engaging and self-contained.
+        Prioritize COMPLETENESS and quality over quantity - each clip must tell a full story.
         
-        DO NOT pick random segments. Only select clips that could realistically go viral or spark curiosity, debate, or learning.
+        DO NOT pick random segments or partial conversations. Only select clips where the topic has a clear beginning and end.
 
         For each selected clip, return a JSON object with:
-        - "start_time": in seconds (beginning of the interesting segment)
-        - "end_time": in seconds (end of the segment - must be at least start_time + 20)
-        - "title": a short, compelling title (4–10 words)
+        - "start_time": in seconds (where the topic/conversation STARTS)
+        - "end_time": in seconds (where the topic/conversation ENDS completely)
+        - "title": a short, compelling title (4–10 words) that describes the COMPLETE content
 
         MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
-        - Duration >= 20 seconds (MINIMUM - anything less will be rejected and wasted)
-        - Duration <= 60 seconds (MAXIMUM - keeps clips social-media friendly)
-        - Complete thought/story (don't cut off mid-sentence)
-        - Self-contained (makes sense without prior context)
+        - Duration >= 15 seconds (MINIMUM - only for complete quick exchanges)
+        - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
+        - COMPLETE conversation/topic from start to finish
+        - Includes ALL context needed to understand the clip standalone
+        - No abrupt starts or endings - natural entry and exit points
+        - The clip tells a COMPLETE story, not a fragment
 
         Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
 

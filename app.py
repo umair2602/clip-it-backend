@@ -1166,7 +1166,12 @@ async def process_podcast(
 
             # Run transcription in separate thread to keep API responsive
             transcript = await loop.run_in_executor(
-                executor, functools.partial(transcribe_audio_sync, file_path, "tiny")
+                executor, functools.partial(
+                    transcribe_audio_sync, 
+                    file_path, 
+                    "tiny",
+                    enable_diarization=True  # Enable speaker diarization
+                )
             )
             if not transcript:
                 raise ValueError("Transcription returned None")

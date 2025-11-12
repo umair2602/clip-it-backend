@@ -54,6 +54,9 @@ class Settings:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     SIEVE_API_KEY = os.getenv("SIEVE_API_KEY")
     
+    # HuggingFace settings (for speaker diarization)
+    HF_TOKEN = os.getenv("HF_TOKEN")
+    
     # AWS S3 settings
     AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -63,9 +66,9 @@ class Settings:
     S3_OUTPUT_PREFIX = "outputs/"
     
     # Processing settings
-    MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-60 second range for proper context)
-    MAX_CLIP_DURATION = 60 # Maximum clip duration in seconds (15-60 second range, ideal for social media)
-    PREFERRED_CLIP_DURATION = 30  # Preferred clip duration in seconds (30 sec for social media)
+    MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-180 second range for complete context)
+    MAX_CLIP_DURATION = 180 # Maximum clip duration in seconds (3 minutes for in-depth conversations)
+    PREFERRED_CLIP_DURATION = 45  # Preferred clip duration in seconds (45 sec for complete thoughts)
     MAX_CLIPS_PER_EPISODE = 20  # Maximum number of clips to extract per episode
     
     # Video settings
