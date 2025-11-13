@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, Depends
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -356,6 +356,13 @@ class YouTubeRequest(BaseModel):
 # In-memory storage for task status (replace with a proper database in production)
 tasks = {}
 
+# Tiktok
+@app.get(f"/tiktok{settings.TIKTOK_VERIFICATION_KEY}.txt")
+async def verify_tiktok_domain():
+    return Response(
+        content=f"tiktok-developers-site-verification={settings.TIKTOK_VERIFICATION_KEY}",
+        media_type="text/plain",
+    )
 
 # Routes
 @app.get("/")

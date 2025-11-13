@@ -47,31 +47,25 @@ async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, 
 async def register_user(user_create: UserCreate):
     """
     Register a new user.
-
-    - **username**: Unique username (3-50 characters)
-    - **first_name**: User's first name (1-50 characters)
-    - **last_name**: User's last name (1-50 characters)
-    - **email**: Valid email address
-    - **password**: Password (minimum 6 characters)
-    - **privacy_accepted**: Must be true to accept privacy policy
-
-    Returns the created user information (without password).
     """
+   
     try:
+        logger.info(f"[REGISTER] Calling auth_service.create_user()...")
         user_in_db = await auth_service.create_user(user_create)
+        logger.info(f"[REGISTER] User created successfully!")
         return auth_service.user_to_dict(user_in_db)
     except ValueError as e:
+        logger.error(f"[REGISTER] ValueError: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Error registering user: {str(e)}")
+        logger.error(f"[REGISTER] Unexpected error: {type(e).__name__}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
         )
-
 
 @router.post("/login", response_model=Token)
 async def login_user(user_login: UserLogin):
