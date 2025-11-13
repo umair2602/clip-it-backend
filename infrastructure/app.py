@@ -145,44 +145,6 @@ class ClipItStack(Stack):
             removal_policy=cdk.RemovalPolicy.DESTROY
         )
 
-        # Reference existing SSM parameters (they already exist as SecureString)
-        # These parameters were created outside of CDK using scripts/setup-secrets.sh
-        # We reference them rather than creating them to avoid conflicts
-        openai_api_key_param = ssm.StringParameter.from_string_parameter_name(
-            self, "OpenAIAPIKey",
-            string_parameter_name="/clip-it/openai-api-key"
-        )
-        
-        sieve_api_key_param = ssm.StringParameter.from_string_parameter_name(
-            self, "SieveAPIKey",
-            string_parameter_name="/clip-it/sieve-api-key"
-        )
-        
-        mongodb_url_param = ssm.StringParameter.from_string_parameter_name(
-            self, "MongoDBURL",
-            string_parameter_name="/clip-it/mongodb-url"
-        )
-        
-        jwt_secret_key_param = ssm.StringParameter.from_string_parameter_name(
-            self, "JWTSecretKey",
-            string_parameter_name="/clip-it/jwt-secret-key"
-        )
-        
-        tiktok_client_key_param = ssm.StringParameter.from_string_parameter_name(
-            self, "TikTokClientKey",
-            string_parameter_name="/clip-it/tiktok-client-key"
-        )
-        
-        tiktok_client_secret_param = ssm.StringParameter.from_string_parameter_name(
-            self, "TikTokClientSecret",
-            string_parameter_name="/clip-it/tiktok-client-secret"
-        )
-        
-        tiktok_redirect_uri_param = ssm.StringParameter.from_string_parameter_name(
-            self, "TikTokRedirectURI",
-            string_parameter_name="/clip-it/tiktok-redirect-uri"
-        )
-
         # Environment variables (non-sensitive)
         env_vars = {
             "REDIS_URL": f"redis://{redis_cluster.attr_redis_endpoint_address}:6379",
@@ -203,14 +165,51 @@ class ClipItStack(Stack):
         }
         
         # Secrets from SSM (sensitive values)
+        # Using from_secure_string_parameter_attributes for SecureString parameters
+        # These parameters already exist in SSM as SecureString (created via scripts/setup-secrets.sh)
         secrets = {
-            "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(openai_api_key_param),
-            "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(sieve_api_key_param),
-            "MONGODB_URL": ecs.Secret.from_ssm_parameter(mongodb_url_param),
-            "JWT_SECRET_KEY": ecs.Secret.from_ssm_parameter(jwt_secret_key_param),
-            "TIKTOK_CLIENT_KEY": ecs.Secret.from_ssm_parameter(tiktok_client_key_param),
-            "TIKTOK_CLIENT_SECRET": ecs.Secret.from_ssm_parameter(tiktok_client_secret_param),
-            "TIKTOK_REDIRECT_URI": ecs.Secret.from_ssm_parameter(tiktok_redirect_uri_param),
+            "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "OpenAIAPIKeyRef",
+                    parameter_name="/clip-it/openai-api-key"
+                )
+            ),
+            "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "SieveAPIKeyRef",
+                    parameter_name="/clip-it/sieve-api-key"
+                )
+            ),
+            "MONGODB_URL": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "MongoDBURLRef",
+                    parameter_name="/clip-it/mongodb-url"
+                )
+            ),
+            "JWT_SECRET_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "JWTSecretKeyRef",
+                    parameter_name="/clip-it/jwt-secret-key"
+                )
+            ),
+            "TIKTOK_CLIENT_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokClientKeyRef",
+                    parameter_name="/clip-it/tiktok-client-key"
+                )
+            ),
+            "TIKTOK_CLIENT_SECRET": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokClientSecretRef",
+                    parameter_name="/clip-it/tiktok-client-secret"
+                )
+            ),
+            "TIKTOK_REDIRECT_URI": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokRedirectURIRef",
+                    parameter_name="/clip-it/tiktok-redirect-uri"
+                )
+            ),
         }
 
         # Web service task definition
