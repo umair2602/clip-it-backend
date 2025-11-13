@@ -145,35 +145,53 @@ class ClipItStack(Stack):
             removal_policy=cdk.RemovalPolicy.DESTROY
         )
 
-        # Create SSM parameters for sensitive values
-        openai_api_key_param = ssm.StringParameter(
+        # Reference existing SSM parameters for sensitive values
+        # These should be created using scripts/setup-secrets.sh
+        # Using from_parameter_name to reference existing parameters
+        openai_api_key_param = ssm.StringParameter.from_string_parameter_name(
             self, "OpenAIAPIKey",
-            parameter_name="/clip-it/openai-api-key",
-            string_value="your-openai-api-key-here",  # This should be set manually
-            description="OpenAI API Key for content analysis"
+            string_parameter_name="/clip-it/openai-api-key"
         )
         
-        sieve_api_key_param = ssm.StringParameter(
+        sieve_api_key_param = ssm.StringParameter.from_string_parameter_name(
             self, "SieveAPIKey",
-            parameter_name="/clip-it/sieve-api-key",
-            string_value="your-sieve-api-key-here",  # This should be set manually
-            description="Sieve API Key for video processing"
+            string_parameter_name="/clip-it/sieve-api-key"
+        )
+        
+        mongodb_url_param = ssm.StringParameter.from_string_parameter_name(
+            self, "MongoDBURL",
+            string_parameter_name="/clip-it/mongodb-url"
+        )
+        
+        jwt_secret_key_param = ssm.StringParameter.from_string_parameter_name(
+            self, "JWTSecretKey",
+            string_parameter_name="/clip-it/jwt-secret-key"
+        )
+        
+        tiktok_client_key_param = ssm.StringParameter.from_string_parameter_name(
+            self, "TikTokClientKey",
+            string_parameter_name="/clip-it/tiktok-client-key"
+        )
+        
+        tiktok_client_secret_param = ssm.StringParameter.from_string_parameter_name(
+            self, "TikTokClientSecret",
+            string_parameter_name="/clip-it/tiktok-client-secret"
+        )
+        
+        tiktok_redirect_uri_param = ssm.StringParameter.from_string_parameter_name(
+            self, "TikTokRedirectURI",
+            string_parameter_name="/clip-it/tiktok-redirect-uri"
         )
 
-        # Environment variables
+        # Environment variables (non-sensitive)
         env_vars = {
             "REDIS_URL": f"redis://{redis_cluster.attr_redis_endpoint_address}:6379",
             "S3_BUCKET": s3_bucket.bucket_name,
             "AWS_REGION": self.region,
-            "MONGODB_URL": "mongodb+srv://dev:LY5xfiaQW44xju87@clip.76hczqd.mongodb.net/?retryWrites=true&w=majority&appName=clip",
             "MONGODB_DB_NAME": "clip_it_db",
-            "JWT_SECRET_KEY": "your-super-secret-jwt-key-change-this-in-production",
             "JWT_ALGORITHM": "HS256",
             "JWT_ACCESS_TOKEN_EXPIRE_MINUTES": "180",
             "JWT_REFRESH_TOKEN_EXPIRE_DAYS": "10",
-            "TIKTOK_CLIENT_KEY": "sbawq3ct99ep10ssn9",
-            "TIKTOK_CLIENT_SECRET": "your_client_secret_here",
-            "TIKTOK_REDIRECT_URI": "https://social-viper-accepted.ngrok-free.app/tiktok/callback/",
             "TIKTOK_SCOPES": "user.info.basic,user.info.profile,video.publish,video.upload",
             "TIKTOK_API_BASE": "https://open.tiktokapis.com/v2",
             "TIKTOK_AUTH_BASE": "https://www.tiktok.com/v2",
@@ -182,6 +200,17 @@ class ClipItStack(Stack):
             "MAX_CLIPS_PER_EPISODE": "10",
             "OUTPUT_WIDTH": "1080",
             "OUTPUT_HEIGHT": "1920"
+        }
+        
+        # Secrets from SSM (sensitive values)
+        secrets = {
+            "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(openai_api_key_param),
+            "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(sieve_api_key_param),
+            "MONGODB_URL": ecs.Secret.from_ssm_parameter(mongodb_url_param),
+            "JWT_SECRET_KEY": ecs.Secret.from_ssm_parameter(jwt_secret_key_param),
+            "TIKTOK_CLIENT_KEY": ecs.Secret.from_ssm_parameter(tiktok_client_key_param),
+            "TIKTOK_CLIENT_SECRET": ecs.Secret.from_ssm_parameter(tiktok_client_secret_param),
+            "TIKTOK_REDIRECT_URI": ecs.Secret.from_ssm_parameter(tiktok_redirect_uri_param),
         }
 
         # Web service task definition
@@ -202,10 +231,7 @@ class ClipItStack(Stack):
                 log_group=log_group
             ),
             environment=env_vars,
-            secrets={
-                "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(openai_api_key_param),
-                "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(sieve_api_key_param)
-            },
+            secrets=secrets,
             port_mappings=[ecs.PortMapping(container_port=8000)]
         )
 
@@ -227,10 +253,7 @@ class ClipItStack(Stack):
                 log_group=log_group
             ),
             environment=env_vars,
-            secrets={
-                "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(openai_api_key_param),
-                "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(sieve_api_key_param)
-            }
+            secrets=secrets
         )
 
         # Create Application Load Balancer
