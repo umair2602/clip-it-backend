@@ -1,5 +1,6 @@
 # Virtual environment
 venv/
+.venv/
 
 # Python cache
 __pycache__/
@@ -56,3 +57,8 @@ outputs/*
 
 # TikTok credentials
 tiktok_credentials.json
+
+# Documentation files (optimization guides and performance analysis)
+docs/optimization/
+docs/*
+docs

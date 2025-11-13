@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -5,6 +6,7 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file (for local development)
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 # Import secrets manager (will use AWS if available, otherwise falls back to env vars)
 try:
@@ -78,9 +80,10 @@ class Settings:
     S3_OUTPUT_PREFIX = "outputs/"
     
     # Processing settings
-    MIN_CLIP_DURATION = 20 # Minimum clip duration in seconds
-    PREFERRED_CLIP_DURATION = 180  # Preferred clip duration in seconds
-    MAX_CLIPS_PER_EPISODE = 10  # Maximum number of clips to extract per episode
+    MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-180 second range for complete context)
+    MAX_CLIP_DURATION = 180 # Maximum clip duration in seconds (3 minutes for in-depth conversations)
+    PREFERRED_CLIP_DURATION = 45  # Preferred clip duration in seconds (45 sec for complete thoughts)
+    MAX_CLIPS_PER_EPISODE = 20  # Maximum number of clips to extract per episode
     
     # Video settings
     OUTPUT_WIDTH = 1080  # Width for vertical video (9:16 aspect ratio)
@@ -116,8 +119,12 @@ class Settings:
     # Speaker diarization
     SPEAKER_DIARIZATION_ENABLED = os.getenv("SPEAKER_DIARIZATION_ENABLED", "false").lower() == "true"
 
+    # Proxy base URL
+    PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
+
 # Create settings instance
 settings = Settings()
+
 
 # Create necessary directories
 settings.UPLOAD_DIR.mkdir(exist_ok=True)

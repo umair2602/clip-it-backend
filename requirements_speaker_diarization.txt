@@ -1,0 +1,10 @@
+# Speaker diarization dependencies (install separately to avoid conflicts)
+
+# Core speaker diarization - install these one by one
+pyannote.audio==3.1.1
+pyannote.core==5.0.0
+pyannote.database==5.1.0
+pyannote.metrics==3.2.1
+
+# WhisperX for alignment - install after pyannote
+whisperx==3.1.1
