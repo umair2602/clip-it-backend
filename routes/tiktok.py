@@ -11,7 +11,8 @@ from typing import Optional, Dict, Any, Annotated, List
 from urllib.parse import urlencode, quote
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+# from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Form
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Depends, Query, status, Response, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -20,15 +21,44 @@ from starlette.responses import Response
 from config import settings
 from services.tiktok_tokens import tiktok_token_service
 from services.auth import auth_service
+import json
+
 
 # Removed S3 import - keeping only auth functionality
 from database.connection import get_database
 import os
 
+import base64
+import hashlib
+
+from io import BytesIO
+
+# ? Proxy imports
+from typing import Any, Dict, List
+logger = logging.getLogger(__name__)
+from starlette.responses import StreamingResponse
+
+
+def generate_pkce_pair() -> tuple[str, str]:
+    # Generate random code_verifier
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("utf-8").rstrip("=")
+    # SHA256 -> base64url encoded
+    code_challenge = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(code_challenge).decode("utf-8").rstrip("=")
+    return code_verifier, code_challenge
+
+
 logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter(prefix="/tiktok", tags=["tiktok"])
+
+@router.get("/debug-pkce/{state}")
+async def debug_pkce(state: str):
+    db = get_database()
+    doc = db["oauth_states"].find_one({"state": state})
+    return doc or {"error": "state not found"}
+
 
 # Security scheme
 security = HTTPBearer()
@@ -201,9 +231,72 @@ async def _require_tokens(user_id: str) -> Dict[str, Any]:
     return tokens
 
 
+# async def _refresh_if_needed(user_id: str) -> Dict[str, Any]:
+#     """Refresh tokens if they're expired"""
+#     tokens = await _require_tokens(user_id)
+
+#     if await tiktok_token_service.is_token_expired(user_id):
+#         logger.info(f"Refreshing expired tokens for user {user_id}")
+
+#         try:
+#             async with httpx.AsyncClient() as client:
+#                 # Use new generation refresh token endpoint
+#                 response = await client.post(
+#                     f"{settings.TIKTOK_API_BASE}/oauth/refresh_token/",
+#                     data={
+#                         "client_key": settings.TIKTOK_CLIENT_KEY,
+#                         "client_secret": settings.TIKTOK_CLIENT_SECRET,
+#                         "grant_type": "refresh_token",
+#                         "refresh_token": tokens["refresh_token"],
+#                     },
+#                 )
+
+#                 if response.status_code != 200:
+#                     logger.error(f"Failed to refresh TikTok tokens: {response.text}")
+#                     raise HTTPException(
+#                         status_code=status.HTTP_401_UNAUTHORIZED,
+#                         detail="Failed to refresh TikTok tokens",
+#                     )
+
+#                 refresh_data = response.json()
+
+#                 # Update tokens in database
+#                 await tiktok_token_service.update_tokens(
+#                     user_id,
+#                     access_token=refresh_data["access_token"],
+#                     refresh_token=refresh_data["refresh_token"],
+#                     expires_at=int(time.time()) + refresh_data["expires_in"],
+#                 )
+
+#                 # Return updated tokens
+#                 return await tiktok_token_service.get_tokens(user_id)
+
+#         except Exception as e:
+#             logger.error(f"Error refreshing TikTok tokens: {str(e)}")
+#             raise HTTPException(
+#                 status_code=status.HTTP_401_UNAUTHORIZED,
+#                 detail="Failed to refresh TikTok tokens",
+#             )
+
+#     return tokens
+
 async def _refresh_if_needed(user_id: str) -> Dict[str, Any]:
     """Refresh tokens if they're expired"""
     tokens = await _require_tokens(user_id)
+
+    # --- Add logging to debug token info ---
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    open_id = tokens.get("open_id")
+    scope = tokens.get("scope")
+    expires_at = tokens.get("expires_at")
+    
+    logger.info(f"User {user_id} TikTok token info:")
+    logger.info(f"  access_token: {str(access_token)[:10]}... (masked)")
+    logger.info(f"  refresh_token: {str(refresh_token)[:10]}... (masked)")
+    logger.info(f"  open_id: {open_id}")
+    logger.info(f"  scope: {scope}")
+    logger.info(f"  expires_at: {expires_at}")
 
     if await tiktok_token_service.is_token_expired(user_id):
         logger.info(f"Refreshing expired tokens for user {user_id}")
@@ -237,6 +330,12 @@ async def _refresh_if_needed(user_id: str) -> Dict[str, Any]:
                     refresh_token=refresh_data["refresh_token"],
                     expires_at=int(time.time()) + refresh_data["expires_in"],
                 )
+
+                # Log refreshed token info
+                logger.info(f"Tokens refreshed for user {user_id}:")
+                logger.info(f"  new access_token: {str(refresh_data['access_token'])[:10]}... (masked)")
+                logger.info(f"  new refresh_token: {str(refresh_data['refresh_token'])[:10]}... (masked)")
+                logger.info(f"  expires_in: {refresh_data['expires_in']} seconds")
 
                 # Return updated tokens
                 return await tiktok_token_service.get_tokens(user_id)
@@ -369,91 +468,60 @@ async def debug_tiktok_config():
 
 @router.get("/auth-url")
 async def get_tiktok_auth_url(
-    code_challenge: Optional[str] = Query(
-        None, description="PKCE code challenge for enhanced security"
-    ),
-    code_verifier: Optional[str] = Query(
-        None, description="PKCE code verifier to store for callback"
-    ),
+    code_challenge: Optional[str] = Query(None, description="PKCE code challenge"),
+    code_verifier: Optional[str] = Query(None, description="PKCE code verifier"),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """
-    Generate TikTok OAuth authorization URL according to Login Kit for Web.
-    Creates anti-forgery state token and builds authorization URL with PKCE support.
+    Generate TikTok OAuth URL and return access token after Login Kit flow.
     """
     try:
-        # Generate cryptographically secure state for CSRF protection
-        # This must be unique per request and stored server-side
         state = secrets.token_urlsafe(32)
 
-        # Store state server-side with expiration (10 minutes)
+        # Generate PKCE pair if not provided
+        if not code_challenge or not code_verifier:
+            code_verifier, code_challenge = generate_pkce_pair()
+
+        # Store state + PKCE in DB
         db = get_database()
-        db["oauth_states"].insert_one(
-            {
-                "state": state,
-                "code_challenge": code_challenge,  # Store PKCE challenge if provided
-                "code_verifier": code_verifier,  # Store PKCE verifier for callback
-                "created_at": datetime.now(timezone.utc),
-                "expires_at": datetime.now(timezone.utc).timestamp()
-                + 600,  # 10 minutes
-                "user_id": _extract_user_id(current_user),  # bind state to user
-            }
-        )
+        db["oauth_states"].insert_one({
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_verifier": code_verifier,
+            "created_at": datetime.now(timezone.utc),
+            "expires_at": datetime.now(timezone.utc).timestamp() + 600,
+            "user_id": _extract_user_id(current_user),
+        })
 
-        # Build authorization URL according to TikTok Login Kit for Web docs
-        # URL: https://www.tiktok.com/v2/auth/authorize/
-        # Ensure scopes are space-delimited per TikTok docs
+        # Build Login Kit URL
         scopes_value = settings.TIKTOK_SCOPES
-        if isinstance(scopes_value, str) and "," in scopes_value:
-            scopes_value = " ".join(
-                [s.strip() for s in scopes_value.split(",") if s.strip()]
-            )
-
+        # scopes_value = "user.info.basic, video.publish"
         params = {
             "client_key": settings.TIKTOK_CLIENT_KEY,
             "scope": scopes_value,
             "response_type": "code",
             "redirect_uri": settings.TIKTOK_REDIRECT_URI,
             "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
 
-        # Add PKCE parameters if code_challenge is provided
-        if code_challenge:
-            params["code_challenge"] = code_challenge
-            params["code_challenge_method"] = "S256"
-
-        # Build query string with proper encoding
-        query_parts = []
-        for key, value in params.items():
-            if value is not None:
-                # For redirect_uri, don't double-encode if it's already encoded
-                if key == "redirect_uri":
-                    # Check if the value is already URL-encoded
-                    if "%" in str(value):
-                        # Already encoded, use as-is
-                        encoded_value = str(value)
-                    else:
-                        # Not encoded, encode it
-                        encoded_value = quote(str(value), safe="")
-                else:
-                    # For other parameters, use standard encoding
-                    encoded_value = quote(str(value), safe="")
-
-                query_parts.append(f"{key}={encoded_value}")
-
-        query_string = "&".join(query_parts)
-
-        # Use Login Kit auth endpoint as per official documentation
+        query_string = "&".join(
+            f"{k}={quote(str(v), safe='')}" for k, v in params.items() if v is not None
+        )
         auth_url = f"{settings.TIKTOK_AUTH_BASE}/auth/authorize/?{query_string}"
 
-        logger.info(
-            f"Generated TikTok auth URL with state: {state[:8]}... and PKCE: {'Yes' if code_challenge else 'No'}"
-        )
+        # Instead of logs, return the auth URL and current stored token (if exists)
+        tokens = await tiktok_token_service.get_tokens(_extract_user_id(current_user))
+        access_token = tokens.get("access_token") if tokens else None
 
-        return TikTokAuthUrlResponse(auth_url=auth_url, state=state)
+        return {
+            "auth_url": auth_url,
+            "access_token": access_token,
+            "state": state,
+        }
 
     except Exception as e:
-        logger.error(f"Error generating TikTok auth URL: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate authorization URL",
@@ -467,7 +535,6 @@ async def tiktok_callback(
     state: Optional[str] = Query(
         None, description="State parameter for CSRF protection"
     ),
-    code_verifier: Optional[str] = Query(None, description="PKCE code verifier"),
     error: Optional[str] = Query(None, description="Error from TikTok"),
     error_description: Optional[str] = Query(
         None, description="Error description from TikTok"
@@ -567,8 +634,10 @@ async def tiktok_callback(
             token_exchange_data["code_verifier"] = stored_code_verifier
             logger.info("Using stored PKCE code_verifier for token exchange")
         else:
-            logger.warning(
-                "No PKCE code_verifier found in stored state - this may cause token exchange to fail"
+            logger.error("No PKCE code_verifier found in stored state")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PKCE code_verifier not found in state",
             )
 
         logger.info(f"Exchanging authorization code for tokens...")
@@ -602,6 +671,10 @@ async def tiktok_callback(
 
             token_data = response.json()
             logger.info("Successfully exchanged code for tokens")
+
+            # ⚠️ For testing only — log the access token
+            logger.info(f"TikTok Access Token (TEST ONLY): {token_data.get('access_token')}")
+            print("TikTok Access Token (TEST ONLY):", token_data.get('access_token'))
 
             # Validate token response contains required fields
             if "access_token" not in token_data:
@@ -784,6 +857,10 @@ async def get_tiktok_profile(current_user: Dict[str, Any] = Depends(get_current_
             )
         tokens = await _refresh_if_needed(user_id)
 
+        if tokens:
+            logger.info(f"TikTok access token for user {_extract_user_id(current_user)}: {tokens}")
+
+
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{settings.TIKTOK_API_BASE}/user/info/",
@@ -863,18 +940,203 @@ async def get_creator_info(current_user: Dict[str, Any] = Depends(get_current_us
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# @router.post("/post/video", response_model=TikTokPostResponse)
+# async def post_video_to_tiktok(
+#     post_request: TikTokPostRequest,
+#     current_user: Dict[str, Any] = Depends(get_current_user),
+# ):
+#     """Post a video to TikTok using PULL_FROM_URL from S3"""
+
+#     # --- ADD THIS ---
+#     user_id = _extract_user_id(current_user)
+#     logger.info(f"POST /post/video called by user_id: {user_id}")
+#     logger.info(f"Post request payload: {post_request.dict() if hasattr(post_request, 'dict') else post_request}")
+
+#     try:
+#         user_id = _extract_user_id(current_user)
+#         if not user_id:
+#             raise HTTPException(status_code=401, detail="Invalid user context")
+
+#         tokens = await _refresh_if_needed(user_id)
+#         logger.info(f"Using TikTok access token: {tokens['access_token']}")
+
+#         # Validate video URL
+#         video_url = await _validate_video_url(post_request.video_url)
+#         await _preflight_check_video_url(video_url)
+
+#         # Fetch creator info to validate privacy level and constraints
+#         allowed_privacy_levels: List[str] = []
+#         creator_constraints: Dict[str, Any] = {}
+#         try:
+#             async with httpx.AsyncClient() as client:
+#                 ci_resp = await client.post(
+#                     f"{settings.TIKTOK_API_BASE}/post/publish/creator_info/query/",
+#                     headers={
+#                         "Authorization": f"Bearer {tokens['access_token']}",
+#                         "Content-Type": "application/json; charset=UTF-8",
+#                     },
+#                     json={},
+#                 )
+#                 if ci_resp.status_code == 200:
+#                     ci_json = ci_resp.json()
+#                     data = ci_json.get("data", {})
+#                     allowed_privacy_levels = data.get("privacy_level_options", []) or []
+#                     creator_constraints = {
+#                         "comment_disabled": data.get("comment_disabled", False),
+#                         "duet_disabled": data.get("duet_disabled", False),
+#                         "stitch_disabled": data.get("stitch_disabled", False),
+#                         "max_video_post_duration_sec": data.get(
+#                             "max_video_post_duration_sec"
+#                         ),
+#                     }
+#                 else:
+#                     logger.warning(
+#                         f"creator_info query failed ({ci_resp.status_code}): {ci_resp.text}"
+#                     )
+#         except Exception as e:
+#             logger.warning(f"creator_info query error: {e}")
+
+#         # If creator_info provided options, enforce them to avoid TikTok 403
+#         if allowed_privacy_levels:
+#             if post_request.privacy_level not in allowed_privacy_levels:
+#                 logger.error(
+#                     f"Requested privacy_level '{post_request.privacy_level}' not in allowed options: {allowed_privacy_levels}"
+#                 )
+#                 raise HTTPException(
+#                     status_code=400,
+#                     detail={
+#                         "message": "Invalid privacy_level for this creator",
+#                         "allowed_privacy_levels": allowed_privacy_levels,
+#                         "hint": "For unaudited clients you must use SELF_ONLY and the account must be set to private.",
+#                     },
+#                 )
+
+#         # Apply interaction constraints if provided (defensive)
+#         if creator_constraints:
+#             if creator_constraints.get("comment_disabled"):
+#                 post_request.disable_comment = True
+#             if creator_constraints.get("duet_disabled"):
+#                 post_request.disable_duet = True
+#             if creator_constraints.get("stitch_disabled"):
+#                 post_request.disable_stitch = True
+
+#         # Prepare post data for PULL_FROM_URL
+#         post_data = {
+#             "post_info": {
+#                 "title": post_request.title,
+#                 "privacy_level": post_request.privacy_level,
+#                 "disable_duet": post_request.disable_duet,
+#                 "disable_comment": post_request.disable_comment,
+#                 "disable_stitch": post_request.disable_stitch,
+#             },
+#             "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
+#         }
+
+#         logger.info(f"Posting to TikTok with data: {post_data}")
+
+#         # Add video cover timestamp if provided
+#         if post_request.video_cover_timestamp_ms:
+#             post_data["post_info"]["video_cover_timestamp_ms"] = (
+#                 post_request.video_cover_timestamp_ms
+#             )
+
+#         async with httpx.AsyncClient() as client:
+#             response = await client.post(
+#                 f"{settings.TIKTOK_API_BASE}/post/publish/video/init/",
+#                 headers={
+#                     "Authorization": f"Bearer {tokens['access_token']}",
+#                     "Content-Type": "application/json; charset=UTF-8",
+#                 },
+#                 json=post_data,
+#             )
+
+#             logger.info(f"TikTok response status: {response.status_code}")
+#             logger.info(f"TikTok response body: {response.text}")
+
+
+#             if response.status_code != 200:
+#                 # Try to parse error details
+#                 error_payload = None
+#                 try:
+#                     error_payload = response.json()
+#                 except Exception:
+#                     error_payload = {"raw": response.text}
+#                 error_obj = (
+#                     (error_payload or {}).get("error", {})
+#                     if isinstance(error_payload, dict)
+#                     else {}
+#                 )
+#                 log_id = (
+#                     error_obj.get("log_id")
+#                     or (error_payload or {}).get("log_id")
+#                     or "unknown"
+#                 )
+#                 code = error_obj.get("code") or (error_payload or {}).get("code")
+#                 message = (
+#                     error_obj.get("message")
+#                     or (error_payload or {}).get("message")
+#                     or "Failed to initialize TikTok post"
+#                 )
+#                 logger.error(
+#                     f"Failed to initialize TikTok post (status={response.status_code}, log_id={log_id}, code={code}): {response.text}"
+#                 )
+#                 # Provide actionable hint for common unaudited-client error
+#                 hint = None
+#                 if code == "unaudited_client_can_only_post_to_private_accounts":
+#                     hint = "Set the TikTok account to Private and use privacy_level=SELF_ONLY (unaudited clients)."
+#                 raise HTTPException(
+#                     status_code=400,
+#                     detail={
+#                         "message": message,
+#                         "code": code,
+#                         "log_id": log_id,
+#                         "status": response.status_code,
+#                         **({"hint": hint} if hint else {}),
+#                     },
+#                 )
+
+#             post_result = response.json()
+#             data = post_result.get("data", {})
+
+#             return TikTokPostResponse(
+#                 publish_id=data.get("publish_id"), status="initialized"
+#             )
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error posting to TikTok: {str(e)}")
+#         raise HTTPException(status_code=500, detail="Internal server error")
+
 @router.post("/post/video", response_model=TikTokPostResponse)
 async def post_video_to_tiktok(
     post_request: TikTokPostRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Post a video to TikTok using PULL_FROM_URL from S3"""
+
+    user_id = _extract_user_id(current_user)
+    logger.info(f"POST /post/video called by user_id: {user_id}")
+    logger.info(
+        f"Post request payload: {post_request.dict() if hasattr(post_request, 'dict') else post_request}"
+    )
+
     try:
-        user_id = _extract_user_id(current_user)
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid user context")
 
         tokens = await _refresh_if_needed(user_id)
+        logger.info(f"Using TikTok access token: {tokens['access_token']}")
+
+        # --- ensure we have a proxy URL for S3-hosted videos ---
+        original_video_url = post_request.video_url
+        if original_video_url:
+            proxied = build_proxy_url_from_s3(original_video_url)
+            if proxied != original_video_url:
+                logger.info(
+                    f"Rewriting video URL for TikTok pull_from_url: {original_video_url} -> {proxied}"
+                )
+                post_request.video_url = proxied
 
         # Validate video URL
         video_url = await _validate_video_url(post_request.video_url)
@@ -912,12 +1174,9 @@ async def post_video_to_tiktok(
         except Exception as e:
             logger.warning(f"creator_info query error: {e}")
 
-        # If creator_info provided options, enforce them to avoid TikTok 403
+        # Enforce privacy levels and interaction constraints
         if allowed_privacy_levels:
             if post_request.privacy_level not in allowed_privacy_levels:
-                logger.error(
-                    f"Requested privacy_level '{post_request.privacy_level}' not in allowed options: {allowed_privacy_levels}"
-                )
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -927,7 +1186,6 @@ async def post_video_to_tiktok(
                     },
                 )
 
-        # Apply interaction constraints if provided (defensive)
         if creator_constraints:
             if creator_constraints.get("comment_disabled"):
                 post_request.disable_comment = True
@@ -936,7 +1194,7 @@ async def post_video_to_tiktok(
             if creator_constraints.get("stitch_disabled"):
                 post_request.disable_stitch = True
 
-        # Prepare post data for PULL_FROM_URL
+        # Prepare post data for TikTok PULL_FROM_URL
         post_data = {
             "post_info": {
                 "title": post_request.title,
@@ -948,11 +1206,12 @@ async def post_video_to_tiktok(
             "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
         }
 
-        # Add video cover timestamp if provided
         if post_request.video_cover_timestamp_ms:
             post_data["post_info"]["video_cover_timestamp_ms"] = (
                 post_request.video_cover_timestamp_ms
             )
+
+        logger.info(f"Posting to TikTok with data: {post_data}")
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -964,13 +1223,15 @@ async def post_video_to_tiktok(
                 json=post_data,
             )
 
+            logger.info(f"TikTok response status: {response.status_code}")
+            logger.info(f"TikTok response body: {response.text}")
+
             if response.status_code != 200:
-                # Try to parse error details
-                error_payload = None
                 try:
                     error_payload = response.json()
                 except Exception:
                     error_payload = {"raw": response.text}
+
                 error_obj = (
                     (error_payload or {}).get("error", {})
                     if isinstance(error_payload, dict)
@@ -987,13 +1248,11 @@ async def post_video_to_tiktok(
                     or (error_payload or {}).get("message")
                     or "Failed to initialize TikTok post"
                 )
-                logger.error(
-                    f"Failed to initialize TikTok post (status={response.status_code}, log_id={log_id}, code={code}): {response.text}"
-                )
-                # Provide actionable hint for common unaudited-client error
+
                 hint = None
                 if code == "unaudited_client_can_only_post_to_private_accounts":
                     hint = "Set the TikTok account to Private and use privacy_level=SELF_ONLY (unaudited clients)."
+
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -1242,3 +1501,107 @@ async def disconnect_tiktok(current_user: Dict[str, Any] = Depends(get_current_u
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error",
         )
+
+@router.post("/share")
+async def share_to_tiktok(request: Request):
+    """
+    Share a video to TikTok using the access token from sandbox.
+    The user must have connected their TikTok account before.
+    """
+    data = await request.json()
+    clip_url = data.get("clipUrl")
+    clip_title = data.get("clipTitle")
+    user_id = data.get("userId")  # or extract from session
+
+    if not clip_url or not clip_title or not user_id:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    # Retrieve access token from DB
+    token_record = await tiktok_token_service.get_tokens(user_id)
+    if not token_record:
+        raise HTTPException(status_code=400, detail="TikTok account not connected")
+
+    access_token = token_record["access_token"]
+
+    # Prepare payload for Content Posting API
+    payload = {
+        "video_url": clip_url,
+        "text": clip_title
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://open.tiktokapis.com/v2/post/publish/video/",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=30
+        )
+
+    if resp.status_code != 200:
+        # Include TikTok response body for debugging
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    return resp.json()
+
+
+
+
+# ! Proxy route
+
+def build_proxy_url_from_s3(s3_url: str) -> str:
+    """
+    Converts S3 URL to a publicly accessible URL under the verified domain
+    """
+    if ".s3." in s3_url and "amazonaws.com" in s3_url:
+        # split to get path after .com/
+        if ".com/" in s3_url:
+            path = s3_url.split(".com/", 1)[1]
+        else:
+            path = s3_url.split("/", 3)[-1]
+
+        # include router prefix
+        return f"{settings.PROXY_BASE_URL}/tiktok/proxy/{path}"
+    return s3_url
+
+
+
+@router.get("/proxy/{file_path:path}")
+async def proxy_video(file_path: str, request: Request):
+    """
+    Streams the S3 object located at:
+      https://pod-clip-bucket.s3.us-east-2.amazonaws.com/{file_path}
+    Example incoming: /proxy/outputs/d1fc.../clip_clip_0.mp4
+    """
+    s3_url = f"https://pod-clip-bucket.s3.us-east-2.amazonaws.com/{file_path}"
+    logger.info(f"Proxy request for: {s3_url}")
+
+    # Use streaming to avoid loading large file into memory
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            # stream=True returns an async iterator of chunks
+            resp = await client.get(s3_url, timeout=60.0)
+        except httpx.HTTPError as e:
+            logger.error(f"Error fetching from S3: {e}")
+            raise HTTPException(status_code=502, detail="Failed to fetch video from origin")
+
+        if resp.status_code != 200:
+            logger.warning(f"S3 returned non-200 ({resp.status_code}) for {s3_url}")
+            raise HTTPException(status_code=resp.status_code, detail="Origin returned error")
+
+        # Determine content-type if present (fall back to video/mp4)
+        content_type = resp.headers.get("content-type", "video/mp4")
+        headers = {
+            "Content-Type": content_type,
+            # Tell clients not to cache heavily during testing; change for prod if desired
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        }
+
+        # Use generator to stream content
+        async def iter_stream():
+            async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                yield chunk
+
+        return StreamingResponse(iter_stream(), headers=headers, media_type=content_type)

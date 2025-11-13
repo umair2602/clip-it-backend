@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables from .env file
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 def clean_env_value(value):
     """Clean environment variable value by removing surrounding quotes if present"""
@@ -54,6 +56,9 @@ class Settings:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     SIEVE_API_KEY = os.getenv("SIEVE_API_KEY")
     
+    # HuggingFace settings (for speaker diarization)
+    HF_TOKEN = os.getenv("HF_TOKEN")
+    
     # AWS S3 settings
     AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -63,9 +68,10 @@ class Settings:
     S3_OUTPUT_PREFIX = "outputs/"
     
     # Processing settings
-    MIN_CLIP_DURATION = 20 # Minimum clip duration in seconds
-    PREFERRED_CLIP_DURATION = 180  # Preferred clip duration in seconds
-    MAX_CLIPS_PER_EPISODE = 10  # Maximum number of clips to extract per episode
+    MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-180 second range for complete context)
+    MAX_CLIP_DURATION = 180 # Maximum clip duration in seconds (3 minutes for in-depth conversations)
+    PREFERRED_CLIP_DURATION = 45  # Preferred clip duration in seconds (45 sec for complete thoughts)
+    MAX_CLIPS_PER_EPISODE = 20  # Maximum number of clips to extract per episode
     
     # Video settings
     OUTPUT_WIDTH = 1080  # Width for vertical video (9:16 aspect ratio)
@@ -90,14 +96,25 @@ class Settings:
     # TikTok settings - Clean any quotes that might be accidentally added
     TIKTOK_CLIENT_KEY = clean_env_value(os.getenv("TIKTOK_CLIENT_KEY", "sbawq3ct99ep10ssn9"))
     TIKTOK_CLIENT_SECRET = clean_env_value(os.getenv("TIKTOK_CLIENT_SECRET", "your_client_secret_here"))
+
+    # TikTok domain verification
+    TIKTOK_VERIFICATION_KEY = clean_env_value(os.getenv("TIKTOK_VERIFICATION_KEY", "Psfo8674QD8hH4Xqoc8zxmI96eLjo6Ng"))
+    
+
+    
+    
     # Force trailing slash to match console; also expose a no-trailing route
-    TIKTOK_REDIRECT_URI = clean_env_value(os.getenv("TIKTOK_REDIRECT_URI", "https://social-viper-accepted.ngrok-free.app/tiktok/callback/"))
+    TIKTOK_REDIRECT_URI = clean_env_value(os.getenv("TIKTOK_REDIRECT_URI", "http://localhost:8000/tiktok/callback/"))
     TIKTOK_SCOPES = clean_env_value(os.getenv("TIKTOK_SCOPES", "user.info.basic,user.info.profile,video.publish,video.upload"))
     TIKTOK_API_BASE = clean_env_value(os.getenv("TIKTOK_API_BASE", "https://open.tiktokapis.com/v2"))
     TIKTOK_AUTH_BASE = clean_env_value(os.getenv("TIKTOK_AUTH_BASE", "https://www.tiktok.com/v2"))
 
+    # Proxy base URL
+    PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
+
 # Create settings instance
 settings = Settings()
+
 
 # Create necessary directories
 settings.UPLOAD_DIR.mkdir(exist_ok=True)
