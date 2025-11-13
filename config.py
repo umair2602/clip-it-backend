@@ -92,6 +92,9 @@ class Settings:
     # TikTok settings - Clean any quotes that might be accidentally added
     TIKTOK_CLIENT_KEY = clean_env_value(os.getenv("TIKTOK_CLIENT_KEY", "sbawq3ct99ep10ssn9"))
     TIKTOK_CLIENT_SECRET = clean_env_value(os.getenv("TIKTOK_CLIENT_SECRET", "your_client_secret_here"))
+
+    # TikTok domain verification
+    TIKTOK_VERIFICATION_KEY = clean_env_value(os.getenv("TIKTOK_VERIFICATION_KEY", "Psfo8674QD8hH4Xqoc8zxmI96eLjo6Ng"))
     
 
     

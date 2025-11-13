@@ -219,10 +219,10 @@ class YouTubeRequest(BaseModel):
 tasks = {}
 
 # Tiktok
-@app.get("/tiktokPsfo8674QD8hH4Xqoc8zxmI96eLjo6Ng.txt")
+@app.get(f"/tiktok{settings.TIKTOK_VERIFICATION_KEY}.txt")
 async def verify_tiktok_domain():
     return Response(
-        content="tiktok-developers-site-verification=Psfo8674QD8hH4Xqoc8zxmI96eLjo6Ng",
+        content=f"tiktok-developers-site-verification={settings.TIKTOK_VERIFICATION_KEY}",
         media_type="text/plain",
     )
 
