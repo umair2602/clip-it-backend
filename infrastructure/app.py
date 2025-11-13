@@ -110,6 +110,37 @@ class ClipItStack(Stack):
                 iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
             ]
         )
+        
+        # Add SSM permissions for reading secrets
+        task_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:GetParametersByPath"
+                ],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/clip-it/*"
+                ]
+            )
+        )
+        
+        # Add KMS permissions for decrypting SecureString parameters
+        task_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "kms:Decrypt"
+                ],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:ViaService": f"ssm.{self.region}.amazonaws.com"
+                    }
+                }
+            )
+        )
 
         # Create task role
         task_role = iam.Role(
