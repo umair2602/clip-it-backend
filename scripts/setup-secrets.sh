@@ -48,24 +48,41 @@ set_parameter() {
         return
     fi
     
-    echo "🔒 Setting $param_name..."
-    aws ssm put-parameter \
+    # Check if parameter already exists
+    existing_param=$(aws ssm describe-parameters \
         --region "$AWS_REGION" \
-        --name "$param_name" \
-        --value "$param_value" \
-        --type "SecureString" \
-        --description "$description" \
-        --overwrite \
-        --no-cli-pager > /dev/null 2>&1 || {
-        echo "⚠️  Failed to set $param_name, trying to update..."
+        --parameter-filters "Key=Name,Values=$param_name" \
+        --query 'Parameters[0].Type' \
+        --output text 2>/dev/null || echo "None")
+    
+    if [ "$existing_param" != "None" ] && [ -n "$existing_param" ]; then
+        # Parameter exists - preserve its type
+        echo "🔒 Updating existing parameter $param_name (type: $existing_param)..."
+        aws ssm put-parameter \
+            --region "$AWS_REGION" \
+            --name "$param_name" \
+            --value "$param_value" \
+            --type "$existing_param" \
+            --description "$description" \
+            --overwrite \
+            --no-cli-pager > /dev/null 2>&1 || {
+            echo "⚠️  Failed to update $param_name"
+            return 1
+        }
+    else
+        # Parameter doesn't exist - create as SecureString
+        echo "🔒 Creating new parameter $param_name as SecureString..."
         aws ssm put-parameter \
             --region "$AWS_REGION" \
             --name "$param_name" \
             --value "$param_value" \
             --type "SecureString" \
-            --overwrite \
-            --no-cli-pager > /dev/null
-    }
+            --description "$description" \
+            --no-cli-pager > /dev/null 2>&1 || {
+            echo "⚠️  Failed to create $param_name"
+            return 1
+        }
+    fi
     echo "✅ Set $param_name"
 }
 
