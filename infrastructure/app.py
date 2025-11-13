@@ -145,64 +145,42 @@ class ClipItStack(Stack):
             removal_policy=cdk.RemovalPolicy.DESTROY
         )
 
-        # Create SSM parameters for sensitive values with placeholder values
-        # These will be created by CDK and can be updated using scripts/setup-secrets.sh
-        # Using StringParameter type (not SecureString) initially so CloudFormation can manage them
-        # The setup-secrets.sh script will update them with real values and can convert to SecureString
-        openai_api_key_param = ssm.StringParameter(
+        # Reference existing SSM parameters (they already exist as SecureString)
+        # These parameters were created outside of CDK using scripts/setup-secrets.sh
+        # We reference them rather than creating them to avoid conflicts
+        openai_api_key_param = ssm.StringParameter.from_string_parameter_name(
             self, "OpenAIAPIKey",
-            parameter_name="/clip-it/openai-api-key",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="OpenAI API Key - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/openai-api-key"
         )
         
-        sieve_api_key_param = ssm.StringParameter(
+        sieve_api_key_param = ssm.StringParameter.from_string_parameter_name(
             self, "SieveAPIKey",
-            parameter_name="/clip-it/sieve-api-key",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="Sieve API Key - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/sieve-api-key"
         )
         
-        mongodb_url_param = ssm.StringParameter(
+        mongodb_url_param = ssm.StringParameter.from_string_parameter_name(
             self, "MongoDBURL",
-            parameter_name="/clip-it/mongodb-url",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="MongoDB URL - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/mongodb-url"
         )
         
-        jwt_secret_key_param = ssm.StringParameter(
+        jwt_secret_key_param = ssm.StringParameter.from_string_parameter_name(
             self, "JWTSecretKey",
-            parameter_name="/clip-it/jwt-secret-key",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="JWT Secret Key - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/jwt-secret-key"
         )
         
-        tiktok_client_key_param = ssm.StringParameter(
+        tiktok_client_key_param = ssm.StringParameter.from_string_parameter_name(
             self, "TikTokClientKey",
-            parameter_name="/clip-it/tiktok-client-key",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="TikTok Client Key - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/tiktok-client-key"
         )
         
-        tiktok_client_secret_param = ssm.StringParameter(
+        tiktok_client_secret_param = ssm.StringParameter.from_string_parameter_name(
             self, "TikTokClientSecret",
-            parameter_name="/clip-it/tiktok-client-secret",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="TikTok Client Secret - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/tiktok-client-secret"
         )
         
-        tiktok_redirect_uri_param = ssm.StringParameter(
+        tiktok_redirect_uri_param = ssm.StringParameter.from_string_parameter_name(
             self, "TikTokRedirectURI",
-            parameter_name="/clip-it/tiktok-redirect-uri",
-            string_value="PLACEHOLDER_UPDATE_WITH_SETUP_SECRETS_SCRIPT",
-            description="TikTok Redirect URI - Update with scripts/setup-secrets.sh",
-            tier=ssm.ParameterTier.STANDARD
+            string_parameter_name="/clip-it/tiktok-redirect-uri"
         )
 
         # Environment variables (non-sensitive)
