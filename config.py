@@ -1,11 +1,24 @@
+import logging
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-import logging
 
-# Load environment variables from .env file
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (for local development)
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+# Import secrets manager (will use AWS if available, otherwise falls back to env vars)
+try:
+    from utils.secrets_manager import get_secret
+    SECRETS_AVAILABLE = True
+except ImportError:
+    # If secrets_manager is not available, just use os.getenv
+    SECRETS_AVAILABLE = False
+    def get_secret(secret_name: str, env_fallback: str = None, default: str = None) -> str:
+        """Fallback function when secrets_manager is not available"""
+        env_var = env_fallback or secret_name
+        return os.getenv(env_var, default)
 
 def clean_env_value(value):
     """Clean environment variable value by removing surrounding quotes if present"""
@@ -35,7 +48,7 @@ def clean_env_value(value):
                 from urllib.parse import unquote
                 decoded = unquote(value)
                 return decoded
-            except:
+            except Exception:
                 return value
         
         return value
@@ -52,18 +65,17 @@ class Settings:
     UPLOAD_DIR = BASE_DIR / "uploads"
     OUTPUT_DIR = BASE_DIR / "outputs"
     
-    # API keys
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    SIEVE_API_KEY = os.getenv("SIEVE_API_KEY")
+    # API keys - Try AWS SSM first, then environment variables
+    OPENAI_API_KEY = get_secret("/clip-it/openai-api-key", "OPENAI_API_KEY")
+    SIEVE_API_KEY = get_secret("/clip-it/sieve-api-key", "SIEVE_API_KEY")
+    HF_TOKEN = get_secret("/clip-it/hf-token", "HF_TOKEN")
+    HUGGINGFACE_TOKEN = get_secret("/clip-it/huggingface-token", "HUGGINGFACE_TOKEN")
     
-    # HuggingFace settings (for speaker diarization)
-    HF_TOKEN = os.getenv("HF_TOKEN")
-    
-    # AWS S3 settings
-    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-    AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-    S3_BUCKET = os.getenv("S3_BUCKET")
+    # AWS S3 settings - Note: AWS credentials should use IAM roles in production
+    AWS_ACCESS_KEY_ID = get_secret("/clip-it/aws-access-key-id", "AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = get_secret("/clip-it/aws-secret-access-key", "AWS_SECRET_ACCESS_KEY")
+    AWS_REGION = get_secret("/clip-it/aws-region", "AWS_REGION", "us-east-1")
+    S3_BUCKET = get_secret("/clip-it/s3-bucket", "S3_BUCKET")
     S3_UPLOAD_PREFIX = "uploads/"
     S3_OUTPUT_PREFIX = "outputs/"
     
@@ -83,31 +95,29 @@ class Settings:
     # MongoDB settings
     # For local MongoDB: "mongodb://localhost:27017"
     # For MongoDB Atlas: "mongodb+srv://dev:LY5xfiaQW44xju87@clip.76hczqd.mongodb.net/?retryWrites=true&w=majority&appName=clip"
-    MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://dev:LY5xfiaQW44xju87@clip.76hczqd.mongodb.net/?retryWrites=true&w=majority&appName=clip")
-    MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "clip_it_db")
+    MONGODB_URL = get_secret("/clip-it/mongodb-url", "MONGODB_URL")
+    MONGODB_DB_NAME = get_secret("/clip-it/mongodb-db-name", "MONGODB_DB_NAME", "clip_it_db")
 
     # JWT settings
-    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
+    JWT_SECRET_KEY = get_secret("/clip-it/jwt-secret-key", "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
     JWT_ALGORITHM = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 180
     JWT_REFRESH_TOKEN_EXPIRE_DAYS = 10
 
     
     # TikTok settings - Clean any quotes that might be accidentally added
-    TIKTOK_CLIENT_KEY = clean_env_value(os.getenv("TIKTOK_CLIENT_KEY", "sbawq3ct99ep10ssn9"))
-    TIKTOK_CLIENT_SECRET = clean_env_value(os.getenv("TIKTOK_CLIENT_SECRET", "your_client_secret_here"))
-
-    # TikTok domain verification
-    TIKTOK_VERIFICATION_KEY = clean_env_value(os.getenv("TIKTOK_VERIFICATION_KEY", "Psfo8674QD8hH4Xqoc8zxmI96eLjo6Ng"))
-    
-
-    
-    
+    TIKTOK_CLIENT_KEY = clean_env_value(get_secret("/clip-it/tiktok-client-key", "TIKTOK_CLIENT_KEY", "sbawq3ct99ep10ssn9"))
+    TIKTOK_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/tiktok-client-secret", "TIKTOK_CLIENT_SECRET", "your_client_secret_here"))
+    TIKTOK_VERIFICATION_KEY = clean_env_value(get_secret("/clip-it/tiktok-verification-key", "TIKTOK_VERIFICATION_KEY"))
+    PROXY_BASE_URL = clean_env_value(get_secret("/clip-it/proxy-base-url", "PROXY_BASE_URL"))
     # Force trailing slash to match console; also expose a no-trailing route
-    TIKTOK_REDIRECT_URI = clean_env_value(os.getenv("TIKTOK_REDIRECT_URI", "http://localhost:8000/tiktok/callback/"))
-    TIKTOK_SCOPES = clean_env_value(os.getenv("TIKTOK_SCOPES", "user.info.basic,user.info.profile,video.publish,video.upload"))
-    TIKTOK_API_BASE = clean_env_value(os.getenv("TIKTOK_API_BASE", "https://open.tiktokapis.com/v2"))
-    TIKTOK_AUTH_BASE = clean_env_value(os.getenv("TIKTOK_AUTH_BASE", "https://www.tiktok.com/v2"))
+    TIKTOK_REDIRECT_URI = clean_env_value(get_secret("/clip-it/tiktok-redirect-uri", "TIKTOK_REDIRECT_URI", "https://social-viper-accepted.ngrok-free.app/tiktok/callback/"))
+    TIKTOK_SCOPES = clean_env_value(get_secret("/clip-it/tiktok-scopes", "TIKTOK_SCOPES", "user.info.basic,user.info.profile,video.publish,video.upload"))
+    TIKTOK_API_BASE = clean_env_value(get_secret("/clip-it/tiktok-api-base", "TIKTOK_API_BASE", "https://open.tiktokapis.com/v2"))
+    TIKTOK_AUTH_BASE = clean_env_value(get_secret("/clip-it/tiktok-auth-base", "TIKTOK_AUTH_BASE", "https://www.tiktok.com/v2"))
+    
+    # Speaker diarization
+    SPEAKER_DIARIZATION_ENABLED = os.getenv("SPEAKER_DIARIZATION_ENABLED", "false").lower() == "true"
 
     # Proxy base URL
     PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
