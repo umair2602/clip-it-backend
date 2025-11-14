@@ -239,7 +239,12 @@ async def process_video_job(job_id: str, job_data: dict):
         step_start = time.time()
         logger.info("📝 STEP 1: Starting transcription (Whisper + Diarization + Alignment)...")
         
-        transcript = await transcribe_audio(file_path, model_size="base")
+        transcript = await transcribe_audio(
+            file_path, 
+            model_size="base",
+            job_id=job_id,
+            job_queue=job_queue
+        )
         if not transcript:
             raise ValueError("Transcription returned None")
         

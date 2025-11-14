@@ -25,9 +25,40 @@ class SpeakerDiarization:
                      Get it from: https://huggingface.co/settings/tokens
                      And accept terms at: https://huggingface.co/pyannote/speaker-diarization
         """
-        self.hf_token = hf_token or os.getenv("HUGGINGFACE_TOKEN")
+        self.hf_token = hf_token or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
         self.pipeline = None
+        self.current_job_id = None
+        self.current_job_queue = None
         self._load_pipeline()
+
+    def _progress_hook(self, step_name, step_artefact, file=None, total=None, completed=None):
+        """Progress hook for pyannote pipeline to log progress"""
+        if completed is not None and total is not None:
+            progress = (completed / total) * 100
+            logger.info(f"Diarization step '{step_name}': {progress:.1f}% ({completed}/{total})")
+            
+            # Update job status if job_queue is available
+            if self.current_job_queue and self.current_job_id:
+                # Map progress to 10-40% range (diarization is part of transcription step)
+                overall_progress = 10 + (progress * 0.3)  # 10% to 40% of total pipeline
+                self.current_job_queue.update_job(
+                    self.current_job_id,
+                    {
+                        "status": "transcribing",
+                        "progress": str(int(overall_progress)),
+                        "message": f"Speaker diarization: {step_name} ({progress:.0f}%)"
+                    }
+                )
+        else:
+            logger.info(f"Diarization step: {step_name}")
+            if self.current_job_queue and self.current_job_id:
+                self.current_job_queue.update_job(
+                    self.current_job_id,
+                    {
+                        "status": "transcribing",
+                        "message": f"Speaker diarization: {step_name}"
+                    }
+                )
 
     def _load_pipeline(self):
         """Load the pyannote diarization pipeline"""
@@ -46,10 +77,18 @@ class SpeakerDiarization:
             # Load the pre-trained pipeline
             # This requires accepting the user agreement at:
             # https://huggingface.co/pyannote/speaker-diarization-3.1
-            self.pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=self.hf_token
-            )
+            try:
+                # Try newer API with 'token' parameter (pyannote.audio >= 3.0)
+                self.pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=self.hf_token
+                )
+            except TypeError:
+                # Fallback to older API with 'use_auth_token' parameter
+                self.pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=self.hf_token
+                )
 
             # Move to GPU if available
             import torch
@@ -78,7 +117,9 @@ class SpeakerDiarization:
         audio_path: str,
         num_speakers: Optional[int] = None,
         min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None
+        max_speakers: Optional[int] = None,
+        job_id: Optional[str] = None,
+        job_queue = None
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Perform speaker diarization on an audio file.
@@ -88,6 +129,8 @@ class SpeakerDiarization:
             num_speakers: Exact number of speakers (if known)
             min_speakers: Minimum number of speakers
             max_speakers: Maximum number of speakers
+            job_id: Job ID for progress updates
+            job_queue: Job queue instance for progress updates
 
         Returns:
             List of speaker segments with format:
@@ -105,6 +148,10 @@ class SpeakerDiarization:
             return None
 
         try:
+            # Store job info for progress hook
+            self.current_job_id = job_id
+            self.current_job_queue = job_queue
+            
             logger.info(f"Starting speaker diarization for: {audio_path}")
 
             # Ensure input is a WAV file that pyannote decoders handle reliably
@@ -167,10 +214,19 @@ class SpeakerDiarization:
                     waveform = torch.from_numpy(data).float()
 
                 logger.info(f"Running diarization with in-memory waveform @ {sr} Hz, shape {tuple(waveform.shape)}")
-                diarization = self.pipeline({"waveform": waveform, "sample_rate": int(sr)}, **diarization_params)
+                logger.info(f"Diarization params: {diarization_params}")
+                diarization = self.pipeline(
+                    {"waveform": waveform, "sample_rate": int(sr)}, 
+                    **diarization_params,
+                    hook=self._progress_hook
+                )
             except Exception as decode_err:
                 logger.warning(f"Waveform path failed ({decode_err}). Falling back to file path.")
-                diarization = self.pipeline(prepared_path, **diarization_params)
+                diarization = self.pipeline(
+                    prepared_path, 
+                    **diarization_params,
+                    hook=self._progress_hook
+                )
 
             # Convert diarization output to a common list-of-dicts format
             speaker_segments = self._convert_diarization_to_segments(diarization)
