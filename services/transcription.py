@@ -151,7 +151,7 @@ def transcribe_audio_sync(
                 # Perform speaker diarization if enabled
                 if enable_diarization and SPEAKER_DIARIZATION_AVAILABLE:
                     logger.info("Performing speaker diarization...")
-                    diarization_service = get_diarization_service()
+                    diarization_service = get_diarization_service(hf_token=settings.HF_TOKEN)
                     
                     if diarization_service.is_available():
                         # Run diarization
@@ -273,7 +273,9 @@ async def transcribe_audio(
     enable_diarization: bool = False,
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
-    max_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None,
+    job_id: Optional[str] = None,
+    job_queue = None
 ) -> Dict[str, Any]:
     """Transcribe audio from a video file using Whisper.
 
@@ -284,6 +286,8 @@ async def transcribe_audio(
         num_speakers: Exact number of speakers (if known)
         min_speakers: Minimum number of speakers
         max_speakers: Maximum number of speakers
+        job_id: Job ID for progress updates
+        job_queue: Job queue instance for progress updates
 
     Returns:
         Dictionary containing the transcript and segments with timestamps.
@@ -455,15 +459,17 @@ async def transcribe_audio(
                 print("[INFO] Performing speaker diarization...")
                 logger.info("⏱️  Starting Pyannote speaker diarization...")
                 
-                diarization_service = get_diarization_service()
+                diarization_service = get_diarization_service(hf_token=settings.HF_TOKEN)
                 
                 if diarization_service.is_available():
-                    # Run diarization
+                    # Run diarization with job info
                     speaker_segments = diarization_service.diarize(
                         audio_path,
                         num_speakers=num_speakers,
                         min_speakers=min_speakers,
-                        max_speakers=max_speakers
+                        max_speakers=max_speakers,
+                        job_id=job_id,
+                        job_queue=job_queue
                     )
                     
                     diarization_elapsed = time.time() - step_start
