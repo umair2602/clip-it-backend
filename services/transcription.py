@@ -462,14 +462,19 @@ async def transcribe_audio(
                 diarization_service = get_diarization_service(hf_token=settings.HF_TOKEN)
                 
                 if diarization_service.is_available():
-                    # Run diarization with job info
-                    speaker_segments = diarization_service.diarize(
-                        audio_path,
-                        num_speakers=num_speakers,
-                        min_speakers=min_speakers,
-                        max_speakers=max_speakers,
-                        job_id=job_id,
-                        job_queue=job_queue
+                    # Run diarization with job info - wrap in executor to await properly
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    speaker_segments = await loop.run_in_executor(
+                        None,
+                        lambda: diarization_service.diarize(
+                            audio_path,
+                            num_speakers=num_speakers,
+                            min_speakers=min_speakers,
+                            max_speakers=max_speakers,
+                            job_id=job_id,
+                            job_queue=job_queue
+                        )
                     )
                     
                     diarization_elapsed = time.time() - step_start
