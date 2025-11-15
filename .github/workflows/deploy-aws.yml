@@ -51,6 +51,7 @@ jobs:
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         JSII_SILENCE_WARNING_DEPRECATED_NODE_VERSION: 1
+        SSL_CERTIFICATE_ARN: ${{ secrets.SSL_CERTIFICATE_ARN }}
       run: |
         echo "🏗️ Deploying infrastructure..."
         cd infrastructure
@@ -70,6 +71,21 @@ jobs:
             echo "⚠️ Bootstrap failed, trying to force bootstrap..."
             cdk bootstrap --force --require-approval never
           }
+        fi
+        
+        # Get SSL certificate ARN from SSM (if available)
+        echo "🔍 Checking for SSL certificate..."
+        SSL_CERT_ARN=$(aws ssm get-parameter \
+          --name "/clip-it/ssl-certificate-arn" \
+          --region $AWS_DEFAULT_REGION \
+          --query "Parameter.Value" \
+          --output text 2>/dev/null || echo "")
+        
+        if [ ! -z "$SSL_CERT_ARN" ]; then
+          echo "✅ Found SSL certificate ARN: $SSL_CERT_ARN"
+          export SSL_CERTIFICATE_ARN="$SSL_CERT_ARN"
+        else
+          echo "⚠️  No SSL certificate found in SSM. Deploying with HTTP only."
         fi
         
         # Check for and handle stuck changesets
