@@ -115,69 +115,49 @@ async def identify_engaging_segments_from_text(
         [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
 
         Your job is to:
-        1. Read through the full transcript carefully.
-        2. Identify COMPLETE conversations, stories, or discussions that make compelling standalone clips.
-        3. Select engaging content that tells a FULL STORY from beginning to end.
-        
-        WHAT MAKES A GREAT CLIP:
-        - Contains a COMPLETE conversation, story, or idea from START to FINISH
-        - Has all necessary context - viewers can understand it without hearing anything before
-        - Has a natural conclusion - doesn't end abruptly mid-thought
-        - Includes engaging content: stories, debates, explanations, insights, humor, strong opinions
-        - For multi-speaker clips: includes the ENTIRE exchange (question AND answer, statement AND response)
-        - Stands alone as valuable, entertaining, or informative content
+        1. Read through the full transcript.
+        2. Identify sections that can work as compelling video clips for social media platforms like TikTok, Instagram Reels, or YouTube Shorts.
+        3. Select only the most engaging, self-contained parts. A good clip should:
+        - Contain a complete thought, story, or insight that doesn't rely on external context
+        - Be interesting to someone who didn't hear the rest of the conversation
+        - Include opinions, unexpected facts, emotional moments, strong takes, or clever observations
+        - Avoid long pauses, filler words, or fragmented thoughts
+        - Be valuable or entertaining to people
 
         CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
-        - Each clip should capture COMPLETE conversations, stories, or thoughts from START to FINISH
-        - MINIMUM: 15 seconds (for quick insights or short exchanges)
-        - MAXIMUM: 180 seconds (3 minutes - for in-depth discussions or longer stories)
-        - Target range: 30-90 seconds for most clips
-        - PRIORITY: Completeness over duration - NEVER cut off mid-conversation or mid-thought
-        
-        CONVERSATION BOUNDARY DETECTION (USE SPEAKER LABELS):
-        - Look for natural conversation boundaries using speaker changes
-        - A clip should start when a topic/story BEGINS (even if speaker was mid-sentence before)
-        - A clip should end when the topic/story is FULLY RESOLVED or naturally concludes
-        - If multiple speakers discuss a topic, include the ENTIRE exchange from first mention to resolution
-        - DO NOT cut in the middle of back-and-forth dialogue
-        - Example: If SPEAKER_00 asks a question and SPEAKER_01 answers, include BOTH parts
-        
-        CONTEXT PRESERVATION RULES:
-        1. Find where a NEW topic, story, or idea is introduced
-        2. Trace that topic through ALL speaker contributions until it naturally concludes
-        3. Include setup/context at the beginning (don't start abruptly)
-        4. Include conclusion/resolution at the end (don't end abruptly)
-        5. For debates/discussions: capture the full exchange, not just one side
-        6. For stories: capture from setup through climax to conclusion
-        7. For explanations: capture the question AND the complete answer
-        
-        TIMESTAMP CALCULATION GUIDELINES:
-        1. Identify a complete conversational unit (topic introduction → discussion → resolution)
-        2. Find the EARLIEST point where this topic is mentioned or introduced
-        3. Find the LATEST point where this topic is concluded or naturally transitions
-        4. Set start_time at the topic introduction (even if it's 5-10 seconds before the main content)
-        5. Set end_time when the topic is FULLY resolved (include any follow-up or reactions)
-        6. Duration = end_time - start_time (must be 15-180 seconds)
-        7. If a topic naturally takes 120 seconds, use all 120 seconds - don't artificially truncate
+        - Each clip should be between 15-180 seconds long to ensure proper context and engagement
+        - Target around 30-60 seconds for optimal social media performance
+        - MINIMUM: 15 seconds (clips shorter than this will be REJECTED)
+        - MAXIMUM: 180 seconds (3 minutes - for in-depth stories/discussions)
+        - Choose duration based on the content: expand timestamps to capture complete thoughts/stories
+        - Example: If an interesting moment spans 25 seconds, set start_time and end_time to capture those 25 seconds
+        - Example: If a story takes 45 seconds to tell completely, use the full 45 seconds
+        - Example: For a quick insight at 500s that takes 35 seconds: start_time=500, end_time=535
 
-        IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many complete, engaging moments as possible (up to 20 clips).
-        Prioritize COMPLETENESS and quality over quantity - each clip must tell a full story.
+        TIMESTAMP CALCULATION GUIDELINES:
+        1. Identify the most interesting moment or topic in a section
+        2. Find where the topic/story BEGINS (include a bit of context if needed)
+        3. Find where the topic/story ENDS (ensure the thought is complete)
+        4. Calculate duration = end_time - start_time
+        5. Ensure duration is >= 15 seconds AND <= 180 seconds
+        6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
+        7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
+
+        IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many interesting moments as possible (up to 20 clips).
+        Prioritize quality over quantity - each clip should be genuinely engaging and self-contained.
         
-        DO NOT pick random segments or partial conversations. Only select clips where the topic has a clear beginning and end.
+        DO NOT pick random segments. Only select clips that could realistically go viral or spark curiosity, debate, or learning.
 
         For each selected clip, return a JSON object with:
-        - "start_time": in seconds (where the topic/conversation STARTS)
-        - "end_time": in seconds (where the topic/conversation ENDS completely)
-        - "title": a short, compelling title (4–10 words) that describes the COMPLETE content
+        - "start_time": in seconds (beginning of the interesting segment)
+        - "end_time": in seconds (end of the segment - must be at least start_time + 20)
+        - "title": a short, compelling title (4–10 words)
 
         MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
-        - Duration >= 15 seconds (MINIMUM - only for complete quick exchanges)
+        - Duration >= 20 seconds (MINIMUM - anything less will be rejected and wasted)
         - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
-        - COMPLETE conversation/topic from start to finish
-        - Includes ALL context needed to understand the clip standalone
-        - No abrupt starts or endings - natural entry and exit points
-        - If speakers have back-and-forth, include the ENTIRE exchange
-        - The clip tells a COMPLETE story, not a fragment
+        - Complete thought/story (don't cut off mid-sentence)
+        - Self-contained (makes sense without prior context)
 
         Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
 
@@ -191,7 +171,7 @@ async def identify_engaging_segments_from_text(
         messages=[
             {
                 "role": "system",
-                "content": "You are an AI assistant that analyzes podcast transcripts with speaker labels to find engaging segments for social media clips.",
+                "content": "You are an AI assistant that analyzes podcast transcripts to find engaging segments for social media clips.",
             },
             {"role": "user", "content": prompt},
         ],
@@ -306,38 +286,39 @@ async def identify_engaging_segments(
         - Be valuable or entertaining to people
 
         CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
-        - Each clip should capture COMPLETE conversations, stories, or thoughts from START to FINISH
-        - MINIMUM: 15 seconds (for quick insights or short exchanges)
-        - MAXIMUM: 180 seconds (3 minutes - for in-depth discussions or longer stories)
-        - Target range: 30-90 seconds for most clips
-        - PRIORITY: Completeness over duration - NEVER cut off mid-conversation or mid-thought
+        - Each clip should be between 15-180 seconds long to ensure proper context and engagement
+        - Target around 30-60 seconds for optimal social media performance
+        - MINIMUM: 15 seconds (clips shorter than this will be REJECTED)
+        - MAXIMUM: 180 seconds (3 minutes - for in-depth stories/discussions)
+        - Choose duration based on the content: expand timestamps to capture complete thoughts/stories
+        - Example: If an interesting moment spans 25 seconds, set start_time and end_time to capture those 25 seconds
+        - Example: If a story takes 45 seconds to tell completely, use the full 45 seconds
+        - Example: For a quick insight at 500s that takes 35 seconds: start_time=500, end_time=535
 
         TIMESTAMP CALCULATION GUIDELINES:
-        1. Identify a complete conversational unit (topic introduction → discussion → resolution)
-        2. Find the EARLIEST point where this topic is mentioned or introduced
-        3. Find the LATEST point where this topic is concluded or naturally transitions
-        4. Set start_time at the topic introduction (even if it's 5-10 seconds before the main content)
-        5. Set end_time when the topic is FULLY resolved (include any follow-up or reactions)
-        6. Duration = end_time - start_time (must be 15-180 seconds)
-        7. If a topic naturally takes 120 seconds, use all 120 seconds - don't artificially truncate
+        1. Identify the most interesting moment or topic in a section
+        2. Find where the topic/story BEGINS (include a bit of context if needed)
+        3. Find where the topic/story ENDS (ensure the thought is complete)
+        4. Calculate duration = end_time - start_time
+        5. Ensure duration is >= 15 seconds AND <= 180 seconds
+        6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
+        7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
 
         IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many interesting moments as possible (up to 20 clips).
-        Prioritize COMPLETENESS and quality over quantity - each clip must tell a full story.
+        Prioritize quality over quantity - each clip should be genuinely engaging and self-contained.
         
-        DO NOT pick random segments or partial conversations. Only select clips where the topic has a clear beginning and end.
+        DO NOT pick random segments. Only select clips that could realistically go viral or spark curiosity, debate, or learning.
 
         For each selected clip, return a JSON object with:
-        - "start_time": in seconds (where the topic/conversation STARTS)
-        - "end_time": in seconds (where the topic/conversation ENDS completely)
-        - "title": a short, compelling title (4–10 words) that describes the COMPLETE content
+        - "start_time": in seconds (beginning of the interesting segment)
+        - "end_time": in seconds (end of the segment - must be at least start_time + 15)
+        - "title": a short, compelling title (4–10 words)
 
         MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
-        - Duration >= 15 seconds (MINIMUM - only for complete quick exchanges)
+        - Duration >= 15 seconds (MINIMUM - anything less will be rejected and wasted)
         - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
-        - COMPLETE conversation/topic from start to finish
-        - Includes ALL context needed to understand the clip standalone
-        - No abrupt starts or endings - natural entry and exit points
-        - The clip tells a COMPLETE story, not a fragment
+        - Complete thought/story (don't cut off mid-sentence)
+        - Self-contained (makes sense without prior context)
 
         Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
 
