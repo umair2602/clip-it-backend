@@ -92,74 +92,180 @@ class S3Client:
         Returns:
             Tuple[bool, str, Dict]: (success, s3_key, video_info)
         """
+        logger.info(f"="*80)
+        logger.info(f"📥 STARTING YOUTUBE DOWNLOAD TO S3")
+        logger.info(f"   Video ID: {video_id}")
+        logger.info(f"   URL: {url}")
+        logger.info(f"   Title: {title}")
+        logger.info(f"="*80)
+        
         if not self.available:
+            logger.error("❌ S3 client not available - missing credentials or configuration")
+            logger.error(f"   AWS_ACCESS_KEY_ID set: {bool(settings.AWS_ACCESS_KEY_ID)}")
+            logger.error(f"   AWS_SECRET_ACCESS_KEY set: {bool(settings.AWS_SECRET_ACCESS_KEY)}")
+            logger.error(f"   S3_BUCKET: {settings.S3_BUCKET}")
             return False, None, {}
+        
+        logger.info(f"✅ S3 client available")
+        logger.info(f"   Bucket: {self.bucket}")
+        logger.info(f"   Region: {settings.AWS_REGION}")
             
         try:
             # Import YouTube downloader
+            logger.info("📦 Importing YouTube downloader modules...")
             from utils.sieve_downloader import download_youtube_video_sieve
             from utils.youtube_downloader import download_youtube_video
+            logger.info("✅ YouTube downloader modules imported successfully")
             
             # Create temporary directory for download
+            logger.info(f"📁 Creating temporary directory for download...")
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
+                logger.info(f"✅ Temporary directory created: {temp_path}")
                 
                 # Try Sieve first, then fallback to direct download
                 file_path, video_title, video_info = None, None, None
                 
                 try:
-                    logger.info(f"Attempting YouTube download with Sieve: {url}")
+                    logger.info(f"🔄 ATTEMPT 1: Downloading with Sieve service")
+                    logger.info(f"   URL: {url}")
+                    logger.info(f"   Output dir: {temp_path}")
                     file_path, video_title, video_info = await download_youtube_video_sieve(url, temp_path)
+                    
+                    if file_path and video_title:
+                        logger.info(f"✅ Sieve download successful!")
+                        logger.info(f"   File: {file_path}")
+                        logger.info(f"   Title: {video_title}")
+                        logger.info(f"   Info: {video_info}")
+                    else:
+                        logger.warning(f"⚠️ Sieve returned incomplete data")
+                        logger.warning(f"   file_path: {file_path}")
+                        logger.warning(f"   video_title: {video_title}")
+                        raise Exception("Sieve returned incomplete data")
+                        
                 except Exception as sieve_error:
-                    logger.warning(f"Sieve download failed: {str(sieve_error)}")
+                    logger.warning(f"❌ Sieve download failed: {type(sieve_error).__name__}: {str(sieve_error)}")
+                    logger.warning(f"   Full error: {repr(sieve_error)}")
+                    
                     try:
-                        logger.info("Attempting direct YouTube download")
+                        logger.info(f"🔄 ATTEMPT 2: Downloading with direct YouTube downloader (pytubefix)")
+                        logger.info(f"   URL: {url}")
+                        logger.info(f"   Output dir: {temp_path}")
                         file_path, video_title, video_info = await download_youtube_video(url, temp_path)
+                        
+                        if file_path and video_title:
+                            logger.info(f"✅ Direct download successful!")
+                            logger.info(f"   File: {file_path}")
+                            logger.info(f"   Title: {video_title}")
+                            logger.info(f"   Info: {video_info}")
+                        else:
+                            logger.error(f"❌ Direct download returned incomplete data")
+                            logger.error(f"   file_path: {file_path}")
+                            logger.error(f"   video_title: {video_title}")
+                            raise Exception("Direct download returned incomplete data")
+                            
                     except Exception as direct_error:
-                        logger.error(f"Both download methods failed: {str(direct_error)}")
+                        logger.error(f"❌ Direct download failed: {type(direct_error).__name__}: {str(direct_error)}")
+                        logger.error(f"   Full error: {repr(direct_error)}")
+                        logger.error(f"💥 BOTH DOWNLOAD METHODS FAILED")
                         return False, None, {}
                 
                 if not file_path or not video_title:
-                    logger.error("No file path or title returned from download")
+                    logger.error("❌ No file path or title returned from download")
+                    logger.error(f"   file_path: {file_path}")
+                    logger.error(f"   video_title: {video_title}")
+                    logger.error(f"   video_info: {video_info}")
+                    return False, None, {}
+                
+                # Validate downloaded file
+                logger.info(f"🔍 Validating downloaded file...")
+                if not os.path.exists(file_path):
+                    logger.error(f"❌ File does not exist: {file_path}")
+                    return False, None, {}
+                
+                file_size = os.path.getsize(file_path)
+                logger.info(f"✅ File validation passed")
+                logger.info(f"   Path: {file_path}")
+                logger.info(f"   Size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                logger.info(f"   Exists: {os.path.exists(file_path)}")
+                
+                if file_size == 0:
+                    logger.error(f"❌ Downloaded file is empty (0 bytes)")
                     return False, None, {}
                 
                 # Generate S3 key
+                logger.info(f"🔑 Generating S3 key...")
                 safe_title = "".join(c for c in video_title if c.isalnum() or c in [' ', '-', '_']).rstrip()
                 filename = f"{safe_title}.mp4"
                 s3_key = f"{settings.S3_UPLOAD_PREFIX}{video_id}/{filename}"
+                logger.info(f"✅ S3 key generated: {s3_key}")
+                logger.info(f"   Original title: {video_title}")
+                logger.info(f"   Safe title: {safe_title}")
+                logger.info(f"   Filename: {filename}")
                 
                 # Upload to S3
-                logger.info(f"Uploading to S3: {s3_key}")
-                self.s3_client.upload_file(
-                    file_path,
-                    self.bucket,
-                    s3_key,
-                    ExtraArgs={
-                        'ContentType': 'video/mp4',
-                        'Metadata': {
-                            'video-id': video_id,
-                            'title': video_title,
-                            'source': 'youtube',
-                            'original-url': url
+                logger.info(f"☁️ UPLOADING TO S3...")
+                logger.info(f"   Source: {file_path}")
+                logger.info(f"   Bucket: {self.bucket}")
+                logger.info(f"   Key: {s3_key}")
+                logger.info(f"   Size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                
+                try:
+                    self.s3_client.upload_file(
+                        file_path,
+                        self.bucket,
+                        s3_key,
+                        ExtraArgs={
+                            'ContentType': 'video/mp4',
+                            'Metadata': {
+                                'video-id': video_id,
+                                'title': video_title,
+                                'source': 'youtube',
+                                'original-url': url
+                            }
                         }
-                    }
-                )
+                    )
+                    logger.info(f"✅ S3 upload successful!")
+                except Exception as upload_error:
+                    logger.error(f"❌ S3 upload failed: {type(upload_error).__name__}: {str(upload_error)}")
+                    logger.error(f"   Full error: {repr(upload_error)}")
+                    logger.error(f"   File path: {file_path}")
+                    logger.error(f"   File exists: {os.path.exists(file_path)}")
+                    logger.error(f"   File size: {file_size}")
+                    raise
                 
                 # Generate S3 URL
+                logger.info(f"🔗 Generating S3 URL...")
                 s3_url = self.get_object_url(s3_key)
+                logger.info(f"✅ S3 URL: {s3_url}")
                 
                 # Update video info with S3 details
                 video_info.update({
                     's3_key': s3_key,
                     's3_url': s3_url,
-                    'filename': filename
+                    'filename': filename,
+                    'file_size': file_size
                 })
                 
-                logger.info(f"YouTube video successfully uploaded to S3: {s3_url}")
+                logger.info(f"="*80)
+                logger.info(f"🎉 YOUTUBE DOWNLOAD TO S3 COMPLETE!")
+                logger.info(f"   Video ID: {video_id}")
+                logger.info(f"   S3 Key: {s3_key}")
+                logger.info(f"   S3 URL: {s3_url}")
+                logger.info(f"   File Size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                logger.info(f"="*80)
                 return True, s3_key, video_info
                 
         except Exception as e:
-            logger.error(f"Error downloading YouTube to S3: {str(e)}")
+            logger.error(f"="*80)
+            logger.error(f"💥 CRITICAL ERROR IN YOUTUBE DOWNLOAD TO S3")
+            logger.error(f"   Error Type: {type(e).__name__}")
+            logger.error(f"   Error Message: {str(e)}")
+            logger.error(f"   Error Repr: {repr(e)}")
+            logger.error(f"   Video ID: {video_id}")
+            logger.error(f"   URL: {url}")
+            logger.error(f"="*80)
+            logger.exception("Full stack trace:")
             return False, None, {}
     
     def upload_file_to_s3(self, file_path: str, video_id: str, filename: str, content_type: str = "video/mp4") -> Tuple[bool, str]:
