@@ -4,6 +4,7 @@ import os
 import aws_cdk as cdk
 from aws_cdk import Stack
 from aws_cdk import aws_autoscaling as autoscaling
+from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -330,12 +331,63 @@ class ClipItStack(Stack):
             )
         )
 
-        # Create listener
-        listener = load_balancer.add_listener(
-            "ClipItListener",
-            port=80,
-            default_target_groups=[web_target_group]
-        )
+        # Get SSL certificate ARN from environment variable, CDK context, or SSM
+        # Priority: 1) Environment variable, 2) CDK context, 3) SSM parameter
+        ssl_cert_arn = os.getenv("SSL_CERTIFICATE_ARN") or self.node.try_get_context("ssl_certificate_arn")
+        
+        # Try to get from SSM if not set (read at synthesis time)
+        if not ssl_cert_arn:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["aws", "ssm", "get-parameter", "--name", "/clip-it/ssl-certificate-arn", "--region", self.region, "--query", "Parameter.Value", "--output", "text"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    ssl_cert_arn = result.stdout.strip()
+                    print(f"✅ Found SSL certificate ARN in SSM: {ssl_cert_arn}")
+            except Exception as e:
+                print(f"⚠️  Could not read SSL certificate from SSM: {e}")
+                ssl_cert_arn = None
+        
+        # Create HTTPS listener if certificate is available
+        if ssl_cert_arn:
+            # Import the certificate
+            certificate = acm.Certificate.from_certificate_arn(
+                self, "SSLCertificate",
+                certificate_arn=ssl_cert_arn
+            )
+            
+            # Create HTTPS listener (port 443)
+            https_listener = load_balancer.add_listener(
+                "ClipItHTTPSListener",
+                port=443,
+                protocol=elbv2.ApplicationProtocol.HTTPS,
+                certificates=[certificate],
+                default_target_groups=[web_target_group]
+            )
+            
+            # Update HTTP listener to redirect to HTTPS
+            # Use same ID as existing listener so CloudFormation updates it instead of creating new one
+            http_listener = load_balancer.add_listener(
+                "ClipItListener",  # Same ID as before to update existing listener
+                port=80,
+                default_action=elbv2.ListenerAction.redirect(
+                    protocol="HTTPS",
+                    port="443",
+                    permanent=True
+                )
+            )
+        else:
+            # No certificate - use HTTP only (for development)
+            # In production, you should always use HTTPS
+            http_listener = load_balancer.add_listener(
+                "ClipItListener",
+                port=80,
+                default_target_groups=[web_target_group]
+            )
 
         # Create shared security group for ECS services
         ecs_security_group = self.create_ecs_security_group(vpc)
@@ -409,11 +461,23 @@ class ClipItStack(Stack):
         )
 
         # Outputs
-        cdk.CfnOutput(
-            self, "LoadBalancerURL",
-            value=f"http://{load_balancer.load_balancer_dns_name}",
-            description="Application Load Balancer URL"
-        )
+        if ssl_cert_arn:
+            cdk.CfnOutput(
+                self, "LoadBalancerURL",
+                value=f"https://{load_balancer.load_balancer_dns_name}",
+                description="Application Load Balancer URL (HTTPS)"
+            )
+            cdk.CfnOutput(
+                self, "LoadBalancerHTTPURL",
+                value=f"http://{load_balancer.load_balancer_dns_name}",
+                description="Application Load Balancer URL (HTTP - redirects to HTTPS)"
+            )
+        else:
+            cdk.CfnOutput(
+                self, "LoadBalancerURL",
+                value=f"http://{load_balancer.load_balancer_dns_name}",
+                description="Application Load Balancer URL (HTTP only - set SSL_CERTIFICATE_ARN for HTTPS)"
+            )
 
         cdk.CfnOutput(
             self, "S3BucketName",
