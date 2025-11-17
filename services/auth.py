@@ -17,8 +17,8 @@ from models.user import TokenData, User, UserCreate, UserInDB
 
 logger = logging.getLogger(__name__)
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing context - using Argon2 (modern, secure, cross-platform)
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 
 class AuthService:
