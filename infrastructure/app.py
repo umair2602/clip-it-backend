@@ -192,7 +192,8 @@ class ClipItStack(Stack):
             "PREFERRED_CLIP_DURATION": "180",
             "MAX_CLIPS_PER_EPISODE": "10",
             "OUTPUT_WIDTH": "1080",
-            "OUTPUT_HEIGHT": "1920"
+            "OUTPUT_HEIGHT": "1920",
+            "SPEAKER_DIARIZATION_ENABLED": "false"
         }
         
         # Secrets from SSM (sensitive values)
@@ -275,6 +276,18 @@ class ClipItStack(Stack):
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "S3BucketRef",
                     parameter_name="/clip-it/s3-bucket"
+                )
+            ),
+            "HF_TOKEN": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "HfTokenRef",
+                    parameter_name="/clip-it/hf-token"
+                )
+            ),
+            "HUGGINGFACE_TOKEN": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "HuggingfaceTokenRef",
+                    parameter_name="/clip-it/huggingface-token"
                 )
             ),
         }
