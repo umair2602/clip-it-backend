@@ -178,10 +178,9 @@ class ClipItStack(Stack):
         )
 
         # Environment variables (non-sensitive)
+        # Note: S3_BUCKET and AWS_REGION can come from SSM if needed, but we'll use CDK values as defaults
         env_vars = {
             "REDIS_URL": f"redis://{redis_cluster.attr_redis_endpoint_address}:6379",
-            "S3_BUCKET": s3_bucket.bucket_name,
-            "AWS_REGION": self.region,
             "MONGODB_DB_NAME": "clip_it_db",
             "JWT_ALGORITHM": "HS256",
             "JWT_ACCESS_TOKEN_EXPIRE_MINUTES": "180",
@@ -193,12 +192,13 @@ class ClipItStack(Stack):
             "PREFERRED_CLIP_DURATION": "180",
             "MAX_CLIPS_PER_EPISODE": "10",
             "OUTPUT_WIDTH": "1080",
-            "OUTPUT_HEIGHT": "1920"
+            "OUTPUT_HEIGHT": "1920",
+            "SPEAKER_DIARIZATION_ENABLED": "false"
         }
         
         # Secrets from SSM (sensitive values)
         # Using from_secure_string_parameter_attributes for SecureString parameters
-        # These parameters already exist in SSM as SecureString (created via scripts/setup-secrets.sh)
+        # These parameters should exist in SSM (created via scripts/setup-secrets.sh)
         secrets = {
             "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(
                 ssm.StringParameter.from_secure_string_parameter_attributes(
@@ -240,6 +240,54 @@ class ClipItStack(Stack):
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "TikTokRedirectURIRef",
                     parameter_name="/clip-it/tiktok-redirect-uri"
+                )
+            ),
+            "TIKTOK_VERIFICATION_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokVerificationKeyRef",
+                    parameter_name="/clip-it/tiktok-verification-key"
+                )
+            ),
+            "PROXY_BASE_URL": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "ProxyBaseURLRef",
+                    parameter_name="/clip-it/proxy-base-url"
+                )
+            ),
+            "AWS_ACCESS_KEY_ID": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AWSAccessKeyIDRef",
+                    parameter_name="/clip-it/aws-access-key-id"
+                )
+            ),
+            "AWS_SECRET_ACCESS_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AWSSecretAccessKeyRef",
+                    parameter_name="/clip-it/aws-secret-access-key"
+                )
+            ),
+            "AWS_REGION": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AWSRegionRef",
+                    parameter_name="/clip-it/aws-region"
+                )
+            ),
+            "S3_BUCKET": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "S3BucketRef",
+                    parameter_name="/clip-it/s3-bucket"
+                )
+            ),
+            "HF_TOKEN": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "HfTokenRef",
+                    parameter_name="/clip-it/hf-token"
+                )
+            ),
+            "HUGGINGFACE_TOKEN": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "HuggingfaceTokenRef",
+                    parameter_name="/clip-it/huggingface-token"
                 )
             ),
         }
