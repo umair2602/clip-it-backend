@@ -765,7 +765,7 @@ async def tiktok_callback(
                 pass
 
             logger.info(
-                f"TikTok OAuth successful for user {user_id}, open_id: {user_info['data']['open_id']}"
+                f"TikTok OAuth successful for user {user_id}, open_id: {open_id}"
             )
 
             # Return success page that can close itself and communicate with parent
