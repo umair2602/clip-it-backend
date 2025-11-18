@@ -1,0 +1,419 @@
+{
+  "version": "34.0.0",
+  "artifacts": {
+    "ClipItStack.assets": {
+      "type": "cdk:asset-manifest",
+      "properties": {
+        "file": "ClipItStack.assets.json",
+        "requiresBootstrapStackVersion": 6,
+        "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version"
+      }
+    },
+    "ClipItStack": {
+      "type": "aws:cloudformation:stack",
+      "environment": "aws://unknown-account/unknown-region",
+      "properties": {
+        "templateFile": "ClipItStack.template.json",
+        "terminationProtection": false,
+        "validateOnSynth": false,
+        "assumeRoleArn": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-hnb659fds-deploy-role-${AWS::AccountId}-${AWS::Region}",
+        "cloudFormationExecutionRoleArn": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-hnb659fds-cfn-exec-role-${AWS::AccountId}-${AWS::Region}",
+        "stackTemplateAssetObjectUrl": "s3://cdk-hnb659fds-assets-${AWS::AccountId}-${AWS::Region}/2a8ca565fcad7f212d9c7ccef680fcddeda37039f1c7a4777448287d312b1b8d.json",
+        "requiresBootstrapStackVersion": 6,
+        "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version",
+        "additionalDependencies": [
+          "ClipItStack.assets"
+        ],
+        "lookupRole": {
+          "arn": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-hnb659fds-lookup-role-${AWS::AccountId}-${AWS::Region}",
+          "requiresBootstrapStackVersion": 8,
+          "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version"
+        }
+      },
+      "dependencies": [
+        "ClipItStack.assets"
+      ],
+      "metadata": {
+        "/ClipItStack/ClipItVPC/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCF96514FC"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet1/Subnet": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet1Subnet5C6B3FFE"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet1/RouteTable": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet1RouteTableA729B5E7"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet1/RouteTableAssociation": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet1RouteTableAssociationF3EEDF14"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet1/DefaultRoute": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet1DefaultRouteDC3B8389"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet1/EIP": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet1EIP6546E98B"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet1/NATGateway": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet1NATGateway354F8508"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet2/Subnet": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet2SubnetC0CFF6C7"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet2/RouteTable": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet2RouteTable1B505657"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet2/RouteTableAssociation": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet2RouteTableAssociation0AD76E67"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PublicSubnet2/DefaultRoute": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPublicSubnet2DefaultRoute8E9FFF90"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet1/Subnet": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet1Subnet79806D53"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet1/RouteTable": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet1RouteTable579EA2CF"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet1/RouteTableAssociation": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet1RouteTableAssociation5F7EB218"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet1/DefaultRoute": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet1DefaultRouteFFB1BEF9"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet2/Subnet": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet2SubnetB6E8DBCE"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet2/RouteTable": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet2RouteTable9D9EFD87"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet2/RouteTableAssociation": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet2RouteTableAssociation83F23CCA"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/PrivateSubnet2/DefaultRoute": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCPrivateSubnet2DefaultRouteC4BEB095"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/IGW": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCIGWD6C7A7A4"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/VPCGW": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCVPCGW1B2DDAB8"
+          }
+        ],
+        "/ClipItStack/ClipItVPC/RestrictDefaultSecurityGroupCustomResource/Default": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItVPCRestrictDefaultSecurityGroupCustomResource99C0BCF3"
+          }
+        ],
+        "/ClipItStack/Custom::VpcRestrictDefaultSGCustomResourceProvider/Role": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0"
+          }
+        ],
+        "/ClipItStack/Custom::VpcRestrictDefaultSGCustomResourceProvider/Handler": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E"
+          }
+        ],
+        "/ClipItStack/ClipItStorage/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItStorage33EADFF8"
+          }
+        ],
+        "/ClipItStack/RedisSubnetGroup": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "RedisSubnetGroup"
+          }
+        ],
+        "/ClipItStack/RedisSecurityGroup/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "RedisSecurityGroupB05951F6"
+          }
+        ],
+        "/ClipItStack/RedisCluster": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "RedisCluster"
+          }
+        ],
+        "/ClipItStack/ClipItCluster/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItClusterBBEB73F8"
+          }
+        ],
+        "/ClipItStack/WebRepository/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WebRepository0EB245C6"
+          }
+        ],
+        "/ClipItStack/WorkerRepository/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WorkerRepository770852D6"
+          }
+        ],
+        "/ClipItStack/TaskExecutionRole/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "TaskExecutionRole250D2532"
+          }
+        ],
+        "/ClipItStack/TaskExecutionRole/DefaultPolicy/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "TaskExecutionRoleDefaultPolicyA84DD1B0"
+          }
+        ],
+        "/ClipItStack/TaskRole/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "TaskRole30FC0FBB"
+          }
+        ],
+        "/ClipItStack/TaskRole/DefaultPolicy/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "TaskRoleDefaultPolicy07FC53DE"
+          }
+        ],
+        "/ClipItStack/ClipItLogGroup/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItLogGroup14AB4C01"
+          }
+        ],
+        "/ClipItStack/WebTaskDefinition/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WebTaskDefinition8DF7C630"
+          }
+        ],
+        "/ClipItStack/WorkerTaskDefinition/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WorkerTaskDefinition8AD2CCFF"
+          }
+        ],
+        "/ClipItStack/ALBSecurityGroup/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ALBSecurityGroup29A3BDEF"
+          }
+        ],
+        "/ClipItStack/ClipItALB/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItALB769EF743"
+          }
+        ],
+        "/ClipItStack/ClipItALB/ClipItHTTPSListener/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItALBClipItHTTPSListener06FD1E78"
+          }
+        ],
+        "/ClipItStack/ClipItALB/ClipItListener/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ClipItALBClipItListener0D3BAE73"
+          }
+        ],
+        "/ClipItStack/WebTargetGroup/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WebTargetGroup12079923"
+          }
+        ],
+        "/ClipItStack/ECSSecurityGroup/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ECSSecurityGroupA14DBE7D"
+          }
+        ],
+        "/ClipItStack/ECSSecurityGroup/from ClipItStackALBSecurityGroup499B6A63:8000": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "ECSSecurityGroupfromClipItStackALBSecurityGroup499B6A638000FDEF8E7B"
+          }
+        ],
+        "/ClipItStack/WebService/Service": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WebService7F8A1763"
+          }
+        ],
+        "/ClipItStack/WebService/TaskCount/Target/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WebServiceTaskCountTarget578D9A62"
+          }
+        ],
+        "/ClipItStack/WebService/TaskCount/Target/WebCpuScaling/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WebServiceTaskCountTargetWebCpuScaling94DE1699"
+          }
+        ],
+        "/ClipItStack/WorkerService/Service": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WorkerService99815FA9"
+          }
+        ],
+        "/ClipItStack/WorkerService/TaskCount/Target/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WorkerServiceTaskCountTarget94398C8F"
+          }
+        ],
+        "/ClipItStack/WorkerService/TaskCount/Target/WorkerCpuScaling/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "WorkerServiceTaskCountTargetWorkerCpuScaling92D230C2"
+          }
+        ],
+        "/ClipItStack/S3BucketNameParam/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "S3BucketNameParam0896ADEA"
+          }
+        ],
+        "/ClipItStack/RedisEndpointParam/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "RedisEndpointParam7149FC31"
+          }
+        ],
+        "/ClipItStack/LoadBalancerDNSParam/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "LoadBalancerDNSParamE9946691"
+          }
+        ],
+        "/ClipItStack/LoadBalancerURL": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "LoadBalancerURL"
+          }
+        ],
+        "/ClipItStack/LoadBalancerHTTPURL": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "LoadBalancerHTTPURL"
+          }
+        ],
+        "/ClipItStack/S3BucketName": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "S3BucketName"
+          }
+        ],
+        "/ClipItStack/RedisEndpoint": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "RedisEndpoint"
+          }
+        ],
+        "/ClipItStack/CDKMetadata/Default": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CDKMetadata"
+          }
+        ],
+        "/ClipItStack/CDKMetadata/Condition": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CDKMetadataAvailable"
+          }
+        ],
+        "/ClipItStack/BootstrapVersion": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "BootstrapVersion"
+          }
+        ],
+        "/ClipItStack/CheckBootstrapVersion": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CheckBootstrapVersion"
+          }
+        ]
+      },
+      "displayName": "ClipItStack"
+    },
+    "Tree": {
+      "type": "cdk:tree",
+      "properties": {
+        "file": "tree.json"
+      }
+    }
+  }
+}

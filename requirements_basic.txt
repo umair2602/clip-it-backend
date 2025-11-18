@@ -20,15 +20,6 @@ mediapipe>=0.10.0
 scipy>=1.11.0
 matplotlib>=3.7.0
 
-# Speaker diarization dependencies
-pyannote.audio>=3.1.0
-pyannote.core>=5.0.0
-pyannote.database>=5.0.0
-pyannote.metrics>=3.2.0
-
-# WhisperX for word-level alignment with speaker diarization
-whisperx>=3.1.0
-
 # Video processing
 Pillow>=10.0.0
 

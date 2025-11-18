@@ -16,6 +16,7 @@ from models.video import (
 )
 from services.auth import auth_service
 from services.video_service import video_service
+from jobs import job_queue
 # from utils.sieve_downloader import download_youtube_video_sieve  # Temporarily disabled
 
 logger = logging.getLogger(__name__)
@@ -151,9 +152,21 @@ async def download_youtube_video(
     Register YouTube video for download and storage in S3 for the user.
     """
     try:
+        logger.info(f"="*80)
+        logger.info(f"📺 YOUTUBE DOWNLOAD REQUEST RECEIVED")
+        logger.info(f"   User ID: {current_user.id}")
+        logger.info(f"   User Email: {current_user.email}")
+        logger.info(f"   URL: {url}")
+        logger.info(f"   Custom Title: {title}")
+        logger.info(f"   Description: {description}")
+        logger.info(f"="*80)
+        
         # Extract video ID from URL
         video_id_from_url = url.path.split('/')[-1] if url.path else "unknown"
+        logger.info(f"🔍 Extracted video ID from URL: {video_id_from_url}")
+        
         # Create initial video record
+        logger.info(f"📝 Creating initial video record...")
         video_data = VideoCreate(
             user_id=current_user.id,
             filename=f"youtube_{video_id_from_url}.mp4",
@@ -163,25 +176,77 @@ async def download_youtube_video(
             status=VideoStatus.DOWNLOADING,
             video_type=VideoType.YOUTUBE
         )
+        logger.info(f"   Video data created: {video_data.dict()}")
+        
         # Insert video and fetch the document with _id
+        logger.info(f"💾 Inserting video into database...")
         db = video_service.db
         videos_collection = db["videos"]
         video_dict = video_data.dict()
         result = videos_collection.insert_one(video_dict)
+        logger.info(f"✅ Video inserted with ID: {result.inserted_id}")
+        
         video = videos_collection.find_one({"_id": result.inserted_id})
         # Convert ObjectId to string
         video["_id"] = str(video["_id"])
         video["video_id"] = video["_id"]
+        
+        logger.info(f"📊 Video record created:")
+        logger.info(f"   Database ID: {video['_id']}")
+        logger.info(f"   Video ID: {video['video_id']}")
+        logger.info(f"   Status: {video.get('status')}")
+        logger.info(f"   Type: {video.get('video_type')}")
+        
         # S3 URL assertion
         if video.get('s3_url') and not str(video['s3_url']).startswith('https://'):
+            logger.error(f"❌ Non-S3 URL detected in video object: {video.get('s3_url')}")
             raise HTTPException(status_code=500, detail='Non-S3 URL detected in video object!')
+        
+        # Create background job for YouTube download
+        logger.info(f"🎯 Creating background job for YouTube download...")
+        job_id = job_queue.add_job(
+            "youtube_download",
+            {
+                "url": str(url),
+                "video_id": video["video_id"],
+                "user_id": current_user.id,
+                "auto_process": True  # Automatically process after download
+            }
+        )
+        logger.info(f"✅ Background job created: {job_id}")
+        
+        # Update video record with job_id
+        videos_collection.update_one(
+            {"_id": result.inserted_id},
+            {"$set": {"job_id": job_id}}
+        )
+        logger.info(f"📝 Video record updated with job_id: {job_id}")
+        
+        logger.info(f"="*80)
+        logger.info(f"🎉 YOUTUBE DOWNLOAD JOB CREATED SUCCESSFULLY")
+        logger.info(f"   Video ID: {video['video_id']}")
+        logger.info(f"   Job ID: {job_id}")
+        logger.info(f"   Status: {video.get('status')}")
+        logger.info(f"   Worker will process this job automatically")
+        logger.info(f"="*80)
+        
         return {
-            "message": "YouTube video registered for download",
+            "message": "YouTube video download started",
             "video": video,
-            "note": "Actual download functionality will be implemented in a future update"
+            "job_id": job_id,
+            "status": "downloading"
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error registering YouTube video: {str(e)}")
+        logger.error(f"="*80)
+        logger.error(f"💥 ERROR REGISTERING YOUTUBE VIDEO")
+        logger.error(f"   Error Type: {type(e).__name__}")
+        logger.error(f"   Error Message: {str(e)}")
+        logger.error(f"   User ID: {current_user.id}")
+        logger.error(f"   URL: {url}")
+        logger.error(f"="*80)
+        logger.exception("Full stack trace:")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"

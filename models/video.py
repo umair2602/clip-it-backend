@@ -123,6 +123,12 @@ class ClipBase(BaseModel):
     summary: Optional[str] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
+    
+    # Speaker diarization fields
+    speaker_segments: Optional[List[Dict[str, Any]]] = None  # Raw speaker segments from pyannote
+    speaker_stats: Optional[Dict[str, Any]] = None  # Speaker statistics (duration, percentage, etc.)
+    transcription_with_speakers: Optional[str] = None  # Formatted transcript with speaker labels
+    transcript_for_ai: Optional[str] = None  # AI-optimized format: "start end SPEAKER text"
 
     class Config:
         json_encoders = {ObjectId: str}

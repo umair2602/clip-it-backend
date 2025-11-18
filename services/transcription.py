@@ -1,5 +1,6 @@
 import os
 import subprocess
+import logging
 
 # Import configuration
 import sys
@@ -12,6 +13,17 @@ import whisper
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import settings
+
+# Setup logger
+logger = logging.getLogger(__name__)
+
+# Import speaker diarization service
+try:
+    from services.speaker_diarization import get_diarization_service
+    SPEAKER_DIARIZATION_AVAILABLE = True
+except ImportError:
+    SPEAKER_DIARIZATION_AVAILABLE = False
+    print("[WARNING] Speaker diarization not available. Install pyannote.audio to enable.")
 
 # Initialize Whisper model
 model = None
@@ -26,9 +38,9 @@ def load_model(model_size="small"):
         try:
             # Check if CUDA is available and use GPU if possible
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            print(f"[INFO] Loading Whisper model on device: {device}")
+            logger.info(f"Loading Whisper model on device: {device}")
             if device == "cuda":
-                print(f"[INFO] Using GPU: {torch.cuda.get_device_name(0)}")
+                logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
                 # Set torch to use the highest precision available for better accuracy
                 torch.set_float32_matmul_precision("high")
 
@@ -38,10 +50,10 @@ def load_model(model_size="small"):
                     # Test if model works with a simple operation to catch early GPU issues
                     dummy_input = torch.zeros((1, 80, 3000), device=device)
                     model.encoder(dummy_input)
-                    print("[INFO] Successfully loaded and tested model on GPU")
+                    logger.info("Successfully loaded and tested model on GPU")
                 except Exception as e:
-                    print(
-                        f"[WARNING] Error loading model on GPU: {str(e)}. Falling back to CPU."
+                    logger.warning(
+                        f"Error loading model on GPU: {str(e)}. Falling back to CPU."
                     )
                     device = "cpu"
                     model = whisper.load_model(model_size, device=device)
@@ -55,8 +67,24 @@ def load_model(model_size="small"):
     return model
 
 
-def transcribe_audio_sync(video_path: str, model_size: str = "tiny") -> Dict[str, Any]:
-    """Synchronous version of transcribe_audio for thread execution"""
+def transcribe_audio_sync(
+    video_path: str, 
+    model_size: str = "tiny",
+    enable_diarization: bool = False,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None
+) -> Dict[str, Any]:
+    """Synchronous version of transcribe_audio for thread execution
+    
+    Args:
+        video_path: Path to video file
+        model_size: Whisper model size
+        enable_diarization: Whether to perform speaker diarization
+        num_speakers: Exact number of speakers (if known)
+        min_speakers: Minimum number of speakers
+        max_speakers: Maximum number of speakers
+    """
     import logging
 
     try:
@@ -79,7 +107,13 @@ def transcribe_audio_sync(video_path: str, model_size: str = "tiny") -> Dict[str
                 f"[WARNING] Audio file too small ({audio_size} bytes) - video appears silent"
             )
             print(f"[DEBUG] Returning empty transcript for silent video")
-            return {"text": "", "segments": [], "language": "en"}
+            return {
+                "text": "", 
+                "segments": [], 
+                "language": "en",
+                "speaker_segments": None,
+                "speaker_stats": None
+            }
 
         # Transcribe audio with additional error handling
         try:
@@ -92,11 +126,98 @@ def transcribe_audio_sync(video_path: str, model_size: str = "tiny") -> Dict[str
             # Check if transcription actually found any content
             segments = result.get("segments", [])
             text = result.get("text", "").strip()
+            
+            # Log the raw transcript from Whisper (before diarization)
+            logger.info("="*70)
+            logger.info("RAW WHISPER TRANSCRIPT (transcribe_audio_sync)")
+            logger.info("="*70)
+            logger.info(f"Text: {text}")
+            logger.info(f"Number of segments: {len(segments)}")
+            for i, seg in enumerate(segments):
+                logger.info(f"Segment {i}: [{seg.get('start', 0):.2f}s - {seg.get('end', 0):.2f}s] {seg.get('text', '')}")
+            logger.info("="*70)
 
             if not segments and not text:
                 print("Warning: Transcription found no speech content")
                 # Return a minimal valid structure instead of failing
-                result = {"text": "", "segments": [], "language": "en"}
+                result = {
+                    "text": "", 
+                    "segments": [], 
+                    "language": "en",
+                    "speaker_segments": None,
+                    "speaker_stats": None
+                }
+            else:
+                # Perform speaker diarization if enabled
+                if enable_diarization and SPEAKER_DIARIZATION_AVAILABLE:
+                    logger.info("Performing speaker diarization...")
+                    diarization_service = get_diarization_service(hf_token=settings.HF_TOKEN)
+                    
+                    if diarization_service.is_available():
+                        # Run diarization
+                        speaker_segments = diarization_service.diarize(
+                            audio_path,
+                            num_speakers=num_speakers,
+                            min_speakers=min_speakers,
+                            max_speakers=max_speakers
+                        )
+                        
+                        if speaker_segments:
+                            # Assign speakers to transcript segments using WhisperX alignment
+                            result["segments"] = diarization_service.assign_speakers_to_transcript(
+                                result["segments"],
+                                speaker_segments,
+                                audio_path=audio_path,  # Pass audio_path for WhisperX alignment
+                                use_whisperx_alignment=True  # Enable WhisperX word-level alignment
+                            )
+                            
+                            # Add speaker information to result
+                            result["speaker_segments"] = speaker_segments
+                            result["speaker_stats"] = diarization_service.get_speaker_statistics(speaker_segments)
+                            
+                            # Create formatted transcript with speakers (readable format)
+                            result["text_with_speakers"] = diarization_service.format_transcript_with_speakers(
+                                result["segments"],
+                                include_timestamps=True
+                            )
+                            
+                            # Create AI-optimized format for clip generation
+                            result["transcript_for_ai"] = diarization_service.format_transcript_for_ai_clips(
+                                result["segments"]
+                            )
+                            
+                            logger.info(f"Speaker diarization complete. Found {result['speaker_stats']['num_speakers']} speakers")
+                            
+                            # Log the AI transcript for debugging/analysis
+                            logger.info("="*70)
+                            logger.info("AI-READY TRANSCRIPT (for clip generation)")
+                            logger.info("="*70)
+                            
+                            # Log each line of the transcript separately so it appears in log file
+                            for line in result["transcript_for_ai"].split('\n'):
+                                if line.strip():  # Only log non-empty lines
+                                    logger.info(line)
+                            
+                            logger.info("="*70)
+                            
+                            # Also log to file for immediate visibility
+                            logger.info("\n" + "="*70)
+                            logger.info("AI-READY TRANSCRIPT (for clip generation)")
+                            logger.info("="*70)
+                            logger.info(result["transcript_for_ai"])
+                            logger.info("="*70 + "\n")
+                        else:
+                            logger.warning("Speaker diarization failed or returned no results")
+                            result["speaker_segments"] = None
+                            result["speaker_stats"] = None
+                    else:
+                        logger.warning("Speaker diarization service not available")
+                        result["speaker_segments"] = None
+                        result["speaker_stats"] = None
+                elif enable_diarization and not SPEAKER_DIARIZATION_AVAILABLE:
+                    logger.warning("Speaker diarization requested but not available. Install pyannote.audio.")
+                    result["speaker_segments"] = None
+                    result["speaker_stats"] = None
 
         except Exception as transcription_error:
             print(f"Transcription error: {str(transcription_error)}")
@@ -125,7 +246,13 @@ def transcribe_audio_sync(video_path: str, model_size: str = "tiny") -> Dict[str
                 print(
                     f"[DEBUG] Detected empty/corrupted audio error - returning silent transcript"
                 )
-                return {"text": "", "segments": [], "language": "en"}
+                return {
+                    "text": "", 
+                    "segments": [], 
+                    "language": "en",
+                    "speaker_segments": None,
+                    "speaker_stats": None
+                }
             else:
                 raise
 
@@ -140,17 +267,42 @@ def transcribe_audio_sync(video_path: str, model_size: str = "tiny") -> Dict[str
         raise
 
 
-async def transcribe_audio(video_path: str, model_size: str = "base") -> Dict[str, Any]:
+async def transcribe_audio(
+    video_path: str, 
+    model_size: str = "base",
+    enable_diarization: bool = False,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    job_id: Optional[str] = None,
+    job_queue = None
+) -> Dict[str, Any]:
     """Transcribe audio from a video file using Whisper.
 
     Args:
         video_path: Path to the video file
         model_size: Whisper model size (tiny, base, small, medium, large)
+        enable_diarization: Whether to perform speaker diarization
+        num_speakers: Exact number of speakers (if known)
+        min_speakers: Minimum number of speakers
+        max_speakers: Maximum number of speakers
+        job_id: Job ID for progress updates
+        job_queue: Job queue instance for progress updates
 
     Returns:
-        Dictionary containing the transcript and segments with timestamps
+        Dictionary containing the transcript and segments with timestamps.
+        If diarization is enabled, also includes:
+        - speaker_segments: List of speaker segments
+        - speaker_stats: Statistics about speakers
+        - text_with_speakers: Formatted transcript with speaker labels
     """
     print(f"Starting transcription for: {video_path} with model size: {model_size}")
+    print(f"Speaker diarization: {'enabled' if enable_diarization else 'disabled'}")
+    
+    # ⏱️ Track timing for each sub-step
+    import time
+    transcription_start = time.time()
+    
     try:
         # Check if FFmpeg is available before proceeding
         if not is_ffmpeg_available():
@@ -162,15 +314,23 @@ async def transcribe_audio(video_path: str, model_size: str = "base") -> Dict[st
             print(error_msg)
             raise RuntimeError(error_msg)
 
-        # Load the model
+        # ⏱️ SUB-STEP 1: Load Whisper Model
+        step_start = time.time()
         print(f"Loading Whisper model: {model_size}")
         model = load_model(model_size)
-        print(f"Model loaded successfully")
+        step_elapsed = time.time() - step_start
+        print(f"✅ Model loaded in {step_elapsed:.2f}s")
+        logger.info(f"⏱️  Whisper model loading: {step_elapsed:.2f}s")
 
         # Extract audio from video if needed
         try:
+            # ⏱️ SUB-STEP 2: Audio Extraction
+            step_start = time.time()
+            print("Extracting audio from video...")
             audio_path = extract_audio(video_path)
-            print(f"Audio extraction complete. Audio path: {audio_path}")
+            step_elapsed = time.time() - step_start
+            print(f"✅ Audio extracted in {step_elapsed:.2f}s to: {audio_path}")
+            logger.info(f"⏱️  Audio extraction: {step_elapsed:.2f}s")
 
             # Verify the audio file exists and has content
             if not os.path.exists(audio_path):
@@ -183,8 +343,9 @@ async def transcribe_audio(video_path: str, model_size: str = "base") -> Dict[st
             if file_size == 0:
                 raise ValueError(f"Audio file is empty (0 bytes): {audio_path}")
 
-            # Transcribe the audio with GPU acceleration
-            print(f"Starting transcription of audio file")
+            # ⏱️ SUB-STEP 3: Whisper Transcription
+            step_start = time.time()
+            print(f"Starting Whisper transcription...")
 
             # First try with basic options (no word timestamps) to avoid Triton errors
             try:
@@ -198,10 +359,27 @@ async def transcribe_audio(video_path: str, model_size: str = "base") -> Dict[st
                 result = safe_whisper_transcribe(
                     model, audio_path, **transcribe_options
                 )
+                
+                step_elapsed = time.time() - step_start
+                print(f"✅ Whisper transcription complete in {step_elapsed:.2f}s")
+                logger.info(f"⏱️  Whisper transcription: {step_elapsed:.2f}s")
+                
                 print(f"transcription result: {result}")
                 print(
                     f"Transcription complete. Result contains {len(result.get('segments', []))} segments"
                 )
+                
+                # Log the raw transcript from Whisper (before diarization)
+                logger.info("="*70)
+                logger.info("RAW WHISPER TRANSCRIPT (transcribe_audio async)")
+                logger.info("="*70)
+                logger.info(f"Text: {result.get('text', '')}")
+                logger.info(f"Language: {result.get('language', 'unknown')}")
+                logger.info(f"Number of segments: {len(result.get('segments', []))}")
+                for i, seg in enumerate(result.get('segments', [])):
+                    logger.info(f"Segment {i}: [{seg.get('start', 0):.2f}s - {seg.get('end', 0):.2f}s] {seg.get('text', '')}")
+                logger.info("="*70)
+                
             except Exception as e:
                 error_str = str(e).lower()
 
@@ -274,10 +452,119 @@ async def transcribe_audio(video_path: str, model_size: str = "base") -> Dict[st
                 else:
                     raise
 
+            # Perform speaker diarization if enabled
+            if enable_diarization and SPEAKER_DIARIZATION_AVAILABLE:
+                # ⏱️ SUB-STEP 4: Speaker Diarization (Pyannote)
+                step_start = time.time()
+                print("[INFO] Performing speaker diarization...")
+                logger.info("⏱️  Starting Pyannote speaker diarization...")
+                
+                diarization_service = get_diarization_service(hf_token=settings.HF_TOKEN)
+                
+                if diarization_service.is_available():
+                    # Run diarization with job info - wrap in executor to await properly
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    speaker_segments = await loop.run_in_executor(
+                        None,
+                        lambda: diarization_service.diarize(
+                            audio_path,
+                            num_speakers=num_speakers,
+                            min_speakers=min_speakers,
+                            max_speakers=max_speakers,
+                            job_id=job_id,
+                            job_queue=job_queue
+                        )
+                    )
+                    
+                    diarization_elapsed = time.time() - step_start
+                    print(f"✅ Speaker diarization complete in {diarization_elapsed:.2f}s")
+                    logger.info(f"⏱️  Pyannote diarization: {diarization_elapsed:.2f}s")
+                    
+                    if speaker_segments:
+                        # ⏱️ SUB-STEP 5: WhisperX Alignment
+                        step_start = time.time()
+                        print("[INFO] Performing WhisperX alignment...")
+                        logger.info("⏱️  Starting WhisperX word-level alignment...")
+                        
+                        # Assign speakers to transcript segments using WhisperX alignment
+                        result["segments"] = diarization_service.assign_speakers_to_transcript(
+                            result["segments"],
+                            speaker_segments,
+                            audio_path=audio_path,  # Pass audio_path for WhisperX alignment
+                            use_whisperx_alignment=True  # Enable WhisperX word-level alignment
+                        )
+                        
+                        alignment_elapsed = time.time() - step_start
+                        print(f"✅ WhisperX alignment complete in {alignment_elapsed:.2f}s")
+                        logger.info(f"⏱️  WhisperX alignment: {alignment_elapsed:.2f}s")
+                        
+                        # Add speaker information to result
+                        result["speaker_segments"] = speaker_segments
+                        result["speaker_stats"] = diarization_service.get_speaker_statistics(speaker_segments)
+                        
+                        # Create formatted transcript with speakers (readable format)
+                        result["text_with_speakers"] = diarization_service.format_transcript_with_speakers(
+                            result["segments"],
+                            include_timestamps=True
+                        )
+                        
+                        # Create AI-optimized format for clip generation
+                        result["transcript_for_ai"] = diarization_service.format_transcript_for_ai_clips(
+                            result["segments"]
+                        )
+                        
+                        print(f"[INFO] Speaker diarization complete. Found {result['speaker_stats']['num_speakers']} speakers")
+                        
+                        # Log the AI transcript for debugging/analysis
+                        logger.info("="*70)
+                        logger.info("AI-READY TRANSCRIPT (for clip generation)")
+                        logger.info("="*70)
+                        
+                        # Log each line of the transcript separately so it appears in log file
+                        for line in result["transcript_for_ai"].split('\n'):
+                            if line.strip():  # Only log non-empty lines
+                                logger.info(line)
+                        
+                        logger.info("="*70)
+                        
+                        # Also print to console for immediate visibility
+                        print("\n" + "="*70)
+                        print("AI-READY TRANSCRIPT (for clip generation)")
+                        print("="*70)
+                        print(result["transcript_for_ai"])
+                        print("="*70 + "\n")
+                    else:
+                        print("[WARNING] Speaker diarization failed or returned no results")
+                        result["speaker_segments"] = None
+                        result["speaker_stats"] = None
+                else:
+                    print("[WARNING] Speaker diarization service not available")
+                    result["speaker_segments"] = None
+                    result["speaker_stats"] = None
+            elif enable_diarization and not SPEAKER_DIARIZATION_AVAILABLE:
+                print("[WARNING] Speaker diarization requested but not available. Install pyannote.audio.")
+                result["speaker_segments"] = None
+                result["speaker_stats"] = None
+
             # Clean up temporary audio file if it was created
             if audio_path != video_path and os.path.exists(audio_path):
                 print(f"Cleaning up temporary audio file: {audio_path}")
                 os.remove(audio_path)
+
+            # ⏱️ TRANSCRIPTION COMPLETE - Log total time
+            total_elapsed = time.time() - transcription_start
+            logger.info("="*70)
+            logger.info("✅ TRANSCRIPTION PIPELINE COMPLETE")
+            logger.info("="*70)
+            logger.info(f"⏱️  TOTAL TRANSCRIPTION TIME: {total_elapsed:.2f}s ({total_elapsed/60:.2f} min)")
+            logger.info(f"📊 Breakdown:")
+            logger.info(f"   - Segments: {len(result.get('segments', []))}")
+            logger.info(f"   - Language: {result.get('language', 'unknown')}")
+            logger.info(f"   - Has speakers: {'Yes' if result.get('transcript_for_ai') else 'No'}")
+            if result.get('speaker_stats'):
+                logger.info(f"   - Num speakers: {result['speaker_stats'].get('num_speakers', 'unknown')}")
+            logger.info("="*70)
 
             return result
         except (FileNotFoundError, ValueError) as e:

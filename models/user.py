@@ -112,38 +112,12 @@ class UserCreate(UserBase):
     @field_validator('password')
     @classmethod
     def validate_password(cls, v):
-        """Validate and sanitize password"""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        logger.info(f"[PYDANTIC] Validating password - Raw length: {len(v)} chars, Bytes: {len(v.encode('utf-8'))} bytes")
-        logger.info(f"[PYDANTIC] Password repr: {repr(v[:50])}...")
-        
+        """Validate password"""
         if not v:
             raise ValueError("Password is required")
-        
-        # First check the string itself (not stripped)
-        # Check byte length BEFORE stripping for bcrypt (max 72 bytes)
-        password_bytes = v.encode("utf-8")
-        if len(password_bytes) > 72:
-            logger.error(f"[PYDANTIC] Password too long BEFORE strip: {len(password_bytes)} bytes")
-            raise ValueError("Password is too long (maximum 72 bytes). Please use a shorter password.")
-        
-        # Strip whitespace and check length
-        clean_password = v.strip()
-        logger.info(f"[PYDANTIC] After strip - Length: {len(clean_password)} chars, Bytes: {len(clean_password.encode('utf-8'))} bytes")
-        
-        if len(clean_password) < 6:
+        if len(v.strip()) < 6:
             raise ValueError("Password must be at least 6 characters long")
-        
-        # Check again after stripping
-        clean_password_bytes = clean_password.encode("utf-8")
-        if len(clean_password_bytes) > 72:
-            logger.error(f"[PYDANTIC] Password too long AFTER strip: {len(clean_password_bytes)} bytes")
-            raise ValueError("Password is too long (maximum 72 bytes). Please use a shorter password.")
-        
-        logger.info(f"[PYDANTIC] Password validation passed!")
-        return clean_password
+        return v.strip()
     
     @field_validator('username', 'first_name', 'last_name')
     @classmethod

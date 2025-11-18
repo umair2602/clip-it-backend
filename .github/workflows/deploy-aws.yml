@@ -24,6 +24,9 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     environment: production
+    concurrency:
+      group: deploy-aws
+      cancel-in-progress: false  # Don't cancel, wait for previous to complete
 
     steps:
     - name: Checkout
@@ -48,6 +51,7 @@ jobs:
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         JSII_SILENCE_WARNING_DEPRECATED_NODE_VERSION: 1
+        SSL_CERTIFICATE_ARN: ${{ secrets.SSL_CERTIFICATE_ARN }}
       run: |
         echo "🏗️ Deploying infrastructure..."
         cd infrastructure
@@ -69,10 +73,96 @@ jobs:
           }
         fi
         
-        # Deploy the infrastructure
+        # Get SSL certificate ARN from SSM (if available)
+        echo "🔍 Checking for SSL certificate..."
+        SSL_CERT_ARN=$(aws ssm get-parameter \
+          --name "/clip-it/ssl-certificate-arn" \
+          --region $AWS_DEFAULT_REGION \
+          --query "Parameter.Value" \
+          --output text 2>/dev/null || echo "")
+        
+        if [ ! -z "$SSL_CERT_ARN" ]; then
+          echo "✅ Found SSL certificate ARN: $SSL_CERT_ARN"
+          export SSL_CERTIFICATE_ARN="$SSL_CERT_ARN"
+        else
+          echo "⚠️  No SSL certificate found in SSM. Deploying with HTTP only."
+        fi
+        
+        # Check for and handle stuck changesets
+        echo "🔍 Checking for stuck CloudFormation changesets..."
+        STACK_NAME="ClipItStack"
+        CHANGESET_NAME=$(aws cloudformation list-change-sets \
+          --stack-name $STACK_NAME \
+          --region $AWS_DEFAULT_REGION \
+          --query "Summaries[?Status=='CREATE_IN_PROGRESS' || Status=='CREATE_PENDING'].ChangeSetName" \
+          --output text 2>/dev/null || echo "")
+        
+        if [ ! -z "$CHANGESET_NAME" ]; then
+          echo "⚠️ Found stuck changeset: $CHANGESET_NAME"
+          echo "⏳ Waiting for changeset to complete or timeout (max 5 minutes)..."
+          
+          # Wait for changeset to complete or timeout
+          TIMEOUT=300  # 5 minutes
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(aws cloudformation describe-change-set \
+              --stack-name $STACK_NAME \
+              --change-set-name $CHANGESET_NAME \
+              --region $AWS_DEFAULT_REGION \
+              --query "Status" \
+              --output text 2>/dev/null || echo "NOT_FOUND")
+            
+            if [ "$STATUS" == "CREATE_COMPLETE" ] || [ "$STATUS" == "FAILED" ] || [ "$STATUS" == "NOT_FOUND" ]; then
+              echo "✅ Changeset status: $STATUS"
+              break
+            fi
+            
+            echo "⏳ Changeset still in progress (status: $STATUS), waiting 10 seconds..."
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+          done
+          
+          # If still stuck, try to delete it (only if it's in a deletable state)
+          if [ $ELAPSED -ge $TIMEOUT ]; then
+            echo "⚠️ Changeset still stuck after timeout, attempting to delete..."
+            aws cloudformation delete-change-set \
+              --stack-name $STACK_NAME \
+              --change-set-name $CHANGESET_NAME \
+              --region $AWS_DEFAULT_REGION 2>/dev/null || {
+              echo "⚠️ Could not delete changeset (may need manual intervention)"
+            }
+          fi
+        else
+          echo "✅ No stuck changesets found"
+        fi
+        
+        # Deploy the infrastructure with retry logic
         echo "🚀 Deploying ClipItStack..."
-        cdk deploy --require-approval never --outputs-file outputs.json
-        echo "✅ Infrastructure deployed successfully!"
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        DEPLOY_SUCCESS=false
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$DEPLOY_SUCCESS" = false ]; do
+          if [ $RETRY_COUNT -gt 0 ]; then
+            echo "🔄 Retry attempt $RETRY_COUNT of $MAX_RETRIES..."
+            sleep $((RETRY_COUNT * 10))  # Exponential backoff
+          fi
+          
+          if cdk deploy --require-approval never --outputs-file outputs.json; then
+            DEPLOY_SUCCESS=true
+            echo "✅ Infrastructure deployed successfully!"
+          else
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "⚠️ Deployment failed, will retry..."
+              # Clean up any new stuck changesets before retry
+              sleep 5
+            else
+              echo "❌ Deployment failed after $MAX_RETRIES attempts"
+              exit 1
+            fi
+          fi
+        done
 
     - name: Login to Amazon ECR
       id: login-ecr

@@ -4,6 +4,7 @@ import os
 import aws_cdk as cdk
 from aws_cdk import Stack
 from aws_cdk import aws_autoscaling as autoscaling
+from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -110,6 +111,37 @@ class ClipItStack(Stack):
                 iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
             ]
         )
+        
+        # Add SSM permissions for reading secrets
+        task_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:GetParametersByPath"
+                ],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/clip-it/*"
+                ]
+            )
+        )
+        
+        # Add KMS permissions for decrypting SecureString parameters
+        task_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "kms:Decrypt"
+                ],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:ViaService": f"ssm.{self.region}.amazonaws.com"
+                    }
+                }
+            )
+        )
 
         # Create task role
         task_role = iam.Role(
@@ -145,43 +177,119 @@ class ClipItStack(Stack):
             removal_policy=cdk.RemovalPolicy.DESTROY
         )
 
-        # Create SSM parameters for sensitive values
-        openai_api_key_param = ssm.StringParameter(
-            self, "OpenAIAPIKey",
-            parameter_name="/clip-it/openai-api-key",
-            string_value="your-openai-api-key-here",  # This should be set manually
-            description="OpenAI API Key for content analysis"
-        )
-        
-        sieve_api_key_param = ssm.StringParameter(
-            self, "SieveAPIKey",
-            parameter_name="/clip-it/sieve-api-key",
-            string_value="your-sieve-api-key-here",  # This should be set manually
-            description="Sieve API Key for video processing"
-        )
-
-        # Environment variables
+        # Environment variables (non-sensitive)
+        # Note: S3_BUCKET and AWS_REGION can come from SSM if needed, but we'll use CDK values as defaults
         env_vars = {
             "REDIS_URL": f"redis://{redis_cluster.attr_redis_endpoint_address}:6379",
-            "S3_BUCKET": s3_bucket.bucket_name,
-            "AWS_REGION": self.region,
-            "MONGODB_URL": "mongodb+srv://dev:LY5xfiaQW44xju87@clip.76hczqd.mongodb.net/?retryWrites=true&w=majority&appName=clip",
             "MONGODB_DB_NAME": "clip_it_db",
-            "JWT_SECRET_KEY": "your-super-secret-jwt-key-change-this-in-production",
             "JWT_ALGORITHM": "HS256",
             "JWT_ACCESS_TOKEN_EXPIRE_MINUTES": "180",
             "JWT_REFRESH_TOKEN_EXPIRE_DAYS": "10",
-            "TIKTOK_CLIENT_KEY": "sbawq3ct99ep10ssn9",
-            "TIKTOK_CLIENT_SECRET": "your_client_secret_here",
-            "TIKTOK_REDIRECT_URI": "https://social-viper-accepted.ngrok-free.app/tiktok/callback/",
             "TIKTOK_SCOPES": "user.info.basic,user.info.profile,video.publish,video.upload",
             "TIKTOK_API_BASE": "https://open.tiktokapis.com/v2",
             "TIKTOK_AUTH_BASE": "https://www.tiktok.com/v2",
-            "MIN_CLIP_DURATION": "20",
+            "MIN_CLIP_DURATION": "15",
             "PREFERRED_CLIP_DURATION": "180",
             "MAX_CLIPS_PER_EPISODE": "10",
             "OUTPUT_WIDTH": "1080",
-            "OUTPUT_HEIGHT": "1920"
+            "OUTPUT_HEIGHT": "1920",
+            "SPEAKER_DIARIZATION_ENABLED": "false"
+        }
+        
+        # Secrets from SSM (sensitive values)
+        # Using from_secure_string_parameter_attributes for SecureString parameters
+        # These parameters should exist in SSM (created via scripts/setup-secrets.sh)
+        secrets = {
+            "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "OpenAIAPIKeyRef",
+                    parameter_name="/clip-it/openai-api-key"
+                )
+            ),
+            "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "SieveAPIKeyRef",
+                    parameter_name="/clip-it/sieve-api-key"
+                )
+            ),
+            "MONGODB_URL": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "MongoDBURLRef",
+                    parameter_name="/clip-it/mongodb-url"
+                )
+            ),
+            "JWT_SECRET_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "JWTSecretKeyRef",
+                    parameter_name="/clip-it/jwt-secret-key"
+                )
+            ),
+            "TIKTOK_CLIENT_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokClientKeyRef",
+                    parameter_name="/clip-it/tiktok-client-key"
+                )
+            ),
+            "TIKTOK_CLIENT_SECRET": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokClientSecretRef",
+                    parameter_name="/clip-it/tiktok-client-secret"
+                )
+            ),
+            "TIKTOK_REDIRECT_URI": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokRedirectURIRef",
+                    parameter_name="/clip-it/tiktok-redirect-uri"
+                )
+            ),
+            "TIKTOK_VERIFICATION_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "TikTokVerificationKeyRef",
+                    parameter_name="/clip-it/tiktok-verification-key"
+                )
+            ),
+            "PROXY_BASE_URL": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "ProxyBaseURLRef",
+                    parameter_name="/clip-it/proxy-base-url"
+                )
+            ),
+            "AWS_ACCESS_KEY_ID": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AWSAccessKeyIDRef",
+                    parameter_name="/clip-it/aws-access-key-id"
+                )
+            ),
+            "AWS_SECRET_ACCESS_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AWSSecretAccessKeyRef",
+                    parameter_name="/clip-it/aws-secret-access-key"
+                )
+            ),
+            "AWS_REGION": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AWSRegionRef",
+                    parameter_name="/clip-it/aws-region"
+                )
+            ),
+            "S3_BUCKET": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "S3BucketRef",
+                    parameter_name="/clip-it/s3-bucket"
+                )
+            ),
+            "HF_TOKEN": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "HfTokenRef",
+                    parameter_name="/clip-it/hf-token"
+                )
+            ),
+            "HUGGINGFACE_TOKEN": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "HuggingfaceTokenRef",
+                    parameter_name="/clip-it/huggingface-token"
+                )
+            ),
         }
 
         # Web service task definition
@@ -202,10 +310,7 @@ class ClipItStack(Stack):
                 log_group=log_group
             ),
             environment=env_vars,
-            secrets={
-                "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(openai_api_key_param),
-                "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(sieve_api_key_param)
-            },
+            secrets=secrets,
             port_mappings=[ecs.PortMapping(container_port=8000)]
         )
 
@@ -227,10 +332,7 @@ class ClipItStack(Stack):
                 log_group=log_group
             ),
             environment=env_vars,
-            secrets={
-                "OPENAI_API_KEY": ecs.Secret.from_ssm_parameter(openai_api_key_param),
-                "SIEVE_API_KEY": ecs.Secret.from_ssm_parameter(sieve_api_key_param)
-            }
+            secrets=secrets
         )
 
         # Create Application Load Balancer
@@ -277,12 +379,63 @@ class ClipItStack(Stack):
             )
         )
 
-        # Create listener
-        listener = load_balancer.add_listener(
-            "ClipItListener",
-            port=80,
-            default_target_groups=[web_target_group]
-        )
+        # Get SSL certificate ARN from environment variable, CDK context, or SSM
+        # Priority: 1) Environment variable, 2) CDK context, 3) SSM parameter
+        ssl_cert_arn = os.getenv("SSL_CERTIFICATE_ARN") or self.node.try_get_context("ssl_certificate_arn")
+        
+        # Try to get from SSM if not set (read at synthesis time)
+        if not ssl_cert_arn:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["aws", "ssm", "get-parameter", "--name", "/clip-it/ssl-certificate-arn", "--region", self.region, "--query", "Parameter.Value", "--output", "text"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    ssl_cert_arn = result.stdout.strip()
+                    print(f"✅ Found SSL certificate ARN in SSM: {ssl_cert_arn}")
+            except Exception as e:
+                print(f"⚠️  Could not read SSL certificate from SSM: {e}")
+                ssl_cert_arn = None
+        
+        # Create HTTPS listener if certificate is available
+        if ssl_cert_arn:
+            # Import the certificate
+            certificate = acm.Certificate.from_certificate_arn(
+                self, "SSLCertificate",
+                certificate_arn=ssl_cert_arn
+            )
+            
+            # Create HTTPS listener (port 443)
+            https_listener = load_balancer.add_listener(
+                "ClipItHTTPSListener",
+                port=443,
+                protocol=elbv2.ApplicationProtocol.HTTPS,
+                certificates=[certificate],
+                default_target_groups=[web_target_group]
+            )
+            
+            # Update HTTP listener to redirect to HTTPS
+            # Use same ID as existing listener so CloudFormation updates it instead of creating new one
+            http_listener = load_balancer.add_listener(
+                "ClipItListener",  # Same ID as before to update existing listener
+                port=80,
+                default_action=elbv2.ListenerAction.redirect(
+                    protocol="HTTPS",
+                    port="443",
+                    permanent=True
+                )
+            )
+        else:
+            # No certificate - use HTTP only (for development)
+            # In production, you should always use HTTPS
+            http_listener = load_balancer.add_listener(
+                "ClipItListener",
+                port=80,
+                default_target_groups=[web_target_group]
+            )
 
         # Create shared security group for ECS services
         ecs_security_group = self.create_ecs_security_group(vpc)
@@ -356,11 +509,23 @@ class ClipItStack(Stack):
         )
 
         # Outputs
-        cdk.CfnOutput(
-            self, "LoadBalancerURL",
-            value=f"http://{load_balancer.load_balancer_dns_name}",
-            description="Application Load Balancer URL"
-        )
+        if ssl_cert_arn:
+            cdk.CfnOutput(
+                self, "LoadBalancerURL",
+                value=f"https://{load_balancer.load_balancer_dns_name}",
+                description="Application Load Balancer URL (HTTPS)"
+            )
+            cdk.CfnOutput(
+                self, "LoadBalancerHTTPURL",
+                value=f"http://{load_balancer.load_balancer_dns_name}",
+                description="Application Load Balancer URL (HTTP - redirects to HTTPS)"
+            )
+        else:
+            cdk.CfnOutput(
+                self, "LoadBalancerURL",
+                value=f"http://{load_balancer.load_balancer_dns_name}",
+                description="Application Load Balancer URL (HTTP only - set SSL_CERTIFICATE_ARN for HTTPS)"
+            )
 
         cdk.CfnOutput(
             self, "S3BucketName",

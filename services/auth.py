@@ -4,7 +4,7 @@ Authentication service for user management and JWT token handling.
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Union
+from typing import Optional
 
 from bson import ObjectId
 from jose import JWTError, jwt
@@ -17,8 +17,8 @@ from models.user import TokenData, User, UserCreate, UserInDB
 
 logger = logging.getLogger(__name__)
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing context - using Argon2 (modern, secure, cross-platform)
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 
 class AuthService:
@@ -32,24 +32,7 @@ class AuthService:
     @staticmethod
     def get_password_hash(password: str) -> str:
         """Hash a password"""
-        logger.info(f"[HASH] Attempting to hash password - Length: {len(password)} chars, Bytes: {len(password.encode('utf-8'))} bytes")
-        logger.info(f"[HASH] Password repr: {repr(password[:50])}...")  # Log first 50 chars safely
-        
-        # Ensure password doesn't exceed bcrypt's 72-byte limit
-        password_bytes = password.encode("utf-8")
-        if len(password_bytes) > 72:
-            logger.warning(f"[HASH] Password exceeds 72 bytes ({len(password_bytes)} bytes), truncating...")
-            # Truncate to 72 bytes
-            password = password_bytes[:72].decode("utf-8", errors="ignore")
-            logger.info(f"[HASH] After truncation - Length: {len(password)} chars, Bytes: {len(password.encode('utf-8'))} bytes")
-        
-        try:
-            hashed = pwd_context.hash(password)
-            logger.info(f"[HASH] Password hashed successfully")
-            return hashed
-        except Exception as e:
-            logger.error(f"[HASH] FAILED to hash password: {type(e).__name__}: {str(e)}")
-            raise
+        return pwd_context.hash(password)
     
     @staticmethod
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -101,10 +84,13 @@ class AuthService:
             user_data = users_collection.find_one({"username": username})
             
             if user_data:
+                # Ensure _id is converted to string for proper ID handling
+                if "_id" in user_data and user_data["_id"]:
+                    user_data["_id"] = str(user_data["_id"])
                 return UserInDB(**user_data)
             return None
         except Exception as e:
-            logger.error(f"Error getting user by username: {str(e)}")
+            logger.error(f"Error getting user by username: {str(e)}", exc_info=True)
             return None
     
     @staticmethod
@@ -115,10 +101,13 @@ class AuthService:
             user_data = users_collection.find_one({"email": email})
             
             if user_data:
+                # Ensure _id is converted to string for proper ID handling
+                if "_id" in user_data and user_data["_id"]:
+                    user_data["_id"] = str(user_data["_id"])
                 return UserInDB(**user_data)
             return None
         except Exception as e:
-            logger.error(f"Error getting user by email: {str(e)}")
+            logger.error(f"Error getting user by email: {str(e)}", exc_info=True)
             return None
     
     @staticmethod
@@ -126,13 +115,21 @@ class AuthService:
         """Get user by ID"""
         try:
             users_collection = get_users_collection()
+            # Validate ObjectId before querying
+            if not ObjectId.is_valid(user_id):
+                logger.error(f"Invalid user_id format: {user_id}")
+                return None
+                
             user_data = users_collection.find_one({"_id": ObjectId(user_id)})
             
             if user_data:
+                # Ensure _id is converted to string for proper ID handling
+                if "_id" in user_data and user_data["_id"]:
+                    user_data["_id"] = str(user_data["_id"])
                 return UserInDB(**user_data)
             return None
         except Exception as e:
-            logger.error(f"Error getting user by ID: {str(e)}")
+            logger.error(f"Error getting user by ID: {str(e)}", exc_info=True)
             return None
     
     @staticmethod
@@ -154,12 +151,7 @@ class AuthService:
             if existing_email:
                 raise ValueError("Email already exists")
 
-            # Double-check password length before hashing (safety net)
-            password_bytes = user_create.password.encode("utf-8")
-            if len(password_bytes) > 72:
-                raise ValueError("Password is too long. Please use a shorter password")
-
-            # Create user document (password is already sanitized by Pydantic)
+            # Create user document
             hashed_password = AuthService.get_password_hash(user_create.password)
             user_doc = {
                 "username": user_create.username,
@@ -175,7 +167,7 @@ class AuthService:
 
             # Insert user
             result = users_collection.insert_one(user_doc)
-            user_doc["_id"] = result.inserted_id
+            user_doc["_id"] = str(result.inserted_id)  # Convert ObjectId to string
 
             return UserInDB(**user_doc)
 

@@ -17,11 +17,10 @@ from utils.s3_storage import s3_client
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video
 from services.user_video_service import update_user_video, get_user_video_by_video_id, utc_now
+from logging_config import setup_logging
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Set up logging to backend.log file
+setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Create directories
@@ -203,6 +202,13 @@ async def process_video_job(job_id: str, job_data: dict):
                 user_id = None
 
         logger.info(f"Processing video job {job_id} for video {video_id}")
+        
+        # ⏱️ START PIPELINE TIMING
+        import time
+        pipeline_start = time.time()
+        logger.info("="*70)
+        logger.info("🚀 STARTING VIDEO PROCESSING PIPELINE")
+        logger.info("="*70)
 
         # Update job status
         job_queue.update_job(
@@ -229,10 +235,23 @@ async def process_video_job(job_id: str, job_data: dict):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Video file not found at path: {file_path}")
 
-        # Transcribe the audio
-        transcript = await transcribe_audio(file_path, model_size="base")
+        # ⏱️ STEP 1: TRANSCRIPTION
+        step_start = time.time()
+        logger.info("📝 STEP 1: Starting transcription (Whisper + Diarization + Alignment)...")
+        
+        transcript = await transcribe_audio(
+            file_path, 
+            model_size="base",
+            job_id=job_id,
+            job_queue=job_queue
+        )
         if not transcript:
             raise ValueError("Transcription returned None")
+        
+        step_elapsed = time.time() - step_start
+        logger.info(f"✅ STEP 1 COMPLETE: Transcription finished in {step_elapsed:.2f} seconds ({step_elapsed/60:.2f} minutes)")
+        logger.info(f"   - Total segments: {len(transcript.get('segments', []))}")
+        logger.info(f"   - Has speaker labels: {'Yes' if transcript.get('transcript_for_ai') else 'No'}")
 
         # Handle empty segments gracefully - this is valid for silent/corrupted videos
         segments_count = len(transcript.get("segments", []))
@@ -257,7 +276,10 @@ async def process_video_job(job_id: str, job_data: dict):
                 },
             )
 
-        # Analyze content
+        # ⏱️ STEP 2: AI CONTENT ANALYSIS
+        step_start = time.time()
+        logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
+        
         segments = await analyze_content(transcript)
         if not segments:
             logger.warning(
@@ -271,6 +293,10 @@ async def process_video_job(job_id: str, job_data: dict):
                     "description": "Automatically generated clip",
                 }
             ]
+        
+        step_elapsed = time.time() - step_start
+        logger.info(f"✅ STEP 2 COMPLETE: AI analysis finished in {step_elapsed:.2f} seconds")
+        logger.info(f"   - Clips identified: {len(segments)}")
 
         # Update job status
         job_queue.update_job(
@@ -296,8 +322,15 @@ async def process_video_job(job_id: str, job_data: dict):
         clips_dir = output_dir / video_id
         clips_dir.mkdir(exist_ok=True)
 
-        # Process video clips
+        # ⏱️ STEP 3: VIDEO PROCESSING
+        step_start = time.time()
+        logger.info("🎬 STEP 3: Starting video clip creation (FFmpeg processing)...")
+        
         clips = await process_video(file_path, transcript, segments)
+        
+        step_elapsed = time.time() - step_start
+        logger.info(f"✅ STEP 3 COMPLETE: Video processing finished in {step_elapsed:.2f} seconds")
+        logger.info(f"   - Clips created: {len(clips) if clips else 0}")
 
         # Generate thumbnails for each clip
         for i, clip in enumerate(clips):
@@ -360,6 +393,18 @@ async def process_video_job(job_id: str, job_data: dict):
         metadata_path = clips_dir / "metadata.json"
         with open(metadata_path, "w") as f:
             json.dump(metadata, f)
+
+        # ⏱️ PIPELINE COMPLETE - TOTAL TIME
+        total_elapsed = time.time() - pipeline_start
+        logger.info("="*70)
+        logger.info("🎉 PIPELINE COMPLETE!")
+        logger.info("="*70)
+        logger.info(f"⏱️  TOTAL PROCESSING TIME: {total_elapsed:.2f} seconds ({total_elapsed/60:.2f} minutes)")
+        logger.info(f"📊 SUMMARY:")
+        logger.info(f"   - Video ID: {video_id}")
+        logger.info(f"   - Clips created: {len(clips)}")
+        logger.info(f"   - Transcript segments: {len(transcript.get('segments', []))}")
+        logger.info("="*70)
 
         # Update job status
         job_queue.update_job(
