@@ -906,7 +906,7 @@ async def download_from_youtube(
     request: YouTubeRequest,
     current_user: Annotated[User, Depends(get_current_user)]
 ):
-    """Download a video from YouTube directly to S3 and optionally start processing it"""
+    """Download a video from YouTube locally and process it (no S3 upload of original video)"""
     try:
         # Generate a unique ID for the video
         video_id = str(uuid.uuid4())
@@ -929,15 +929,15 @@ async def download_from_youtube(
         tasks[task_id] = {
             "status": "downloading",
             "progress": 0,
-            "message": "Starting YouTube download to S3...",
+            "message": "Starting YouTube download (local)...",
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
             "video_id": video_id,
             "user_id": current_user.id,
         }
-        # Start download in background
+        # Start download in background (local processing, no S3 for original video)
         background_tasks.add_task(
-            process_youtube_download_s3,
+            process_youtube_download_local,
             task_id=task_id,
             video_id=video_id,
             url=str(request.url),
@@ -952,10 +952,147 @@ async def download_from_youtube(
         )
 
 
+async def process_youtube_download_local(
+    task_id: str, video_id: str, url: str, auto_process: bool = True, user_id: str = None
+):
+    """Process a YouTube download locally (no S3 upload of original video)"""
+    try:
+        # Update task status
+        tasks[task_id] = {
+            "status": "downloading",
+            "progress": 10,
+            "message": "Downloading video from YouTube locally...",
+            "created_at": datetime.datetime.now().isoformat(),
+            "updated_at": datetime.datetime.now().isoformat(),
+            "video_id": video_id,
+        }
+        logging.info(f"Task {task_id}: Starting local YouTube download for URL: {url}")
+
+        # Create video directory
+        video_dir = upload_dir / video_id
+        video_dir.mkdir(exist_ok=True)
+
+        # Download the video locally using Sieve or fallback downloader
+        file_path, title, video_info = None, None, None
+        max_retries = 3
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                logging.info(f"Task {task_id}: Attempt {attempt} to download with Sieve service")
+                file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
+                if file_path and title:
+                    break
+            except Exception as sieve_error:
+                logging.warning(f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
+                if attempt == max_retries:
+                    logging.error(f"Task {task_id}: All {max_retries} Sieve attempts failed.")
+                    break
+                await asyncio.sleep(5)
+        
+        # Fallback to direct downloader if Sieve failed
+        if not file_path or not title:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logging.info(f"Task {task_id}: Attempt {attempt} to download with direct downloader")
+                    file_path, title, video_info = await download_youtube_video(url, video_dir)
+                    if file_path and title:
+                        break
+                except Exception as fallback_error:
+                    logging.warning(f"Task {task_id}: Direct download failed (attempt {attempt}): {str(fallback_error)}")
+                    if attempt == max_retries:
+                        logging.error(f"Task {task_id}: All {max_retries} fallback attempts failed.")
+                        break
+                    await asyncio.sleep(5)
+
+        if not file_path or not title:
+            raise Exception(f"Failed to download YouTube video after {max_retries} attempts")
+
+        logging.info(f"Task {task_id}: Download completed successfully to local file: {file_path}")
+        
+        # Update video in database
+        try:
+            video_data = {
+                "title": title or f"YouTube Video",
+                "description": f"YouTube video downloaded from {url}",
+                "filename": Path(file_path).name,
+                "source_url": url,
+                "status": "downloaded",
+                "video_type": "youtube",
+                "duration": video_info.get("length_seconds") if video_info else None,
+                "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else None,
+                "content_type": "video/mp4"
+            }
+            from services.user_video_service import update_user_video
+            await update_user_video(user_id, video_id, video_data)
+            logging.info(f"Updated YouTube video {video_id} in database.")
+        except Exception as e:
+            logging.error(f"Error updating YouTube video in database: {e}", exc_info=True)
+        
+        # Update task
+        tasks[task_id] = {
+            "status": "downloaded",
+            "progress": 100,
+            "message": "YouTube video downloaded successfully (local)",
+            "video_info": {
+                "video_id": video_id,
+                "filename": Path(file_path).name,
+                "title": title,
+                "thumbnail": video_info.get("thumbnail_url") if video_info else None,
+                "duration": video_info.get("length_seconds") if video_info else None,
+            },
+            "updated_at": datetime.datetime.now().isoformat(),
+            "video_id": video_id,
+        }
+
+        # Start processing if requested
+        if auto_process:
+            try:
+                process_task_id = str(uuid.uuid4())
+                logging.info(f"Task {task_id}: Created process task ID: {process_task_id}")
+                
+                tasks[process_task_id] = {
+                    "status": "queued",
+                    "progress": 0,
+                    "message": "Queued for processing",
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "updated_at": datetime.datetime.now().isoformat(),
+                    "video_id": video_id,
+                    "original_task_id": task_id,
+                }
+                
+                tasks[task_id]["process_task_id"] = process_task_id
+                tasks[task_id]["status"] = "processing_started"
+                tasks[task_id]["message"] = "Processing has started"
+                tasks[task_id]["updated_at"] = datetime.datetime.now().isoformat()
+                
+                # Process directly from local file (no S3 download needed)
+                await process_podcast(
+                    process_task_id, video_id, file_path, original_task_id=task_id, user_id=user_id
+                )
+                
+            except Exception as process_error:
+                logging.error(f"Error starting processing for task {task_id}: {str(process_error)}", exc_info=True)
+                tasks[task_id].update({
+                    "status": "error",
+                    "message": f"Error starting processing: {str(process_error)}",
+                    "updated_at": datetime.datetime.now().isoformat(),
+                })
+                
+    except Exception as e:
+        logging.error(f"Error in YouTube download process: {str(e)}", exc_info=True)
+        tasks[task_id] = {
+            "status": "error",
+            "progress": 0,
+            "message": f"Error processing YouTube download: {str(e)}",
+            "updated_at": datetime.datetime.now().isoformat(),
+        }
+
+
+# DEPRECATED: Old S3-based YouTube download (kept for reference, not used)
 async def process_youtube_download_s3(
     task_id: str, video_id: str, url: str, auto_process: bool = True, user_id: str = None
 ):
-    """Process a YouTube download directly to S3 in the background"""
+    """DEPRECATED: Process a YouTube download directly to S3 (no longer used - we process locally)"""
     try:
         # Update task status
         tasks[task_id] = {
