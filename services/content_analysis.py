@@ -114,8 +114,6 @@ async def identify_engaging_segments_from_text(
 
         [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
 
-        ⚠️ CRITICAL CONSTRAINT: ALL clips MUST be 15-180 seconds long. DO NOT generate clips shorter than 15 seconds - they will be automatically rejected.
-
         Your job is to:
         1. Read through the full transcript.
         2. Identify sections that can work as compelling video clips for social media platforms like TikTok, Instagram Reels, or YouTube Shorts.
@@ -160,9 +158,6 @@ async def identify_engaging_segments_from_text(
         - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
         - Complete thought/story (don't cut off mid-sentence)
         - Self-contained (makes sense without prior context)
-
-        IMPORTANT: The AI model will WASTE TOKENS generating clips that don't meet the 15-second minimum.
-        Please ensure ALL clips are at least 15 seconds long to avoid wasting API costs.
 
         Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
 
@@ -280,8 +275,6 @@ async def identify_engaging_segments(
 
         [START_TIME - END_TIME]  spoken sentence
 
-        ⚠️ CRITICAL CONSTRAINT: ALL clips MUST be 15-180 seconds long. DO NOT generate clips shorter than 15 seconds - they will be automatically rejected.
-
         Your job is to:
         1. Read through the full transcript.
         2. Identify sections that can work as compelling video clips for social media platforms like TikTok, Instagram Reels, or YouTube Shorts.
@@ -327,9 +320,6 @@ async def identify_engaging_segments(
         - Complete thought/story (don't cut off mid-sentence)
         - Self-contained (makes sense without prior context)
 
-        IMPORTANT: The AI model will WASTE TOKENS generating clips that don't meet the 15-second minimum.
-        Please ensure ALL clips are at least 15 seconds long to avoid wasting API costs.
-        
         Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
 
         Transcript:
@@ -338,7 +328,7 @@ async def identify_engaging_segments(
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
