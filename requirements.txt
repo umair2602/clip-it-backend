@@ -21,6 +21,7 @@ ffmpeg-python>=0.2.0
 pymongo>=4.6.0
 python-jose[cryptography]>=3.3.0
 passlib>=1.7.4
+argon2-cffi>=23.1.0
 pydantic[email]>=2.0.0
 s3transfer>=0.10.0
 sounddevice>=0.4.0
@@ -29,7 +30,7 @@ tqdm>=4.65.0
 httpx>=0.25.0
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
-respx>=0.20.0fastapi>=0.104.0
+fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 openai>=1.0.0

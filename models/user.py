@@ -39,6 +39,7 @@ class VideoStatus(str, Enum):
     """Video processing status"""
     UPLOADING = "uploading"
     DOWNLOADING = "downloading"
+    DOWNLOADED = "downloaded"  # After download, before processing
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
