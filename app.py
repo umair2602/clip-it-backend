@@ -29,6 +29,7 @@ setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
 
 # Import configuration
 from config import settings
+from services.user_video_service import utc_now
 from services.content_analysis import analyze_content
 from services.face_tracking import track_faces
 
@@ -353,7 +354,10 @@ class YouTubeRequest(BaseModel):
     auto_process: bool = True
 
 
-# In-memory storage for task status (replace with a proper database in production)
+# In-memory storage for task status 
+# NOTE: This is deprecated and kept only for backwards compatibility.
+# Use MongoDB video status via /status/{video_id} endpoint instead.
+# This dictionary is not shared across containers and will be removed in future versions.
 tasks = {}
 
 # Tiktok
@@ -609,10 +613,122 @@ async def upload_video(
 
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
+    """Get task status from MongoDB video document (task_id can be video_id or actual task_id)"""
+    try:
+        # Import user video service
+        from services.user_video_service import get_user_video_by_video_id
+        
+        # Try to find video by video_id (task_id is often the same as video_id)
+        video_info = await get_user_video_by_video_id(task_id)
+        
+        if not video_info:
+            # Fallback: Check in-memory tasks for backwards compatibility
+            if task_id in tasks:
+                return tasks[task_id]
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Convert video status to task status format
+        status_map = {
+            "downloading": "downloading",
+            "processing": "processing",
+            "completed": "completed",
+            "failed": "error",
+            "uploading": "downloading"
+        }
+        
+        task_status = {
+            "status": status_map.get(video_info.get("status", "downloading"), "downloading"),
+            "progress": get_progress_from_status(video_info.get("status")),
+            "message": get_message_from_status(video_info.get("status"), video_info.get("error_message")),
+            "video_id": video_info.get("id"),
+            "updated_at": video_info.get("updated_at", datetime.datetime.now()).isoformat() if isinstance(video_info.get("updated_at"), datetime.datetime) else str(video_info.get("updated_at")),
+            "created_at": video_info.get("created_at", datetime.datetime.now()).isoformat() if isinstance(video_info.get("created_at"), datetime.datetime) else str(video_info.get("created_at")),
+        }
+        
+        # Add clips if completed
+        if video_info.get("status") == "completed" and video_info.get("clips"):
+            task_status["clips"] = video_info.get("clips")
+        
+        return task_status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error getting task status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-    return tasks[task_id]
+
+def get_progress_from_status(status: str) -> int:
+    """Map video status to progress percentage - aligned with actual pipeline steps"""
+    progress_map = {
+        # Step 1: Downloading YouTube video
+        "queued": 5,                    # Job queued
+        "downloading": 10,              # Downloading YouTube video
+        "downloaded": 15,               # Download complete
+        "uploading": 18,                # Uploading to storage
+        
+        # Step 2: Transcribing
+        "processing_started": 20,       # Starting processing
+        "transcribing": 30,             # Transcribing audio with Whisper
+        
+        # Step 3: Finding interesting content
+        "analyzing": 50,                # AI analyzing content for best moments
+        
+        # Step 4: Generating clips
+        "processing": 70,               # Creating video clips with FFmpeg
+        
+        # Step 5: Clips download/upload (final stages)
+        "uploading_clips": 90,          # Uploading clips to S3
+        
+        # Step 6: Finished
+        "completed": 100,               # All done!
+        
+        # Error states
+        "failed": 0,
+        "error": 0,
+        "timeout": 0,
+        "stuck": 0
+    }
+    return progress_map.get(status, 0)
+
+
+def get_message_from_status(status: str, error_message: str = None) -> str:
+    """Map video status to user-friendly message - aligned with actual pipeline"""
+    if status == "failed" and error_message:
+        return f"Error: {error_message}"
+    if status == "error" and error_message:
+        return f"Error: {error_message}"
+    
+    message_map = {
+        # Step 1: Downloading YouTube video
+        "queued": "Queued for processing...",
+        "downloading": "Downloading YouTube video...",
+        "downloaded": "Download complete",
+        "uploading": "Uploading video to storage...",
+        
+        # Step 2: Transcribing
+        "processing_started": "Starting video processing...",
+        "transcribing": "Transcribing audio...",
+        
+        # Step 3: Finding interesting content
+        "analyzing": "Finding interesting content...",
+        
+        # Step 4: Generating clips
+        "processing": "Generating clips...",
+        
+        # Step 5: Clips download (upload to S3)
+        "uploading_clips": "Uploading clips...",
+        
+        # Step 6: Finished
+        "completed": "Finished!",
+        
+        # Error states
+        "failed": "Processing failed",
+        "error": "An error occurred",
+        "timeout": "Processing timed out",
+        "stuck": "Processing stuck"
+    }
+    return message_map.get(status, "Processing...")
 
 
 @app.get("/clips/{video_id}")
@@ -957,7 +1073,17 @@ async def process_youtube_download_local(
 ):
     """Process a YouTube download locally (no S3 upload of original video)"""
     try:
-        # Update task status
+        # Import user video service
+        from services.user_video_service import update_user_video
+        
+        # Update video status in MongoDB (primary source of truth)
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "downloading",
+                "updated_at": utc_now()
+            })
+        
+        # Also update in-memory tasks for backwards compatibility
         tasks[task_id] = {
             "status": "downloading",
             "progress": 10,
@@ -1269,7 +1395,7 @@ async def process_podcast(
         # Update task status
         tasks[task_id] = {
             "status": "transcribing",
-            "progress": 10,
+            "progress": 30,
             "message": "Transcribing audio",
             "video_id": video_id,
             "user_id": user_id,  # Store user_id in task
@@ -1282,7 +1408,7 @@ async def process_podcast(
             tasks[original_task_id].update(
                 {
                     "status": "transcribing",
-                    "progress": 10,
+                    "progress": 30,
                     "message": "Transcribing audio",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }
@@ -1438,7 +1564,7 @@ async def process_podcast(
         tasks[task_id].update(
             {
                 "status": "analyzing",
-                "progress": 40,
+                "progress": 50,
                 "message": "Analyzing content",
                 "updated_at": datetime.datetime.now().isoformat(),
             }
@@ -1449,7 +1575,7 @@ async def process_podcast(
             tasks[original_task_id].update(
                 {
                     "status": "analyzing",
-                    "progress": 40,
+                    "progress": 50,
                     "message": "Analyzing content",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }
@@ -1484,7 +1610,7 @@ async def process_podcast(
         tasks[task_id].update(
             {
                 "status": "processing",
-                "progress": 60,
+                "progress": 70,
                 "message": "Processing video clips",
                 "updated_at": datetime.datetime.now().isoformat(),
             }
@@ -1495,7 +1621,7 @@ async def process_podcast(
             tasks[original_task_id].update(
                 {
                     "status": "processing",
-                    "progress": 60,
+                    "progress": 70,
                     "message": "Processing video clips",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }

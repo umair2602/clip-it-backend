@@ -215,7 +215,7 @@ async def process_video_job(job_id: str, job_data: dict):
             job_id,
             {
                 "status": "transcribing",
-                "progress": "10",
+                "progress": "30",
                 "message": "Transcribing audio",
             },
         )
@@ -226,7 +226,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 original_job_id,
                 {
                     "status": "transcribing",
-                    "progress": "10",
+                    "progress": "30",
                     "message": "Transcribing audio",
                 },
             )
@@ -263,7 +263,7 @@ async def process_video_job(job_id: str, job_data: dict):
 
         # Update job status
         job_queue.update_job(
-            job_id, {"status": "analyzing", "progress": "40", "message": "Analyzing content"},
+            job_id, {"status": "analyzing", "progress": "50", "message": "Analyzing content"},
         )
 
         if original_job_id:
@@ -271,7 +271,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 original_job_id,
                 {
                     "status": "analyzing",
-                    "progress": "40",
+                    "progress": "50",
                     "message": "Analyzing content",
                 },
             )
@@ -303,7 +303,7 @@ async def process_video_job(job_id: str, job_data: dict):
             job_id,
             {
                 "status": "processing",
-                "progress": "60",
+                "progress": "70",
                 "message": "Processing video clips",
             },
         )
@@ -313,7 +313,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 original_job_id,
                 {
                     "status": "processing",
-                    "progress": "60",
+                    "progress": "70",
                     "message": "Processing video clips",
                 },
             )
