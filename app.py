@@ -613,48 +613,113 @@ async def upload_video(
 
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):
-    """Get task status from MongoDB video document (task_id can be video_id or actual task_id)"""
+    """Get task status from MongoDB video document (task_id can be video_id or actual task_id)
+    
+    Optimized for fast responses to prevent timeout issues.
+    """
     try:
-        # Import user video service
-        from services.user_video_service import get_user_video_by_video_id
+        # Fast path: Check in-memory tasks first (for backwards compatibility)
+        if task_id in tasks:
+            return tasks[task_id]
         
-        # Try to find video by video_id (task_id is often the same as video_id)
-        video_info = await get_user_video_by_video_id(task_id)
+        # Query MongoDB directly for speed (avoid service layer overhead)
+        db = get_database()
+        
+        # NEW PATTERN: Search in users.videos[] array
+        users_collection = db.users
+        video_info = None
+        
+        # Try to find video in users collection
+        user = users_collection.find_one(
+            {"videos.id": task_id},
+            {"videos.$": 1}  # Only return matching video
+        )
+        
+        if user and user.get('videos'):
+            video_info = user['videos'][0]
+            logging.info(f"Found video {task_id} in users.videos array")
+        
+        # OLD PATTERN: Fallback to videos collection
+        if not video_info:
+            videos_collection = db.videos
+            
+            # Try to find video by _id or video_id
+            try:
+                # First try by ObjectId if it's a valid ObjectId
+                if len(task_id) == 24:  # MongoDB ObjectId length
+                    video_info = videos_collection.find_one({"_id": ObjectId(task_id)})
+            except:
+                pass
+            
+            # If not found, try by video_id field
+            if not video_info:
+                video_info = videos_collection.find_one({"video_id": task_id})
+            
+            # If still not found, try by id field
+            if not video_info:
+                video_info = videos_collection.find_one({"id": task_id})
+            
+            if video_info:
+                logging.info(f"Found video {task_id} in videos collection")
         
         if not video_info:
-            # Fallback: Check in-memory tasks for backwards compatibility
-            if task_id in tasks:
-                return tasks[task_id]
             raise HTTPException(status_code=404, detail="Task not found")
         
         # Convert video status to task status format
         status_map = {
             "downloading": "downloading",
+            "downloaded": "downloaded",
             "processing": "processing",
             "completed": "completed",
             "failed": "error",
-            "uploading": "downloading"
+            "uploading": "downloading",
+            "queued": "queued",
+            "transcribing": "transcribing",
+            "analyzing": "analyzing"
         }
+        
+        video_status = video_info.get("status", "downloading")
         
         task_status = {
-            "status": status_map.get(video_info.get("status", "downloading"), "downloading"),
-            "progress": get_progress_from_status(video_info.get("status")),
-            "message": get_message_from_status(video_info.get("status"), video_info.get("error_message")),
-            "video_id": video_info.get("id"),
-            "updated_at": video_info.get("updated_at", datetime.datetime.now()).isoformat() if isinstance(video_info.get("updated_at"), datetime.datetime) else str(video_info.get("updated_at")),
-            "created_at": video_info.get("created_at", datetime.datetime.now()).isoformat() if isinstance(video_info.get("created_at"), datetime.datetime) else str(video_info.get("created_at")),
+            "status": status_map.get(video_status, "downloading"),
+            "progress": get_progress_from_status(video_status),
+            "message": get_message_from_status(video_status, video_info.get("error_message")),
+            "video_id": str(video_info.get("_id", video_info.get("id", task_id))),
         }
         
-        # Add clips if completed
-        if video_info.get("status") == "completed" and video_info.get("clips"):
-            task_status["clips"] = video_info.get("clips")
+        # Add timestamps if available
+        if "updated_at" in video_info:
+            updated_at = video_info["updated_at"]
+            if isinstance(updated_at, datetime.datetime):
+                task_status["updated_at"] = updated_at.isoformat()
+            else:
+                task_status["updated_at"] = str(updated_at)
+        
+        if "created_at" in video_info:
+            created_at = video_info["created_at"]
+            if isinstance(created_at, datetime.datetime):
+                task_status["created_at"] = created_at.isoformat()
+            else:
+                task_status["created_at"] = str(created_at)
+        
+        # Add process_task_id if available (for YouTube downloads)
+        if "process_task_id" in video_info:
+            task_status["process_task_id"] = video_info["process_task_id"]
+        
+        # Add clips count if completed (don't include full clips to keep response small)
+        if video_status == "completed":
+            clips = video_info.get("clips", [])
+            task_status["clips_count"] = len(clips) if clips else 0
+        
+        logging.info(f"Status request for {task_id}: {video_status} ({task_status['progress']}%)")
         
         return task_status
         
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Error getting task status: {str(e)}")
+        logging.error(f"Error getting task status for {task_id}: {str(e)}")
+        logging.exception("Full traceback:")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
