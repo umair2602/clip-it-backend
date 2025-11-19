@@ -3,10 +3,11 @@ import logging
 import asyncio
 from pathlib import Path
 from pytubefix import YouTube
+from pytubefix.cli import on_progress
 
 async def download_youtube_video(url: str, output_dir: Path) -> tuple:
     """
-    Download a YouTube video using pytubefix
+    Download a YouTube video using pytubefix with bot detection bypass
     
     Args:
         url: YouTube video URL
@@ -49,13 +50,48 @@ def _download_video(url: str, output_dir: Path) -> tuple:
     Internal function to download YouTube video (runs in executor)
     """
     try:
-        logging.info(f"🔧 Initializing pytubefix YouTube object...")
+        logging.info(f"🔧 Initializing pytubefix YouTube object with bot bypass...")
         logging.info(f"   URL: {url}")
         
-        # Initialize YouTube object
-        yt = YouTube(url)
+        # Initialize YouTube object with multiple bot detection bypass methods
+        # Try different client configurations
+        clients_to_try = [
+            {'client': 'WEB', 'use_oauth': False, 'allow_oauth_cache': True},
+            {'client': 'ANDROID', 'use_oauth': False, 'allow_oauth_cache': True},
+            {'client': 'IOS', 'use_oauth': False, 'allow_oauth_cache': True},
+            {'client': 'MWEB', 'use_oauth': False, 'allow_oauth_cache': True},
+        ]
         
-        logging.info(f"✅ YouTube object created")
+        yt = None
+        last_error = None
+        
+        for idx, client_config in enumerate(clients_to_try, 1):
+            try:
+                logging.info(f"🔄 Attempt {idx}/{len(clients_to_try)}: Trying client '{client_config['client']}'")
+                yt = YouTube(
+                    url,
+                    on_progress_callback=on_progress,
+                    **client_config
+                )
+                # Test if we can access the title (this will fail if bot detected)
+                _ = yt.title
+                logging.info(f"✅ Successfully connected with client '{client_config['client']}'")
+                break
+            except Exception as e:
+                last_error = e
+                logging.warning(f"⚠️ Client '{client_config['client']}' failed: {str(e)}")
+                if idx < len(clients_to_try):
+                    logging.info(f"   Trying next client...")
+                continue
+        
+        if yt is None:
+            logging.error(f"❌ All client configurations failed")
+            if last_error:
+                raise last_error
+            else:
+                raise Exception("Failed to initialize YouTube object with any client configuration")
+        
+        logging.info(f"✅ YouTube object created successfully")
         logging.info(f"   Title: {yt.title}")
         logging.info(f"   Author: {yt.author}")
         logging.info(f"   Length: {yt.length} seconds")

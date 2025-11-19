@@ -10,6 +10,12 @@ from config import settings
 # Initialize Sieve with API key
 sieve.api_key = settings.SIEVE_API_KEY
 
+# Check if API key is configured
+if not sieve.api_key or sieve.api_key == "":
+    logging.warning("⚠️  SIEVE_API_KEY is not configured - Sieve downloader will fail")
+else:
+    logging.info(f"✅ Sieve API key configured (length: {len(sieve.api_key)} chars)")
+
 async def download_youtube_video_sieve(url: str, output_dir: Path) -> tuple:
     """
     Download a YouTube video using Sieve API
@@ -22,6 +28,11 @@ async def download_youtube_video_sieve(url: str, output_dir: Path) -> tuple:
         tuple: (file_path, title, video_info)
     """
     try:
+        # Early validation - check if API key is set
+        if not sieve.api_key or sieve.api_key == "":
+            logging.error("❌ SIEVE_API_KEY is not configured - skipping Sieve download")
+            return None, None, None
+        
         logging.info(f"🎬 Starting Sieve YouTube download")
         logging.info(f"   URL: {url}")
         logging.info(f"   Output dir: {output_dir}")
