@@ -1194,40 +1194,54 @@ async def process_youtube_download_local(
         video_dir = upload_dir / video_id
         video_dir.mkdir(exist_ok=True)
 
-        # Download the video locally using Sieve or fallback downloader
+        # Three-tier download fallback system
         file_path, title, video_info = None, None, None
         max_retries = 3
         
+        # Tier 1: Try Sieve API (fastest, requires valid API key)
         for attempt in range(1, max_retries + 1):
             try:
-                logging.info(f"Task {task_id}: Attempt {attempt} to download with Sieve service")
+                logging.info(f"Task {task_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
                 file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
                 if file_path and title:
+                    logging.info(f"Task {task_id}: ✅ Sieve download successful")
                     break
             except Exception as sieve_error:
                 logging.warning(f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
                 if attempt == max_retries:
-                    logging.error(f"Task {task_id}: All {max_retries} Sieve attempts failed.")
+                    logging.error(f"Task {task_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix.")
                     break
                 await asyncio.sleep(5)
         
-        # Fallback to direct downloader if Sieve failed
+        # Tier 2: Fallback to pytubefix if Sieve failed
         if not file_path or not title:
             for attempt in range(1, max_retries + 1):
                 try:
-                    logging.info(f"Task {task_id}: Attempt {attempt} to download with direct downloader")
+                    logging.info(f"Task {task_id}: [Tier 2] Attempt {attempt} to download with pytubefix")
                     file_path, title, video_info = await download_youtube_video(url, video_dir)
                     if file_path and title:
+                        logging.info(f"Task {task_id}: ✅ pytubefix download successful")
                         break
-                except Exception as fallback_error:
-                    logging.warning(f"Task {task_id}: Direct download failed (attempt {attempt}): {str(fallback_error)}")
+                except Exception as pytubefix_error:
+                    logging.warning(f"Task {task_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
                     if attempt == max_retries:
-                        logging.error(f"Task {task_id}: All {max_retries} fallback attempts failed.")
+                        logging.error(f"Task {task_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp.")
                         break
                     await asyncio.sleep(5)
+        
+        # Tier 3: Final fallback to yt-dlp if both Sieve and pytubefix failed
+        if not file_path or not title:
+            try:
+                from utils.ytdlp_downloader import download_youtube_video_ytdlp
+                logging.info(f"Task {task_id}: [Tier 3] Attempting download with yt-dlp (final fallback)")
+                file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
+                if file_path and title:
+                    logging.info(f"Task {task_id}: ✅ yt-dlp download successful")
+            except Exception as ytdlp_error:
+                logging.error(f"Task {task_id}: yt-dlp download failed: {str(ytdlp_error)}")
 
         if not file_path or not title:
-            raise Exception(f"Failed to download YouTube video after {max_retries} attempts")
+            raise Exception(f"Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)")
 
         logging.info(f"Task {task_id}: Download completed successfully to local file: {file_path}")
         
