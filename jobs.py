@@ -35,6 +35,8 @@ class JobQueue:
             "type": job_type,
             "data": job_data,
             "status": "queued",
+            "progress": "0",
+            "message": "Job queued",
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }

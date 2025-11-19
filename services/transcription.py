@@ -18,12 +18,9 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # Import speaker diarization service
-try:
-    from services.speaker_diarization import get_diarization_service
-    SPEAKER_DIARIZATION_AVAILABLE = True
-except ImportError:
-    SPEAKER_DIARIZATION_AVAILABLE = False
-    print("[WARNING] Speaker diarization not available. Install pyannote.audio to enable.")
+# DISABLED: Speaker diarization is completely disabled for performance
+SPEAKER_DIARIZATION_AVAILABLE = False
+logger.info("[INFO] Speaker diarization is disabled (hardcoded in transcription.py)")
 
 # Initialize Whisper model
 model = None
