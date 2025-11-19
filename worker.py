@@ -62,6 +62,14 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
 
+        # Update MongoDB video status
+        user_id = job_data.get("user_id")
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "downloading",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
             job_id,
@@ -115,6 +123,17 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                 f"Failed to download YouTube video after {max_retries} attempts with both Sieve and direct methods"
             )
 
+        # Update MongoDB with video info
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "title": title,
+                "filename": Path(file_path).name,
+                "thumbnail_url": video_info.get("thumbnail_url") if video_info else None,
+                "duration": video_info.get("length_seconds") if video_info else None,
+                "status": "downloaded",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
             job_id,
@@ -149,8 +168,19 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "original_job_id": job_id,
+                    "user_id": user_id,  # Pass user_id to processing job
                 },
             )
+
+            # CRITICAL FIX: Update MongoDB with process_task_id so frontend can find it
+            # This prevents 404 errors when frontend switches to polling the process task
+            # Status stays "downloaded" since download is complete and processing is about to start
+            if user_id:
+                await update_user_video(user_id, video_id, {
+                    "process_task_id": process_job_id,
+                    "updated_at": utc_now()
+                })
+                logger.info(f"Updated MongoDB: video {video_id} with process_task_id: {process_job_id}")
 
             # Update original job with processing job ID
             job_queue.update_job(
@@ -169,11 +199,22 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "original_job_id": job_id,
+                    "user_id": user_id,  # Pass user_id to processing job
                 },
             )
 
     except Exception as e:
         logger.error(f"Error in YouTube download job {job_id}: {str(e)}", exc_info=True)
+        
+        # Update MongoDB video status to failed
+        user_id = job_data.get("user_id")
+        if user_id and 'video_id' in locals():
+            await update_user_video(user_id, video_id, {
+                "status": "failed",
+                "error_message": str(e),
+                "updated_at": utc_now()
+            })
+        
         job_queue.update_job(
             job_id,
             {
@@ -209,6 +250,13 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info("="*70)
         logger.info("🚀 STARTING VIDEO PROCESSING PIPELINE")
         logger.info("="*70)
+
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "transcribing",
+                "updated_at": utc_now()
+            })
 
         # Update job status
         job_queue.update_job(
@@ -261,6 +309,13 @@ async def process_video_job(job_id: str, job_data: dict):
             logger.warning("Video appears to be silent or have no speech content")
             # Continue processing with empty transcript - don't fail
 
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "analyzing",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
             job_id, {"status": "analyzing", "progress": "50", "message": "Analyzing content"},
@@ -297,6 +352,13 @@ async def process_video_job(job_id: str, job_data: dict):
         step_elapsed = time.time() - step_start
         logger.info(f"✅ STEP 2 COMPLETE: AI analysis finished in {step_elapsed:.2f} seconds")
         logger.info(f"   - Clips identified: {len(segments)}")
+
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "processing",
+                "updated_at": utc_now()
+            })
 
         # Update job status
         job_queue.update_job(
