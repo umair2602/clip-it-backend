@@ -618,8 +618,12 @@ async def get_status(task_id: str):
     Optimized for fast responses to prevent timeout issues.
     """
     try:
+        logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logging.info(f"📡 STATUS REQUEST for task_id: {task_id}")
+        
         # Fast path: Check in-memory tasks first (for backwards compatibility)
         if task_id in tasks:
+            logging.info(f"   ✅ Found in memory tasks")
             return tasks[task_id]
         
         # Query MongoDB directly for speed (avoid service layer overhead)
@@ -629,7 +633,7 @@ async def get_status(task_id: str):
         users_collection = db.users
         video_info = None
         
-        # Try to find video in users collection
+        # Try to find video in users collection by video ID
         user = users_collection.find_one(
             {"videos.id": task_id},
             {"videos.$": 1}  # Only return matching video
@@ -637,7 +641,18 @@ async def get_status(task_id: str):
         
         if user and user.get('videos'):
             video_info = user['videos'][0]
-            logging.info(f"Found video {task_id} in users.videos array")
+            logging.info(f"   ✅ Found video {task_id} in users.videos array (by video ID)")
+        
+        # If not found by video ID, try to find by process_task_id
+        if not video_info:
+            user = users_collection.find_one(
+                {"videos.process_task_id": task_id},
+                {"videos.$": 1}  # Only return matching video
+            )
+            
+            if user and user.get('videos'):
+                video_info = user['videos'][0]
+                logging.info(f"   ✅ Found video in users.videos array (by process_task_id: {task_id})")
         
         # OLD PATTERN: Fallback to videos collection
         if not video_info:
@@ -663,7 +678,15 @@ async def get_status(task_id: str):
                 logging.info(f"Found video {task_id} in videos collection")
         
         if not video_info:
+            logging.warning(f"   ❌ Video NOT FOUND for task_id: {task_id}")
+            logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Log what we found
+        logging.info(f"   📄 Video found in MongoDB:")
+        logging.info(f"      ID: {video_info.get('id', 'N/A')}")
+        logging.info(f"      Status: {video_info.get('status', 'N/A')}")
+        logging.info(f"      Process Task ID: {video_info.get('process_task_id', 'NONE')}")
         
         # Convert video status to task status format
         status_map = {
@@ -711,7 +734,15 @@ async def get_status(task_id: str):
             clips = video_info.get("clips", [])
             task_status["clips_count"] = len(clips) if clips else 0
         
-        logging.info(f"Status request for {task_id}: {video_status} ({task_status['progress']}%)")
+        # Log the response
+        logging.info(f"   📤 RESPONSE:")
+        logging.info(f"      Status: {task_status['status']}")
+        logging.info(f"      Progress: {task_status['progress']}%")
+        logging.info(f"      Video ID: {task_status.get('video_id', 'N/A')}")
+        logging.info(f"      Process Task ID: {task_status.get('process_task_id', 'NONE')}")
+        logging.info(f"      Requested Task ID: {task_id}")
+        logging.info(f"      Task ID Match: {'✅ MATCH' if task_status.get('process_task_id') == task_id or task_status.get('video_id') == task_id else '⚠️ MISMATCH'}")
+        logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
         return task_status
         
@@ -1255,6 +1286,21 @@ async def process_youtube_download_local(
                 tasks[task_id]["status"] = "processing_started"
                 tasks[task_id]["message"] = "Processing has started"
                 tasks[task_id]["updated_at"] = datetime.datetime.now().isoformat()
+                
+                # 🔍 Save process_task_id to MongoDB
+                logging.info(f"🔍 DEBUG [API]: About to update process_task_id in MongoDB")
+                logging.info(f"   user_id: {user_id}")
+                logging.info(f"   video_id: {video_id}")
+                logging.info(f"   process_task_id: {process_task_id}")
+                
+                if user_id:
+                    update_result = await update_user_video(user_id, video_id, {
+                        "process_task_id": process_task_id,
+                        "updated_at": utc_now()
+                    })
+                    logging.info(f"✅ Updated MongoDB [API]: video {video_id} with process_task_id: {process_task_id}, result: {update_result}")
+                else:
+                    logging.warning(f"⚠️ WARNING [API]: user_id is None, cannot update MongoDB with process_task_id")
                 
                 # Process directly from local file (no S3 download needed)
                 await process_podcast(

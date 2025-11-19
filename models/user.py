@@ -86,6 +86,7 @@ class VideoModel(BaseModel):
     error_message: Optional[str] = None
     filename: str
     clips: List[ClipModel] = []
+    process_task_id: Optional[str] = None  # Task ID for processing job (for task switching)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     processed_at: Optional[datetime] = None
