@@ -101,8 +101,11 @@ class Settings:
     # JWT settings
     JWT_SECRET_KEY = get_secret("/clip-it/jwt-secret-key", "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
     JWT_ALGORITHM = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 180
-    JWT_REFRESH_TOKEN_EXPIRE_DAYS = 10
+    # Make expirations configurable via env; increase sensible defaults
+    # Access token default: 24 hours (1440 minutes)
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+    # Refresh token default: 30 days
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
     
     # TikTok settings - Clean any quotes that might be accidentally added

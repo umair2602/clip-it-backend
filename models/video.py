@@ -108,6 +108,7 @@ class Video(VideoBase):
     created_at: datetime
     updated_at: datetime
     processed_at: Optional[datetime] = None
+    clips: Optional[List[Dict[str, Any]]] = []  # Array of clips for this video
 
 
 class ClipBase(BaseModel):
