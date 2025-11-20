@@ -770,49 +770,88 @@ async def tiktok_callback(
 
             # Return success page that can close itself and communicate with parent
             return HTMLResponse(f"""
-            <!DOCTYPE html>
-            <html>
-            <head><title>TikTok Connected</title></head>
-            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                <div style="background: rgba(255,255,255,0.1); padding: 30px; border-radius: 15px; backdrop-filter: blur(10px);">
-                    <h1 style="font-size: 2.5em; margin-bottom: 20px;">🎉</h1>
-                    <h2 style="margin-bottom: 20px;">TikTok Account Connected Successfully!</h2>
-                    <p style="font-size: 18px; margin-bottom: 30px;">Your TikTok account has been connected and is ready to use.</p>
-                    <div style="background: rgba(255,255,255,0.2); padding: 20px; border-radius: 10px; margin: 20px 0;">
-                        <p><strong>Open ID:</strong> {open_id}</p>
-                        <p><strong>Scopes:</strong> {token_data["scope"]}</p>
-                    </div>
-                    <p style="color: rgba(255,255,255,0.8); font-size: 14px;">This window will close automatically in 3 seconds.</p>
-                </div>
-                <script>
-                    // Notify parent window of successful connection
-                    if (window.opener) {{
-                        try {{
-                            window.opener.postMessage({{
-                                type: 'TIKTOK_AUTH_SUCCESS',
-                                data: {{
-                                    open_id: '{open_id}',
-                                    scope: '{token_data["scope"]}'
-                                }}
-                            }}, '*');
-                        }} catch (e) {{
-                            console.log('Could not post message to parent:', e);
-                        }}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TikTok Connected</title>
+    <style>
+        body {{
+            font-family: 'Arial', sans-serif;
+            text-align: center;
+            padding: 60px;
+            background: linear-gradient(135deg, #9581e6 0%, #6e5bb3 100%);
+            color: white;
+        }}
+        .container {{
+            background: rgba(255, 255, 255, 0.1);
+            padding: 40px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            display: inline-block;
+            min-width: 300px;
+        }}
+        h1 {{
+            font-size: 3em;
+            margin-bottom: 20px;
+        }}
+        h2 {{
+            margin-bottom: 15px;
+            font-weight: normal;
+        }}
+        p {{
+            font-size: 16px;
+            margin-bottom: 20px;
+        }}
+        .info-box {{
+            background: rgba(255, 255, 255, 0.2);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            word-break: break-all;
+        }}
+        .small-text {{
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 14px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>TikTok Connected!</h2>
+        <p>Your account is ready to use.</p>
+        <div class="info-box">
+            <p><strong>Open ID:</strong> {open_id}</p>
+        </div>
+        <p class="small-text">This window will close automatically in 3 seconds.</p>
+    </div>
+    <script>
+        // Notify parent window of successful connection
+        if (window.opener) {{
+            try {{
+                window.opener.postMessage({{
+                    type: 'TIKTOK_AUTH_SUCCESS',
+                    data: {{
+                        open_id: '{open_id}'
                     }}
-                    
-                    // Close the popup window
-                    setTimeout(() => {{
-                        if (window.opener) {{
-                            window.close();
-                        }} else {{
-                            // If not a popup, redirect to frontend
-                            window.location.href = 'https://clip-it-frontend-nine.vercel.app/history';
-                        }}
-                    }}, 3000);
-                </script>
-            </body>
-            </html>
-            """)
+                }}, '*');
+            }} catch (e) {{
+                console.log('Could not post message to parent:', e);
+            }}
+        }}
+        
+        // Close the popup window after 3 seconds
+        setTimeout(() => {{
+            if (window.opener) {{
+                window.close();
+            }} else {{
+                window.location.href = 'https://clip-it-frontend-nine.vercel.app/history';
+            }}
+        }}, 3000);
+    </script>
+</body>
+</html>
+""")
+
 
     except Exception as e:
         logger.error(f"Error in TikTok callback: {str(e)}")
