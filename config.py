@@ -120,7 +120,19 @@ class Settings:
     SPEAKER_DIARIZATION_ENABLED = os.getenv("SPEAKER_DIARIZATION_ENABLED", "false").lower() == "true"
 
     # Proxy base URL
+    
     PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
+
+    #youtube
+    YOUTUBE_CLIENT_ID = clean_env_value(get_secret("/clip-it/youtube-client-id", "YOUTUBE_CLIENT_ID", "your_youtube_client_id"))
+    YOUTUBE_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/youtube-client-secret", "YOUTUBE_CLIENT_SECRET", "your_youtube_client_secret"))
+    YOUTUBE_REDIRECT_URI = clean_env_value(get_secret("/clip-it/youtube-redirect-uri", "YOUTUBE_REDIRECT_URI", "http://localhost:8000/youtube/callback"))
+    YOUTUBE_SCOPES = [
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/youtube.readonly"
+    ]
+
 
 # Create settings instance
 settings = Settings()

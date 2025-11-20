@@ -40,3 +40,8 @@ pyannote.database
 pyannote.metrics
 soundfile
 whisperx
+
+# Google API client
+google-auth
+google-auth-oauthlib
+google-api-python-client
