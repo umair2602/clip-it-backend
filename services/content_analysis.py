@@ -109,64 +109,64 @@ async def identify_engaging_segments_from_text(
     logger.info("="*70)
 
     # Create prompt for OpenAI
+    # Create prompt for OpenAI
     prompt = f"""
-        You are an AI assistant that helps extract engaging video clips from podcast audio transcripts. You will be given a transcript with speaker labels and timestamps in the format:
+        You are an expert AI that identifies viral-worthy video clips from audio transcripts. You will be given a transcript with speaker labels and timestamps in the format:
 
         [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
 
-        ⚠️ CRITICAL CONSTRAINT: ALL clips MUST be 15-180 seconds long. DO NOT generate clips shorter than 15 seconds - they will be automatically rejected.
+        YOUR MISSION: Find 3-10 engaging clips from different parts of the video. Look for MULTIPLE interesting moments throughout the entire transcript.
 
-        Your job is to:
-        1. Read through the full transcript.
-        2. Identify sections that can work as compelling video clips for social media platforms like TikTok, Instagram Reels, or YouTube Shorts.
-        3. Select only the most engaging, self-contained parts. A good clip should:
-        - Contain a complete thought, story, or insight that doesn't rely on external context
-        - Be interesting to someone who didn't hear the rest of the conversation
-        - Include opinions, unexpected facts, emotional moments, strong takes, or clever observations
-        - Avoid long pauses, filler words, or fragmented thoughts
-        - Be valuable or entertaining to people
+        What makes a GREAT clip (prioritize these):
+        ✅ Controversial or surprising statements
+        ✅ Strong opinions or hot takes  
+        ✅ Funny moments, jokes, or witty remarks
+        ✅ Unexpected facts or revelations
+        ✅ Emotional stories or personal anecdotes
+        ✅ Practical advice or life tips
+        ✅ Debates, disagreements, or tension between speakers
+        ✅ "Aha!" moments or insights
+        ✅ Behind-the-scenes revelations
+        ✅ Predictions or bold claims
 
-        CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
-        - Each clip should be between 15-180 seconds long to ensure proper context and engagement
-        - Target around 30-60 seconds for optimal social media performance
-        - MINIMUM: 15 seconds (clips shorter than this will be REJECTED)
-        - MAXIMUM: 180 seconds (3 minutes - for in-depth stories/discussions)
-        - Choose duration based on the content: expand timestamps to capture complete thoughts/stories
-        - Example: If an interesting moment spans 25 seconds, set start_time and end_time to capture those 25 seconds
-        - Example: If a story takes 45 seconds to tell completely, use the full 45 seconds
-        - Example: For a quick insight at 500s that takes 35 seconds: start_time=500, end_time=535
+        STRICT REQUIREMENTS:
+        • Each clip MUST be 15-180 seconds (prefer 20-60 seconds)
+        • Generate MULTIPLE clips - scan the ENTIRE transcript
+        • Each clip should be from a DIFFERENT part of the conversation
+        • Clips should be STANDALONE - no prior context needed
+        • Focus on the MOST engaging parts that could go viral
 
-        TIMESTAMP CALCULATION GUIDELINES:
-        1. Identify the most interesting moment or topic in a section
-        2. Find where the topic/story BEGINS (include a bit of context if needed)
-        3. Find where the topic/story ENDS (ensure the thought is complete)
-        4. Calculate duration = end_time - start_time
-        5. Ensure duration is >= 15 seconds AND <= 180 seconds
-        6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
-        7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
+        SEARCH STRATEGY - Apply this systematically:
+        1. Scan the beginning (first 25% of transcript) - find 1-2 clips
+        2. Scan the middle (25%-75% of transcript) - find 2-4 clips  
+        3. Scan the end (last 25% of transcript) - find 1-2 clips
+        4. Look for topic changes, energy shifts, laughter, emphasis
+        5. Identify moments where speakers disagree or debate
+        6. Find moments where speakers get excited or passionate
 
-        IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many interesting moments as possible (up to 20 clips).
-        Prioritize quality over quantity - each clip should be genuinely engaging and self-contained.
-        
-        DO NOT pick random segments. Only select clips that could realistically go viral or spark curiosity, debate, or learning.
+        DURATION CALCULATION:
+        - Find the interesting moment
+        - Expand backwards to include setup/context (2-5 seconds)
+        - Expand forwards to include the complete thought/punchline
+        - Ensure total duration is 15-180 seconds
+        - If naturally short, add surrounding context to reach 15+ seconds
 
-        For each selected clip, return a JSON object with:
-        - "start_time": in seconds (beginning of the interesting segment)
-        - "end_time": in seconds (end of the segment - must be at least start_time + 15)
-        - "title": a short, compelling title (4–10 words)
+        CLIP GENERATION STRATEGY:
+        - Generate clips based ONLY on the number of genuinely interesting moments found
+        - Do NOT force a minimum or maximum number of clips
+        - Quality over quantity - only include truly engaging segments
+        - If you find 2 great moments, return 2 clips
+        - If you find 15 great moments, return 15 clips
+        - Video length doesn't matter - focus on content quality and variety
 
-        MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
-        - Duration >= 15 seconds (MINIMUM - anything less will be rejected and wasted)
-        - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
-        - Complete thought/story (don't cut off mid-sentence)
-        - Self-contained (makes sense without prior context)
+        IMPORTANT: Don't just pick one good moment - find ALL engaging segments throughout the video. Think like a social media editor who extracts every viral-worthy moment.
 
-        IMPORTANT: The AI model will WASTE TOKENS generating clips that don't meet the 15-second minimum.
-        Please ensure ALL clips are at least 15 seconds long to avoid wasting API costs.
+        Return ONLY a JSON array with this format:
+        [
+          {{"start_time": X, "end_time": Y, "title": "Compelling Title"}}
+        ]
 
-        Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
-
-        Transcript:
+        Transcript to analyze:
         {transcript_text}
         """
 
@@ -180,7 +180,7 @@ async def identify_engaging_segments_from_text(
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.6,
+        temperature=0.7,
         max_tokens=4000,
         n=1,
         stop=None,
@@ -280,8 +280,6 @@ async def identify_engaging_segments(
 
         [START_TIME - END_TIME]  spoken sentence
 
-        ⚠️ CRITICAL CONSTRAINT: ALL clips MUST be 15-180 seconds long. DO NOT generate clips shorter than 15 seconds - they will be automatically rejected.
-
         Your job is to:
         1. Read through the full transcript.
         2. Identify sections that can work as compelling video clips for social media platforms like TikTok, Instagram Reels, or YouTube Shorts.
@@ -311,8 +309,12 @@ async def identify_engaging_segments(
         6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
         7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
 
-        IMPORTANT: Generate MULTIPLE clips from different parts of the video. Look for as many interesting moments as possible (up to 20 clips).
-        Prioritize quality over quantity - each clip should be genuinely engaging and self-contained.
+        IMPORTANT: Generate clips for EVERY genuinely interesting moment you find in the video.
+        - Do NOT limit yourself to a specific number of clips
+        - If there are 3 interesting moments, return 3 clips
+        - If there are 20 interesting moments, return 20 clips
+        - Quality over quantity - but don't miss any viral-worthy segments
+        - Each clip should be genuinely engaging and self-contained
         
         DO NOT pick random segments. Only select clips that could realistically go viral or spark curiosity, debate, or learning.
 
@@ -327,9 +329,6 @@ async def identify_engaging_segments(
         - Complete thought/story (don't cut off mid-sentence)
         - Self-contained (makes sense without prior context)
 
-        IMPORTANT: The AI model will WASTE TOKENS generating clips that don't meet the 15-second minimum.
-        Please ensure ALL clips are at least 15 seconds long to avoid wasting API costs.
-        
         Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
 
         Transcript:
@@ -338,7 +337,7 @@ async def identify_engaging_segments(
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
@@ -346,7 +345,7 @@ async def identify_engaging_segments(
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.6,
+        temperature=0.7,  # Increased for more creative clip detection
         max_tokens=4000,  # Increased to handle more clips
         n=1,
         stop=None,

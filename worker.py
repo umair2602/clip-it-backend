@@ -33,6 +33,55 @@ output_dir.mkdir(exist_ok=True)
 whisper_model = None
 
 
+async def cleanup_old_files(max_age_hours: int = 24):
+    """Clean up old files in uploads and outputs directories.
+    
+    Args:
+        max_age_hours: Maximum age in hours for files to keep (default 24 hours)
+    """
+    try:
+        import time
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+        
+        cleaned_uploads = 0
+        cleaned_outputs = 0
+        
+        # Clean up old upload directories
+        if upload_dir.exists():
+            for video_dir in upload_dir.iterdir():
+                if video_dir.is_dir():
+                    # Check age of directory
+                    dir_age = current_time - video_dir.stat().st_mtime
+                    if dir_age > max_age_seconds:
+                        try:
+                            shutil.rmtree(video_dir)
+                            cleaned_uploads += 1
+                            logger.info(f"🧹 Cleaned up old upload directory (age: {dir_age/3600:.1f}h): {video_dir.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up old upload directory {video_dir}: {e}")
+        
+        # Clean up old output directories
+        if output_dir.exists():
+            for video_dir in output_dir.iterdir():
+                if video_dir.is_dir():
+                    # Check age of directory
+                    dir_age = current_time - video_dir.stat().st_mtime
+                    if dir_age > max_age_seconds:
+                        try:
+                            shutil.rmtree(video_dir)
+                            cleaned_outputs += 1
+                            logger.info(f"🧹 Cleaned up old output directory (age: {dir_age/3600:.1f}h): {video_dir.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up old output directory {video_dir}: {e}")
+        
+        if cleaned_uploads > 0 or cleaned_outputs > 0:
+            logger.info(f"🧹 Cleanup complete: {cleaned_uploads} upload dirs, {cleaned_outputs} output dirs removed")
+        
+    except Exception as e:
+        logger.error(f"Error in cleanup_old_files: {str(e)}", exc_info=True)
+
+
 async def initialize_worker():
     """Initialize the worker with the Whisper model"""
     global whisper_model
@@ -61,6 +110,14 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
         auto_process = job_data.get("auto_process", True)
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
+
+        # Update MongoDB video status
+        user_id = job_data.get("user_id")
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "downloading",
+                "updated_at": utc_now()
+            })
 
         # Update job status
         job_queue.update_job(
@@ -115,6 +172,17 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                 f"Failed to download YouTube video after {max_retries} attempts with both Sieve and direct methods"
             )
 
+        # Update MongoDB with video info
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "title": title,
+                "filename": Path(file_path).name,
+                "thumbnail_url": video_info.get("thumbnail_url") if video_info else None,
+                "duration": video_info.get("length_seconds") if video_info else None,
+                "status": "downloaded",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
             job_id,
@@ -149,8 +217,27 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "original_job_id": job_id,
+                    "user_id": user_id,  # Pass user_id to processing job
                 },
             )
+
+            # CRITICAL FIX: Update MongoDB with process_task_id so frontend can find it
+            # This prevents 404 errors when frontend switches to polling the process task
+            # Status stays "downloaded" since download is complete and processing is about to start
+            logger.info(f"🔍 DEBUG: About to update process_task_id")
+            logger.info(f"   user_id: {user_id}")
+            logger.info(f"   video_id: {video_id}")
+            logger.info(f"   process_job_id: {process_job_id}")
+            
+            if user_id:
+                update_result = await update_user_video(user_id, video_id, {
+                    "process_task_id": process_job_id,
+                    "updated_at": utc_now()
+                })
+                logger.info(f"✅ Update result: {update_result}")
+                logger.info(f"✅ Updated MongoDB: video {video_id} with process_task_id: {process_job_id}")
+            else:
+                logger.error(f"❌ Cannot update process_task_id - user_id is None!")
 
             # Update original job with processing job ID
             job_queue.update_job(
@@ -169,11 +256,32 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "original_job_id": job_id,
+                    "user_id": user_id,  # Pass user_id to processing job
                 },
             )
 
     except Exception as e:
         logger.error(f"Error in YouTube download job {job_id}: {str(e)}", exc_info=True)
+        
+        # Update MongoDB video status to failed
+        user_id = job_data.get("user_id")
+        if user_id and 'video_id' in locals():
+            await update_user_video(user_id, video_id, {
+                "status": "failed",
+                "error_message": str(e),
+                "updated_at": utc_now()
+            })
+        
+        # Clean up failed download files
+        if 'video_id' in locals():
+            try:
+                video_upload_dir = upload_dir / video_id
+                if video_upload_dir.exists():
+                    shutil.rmtree(video_upload_dir)
+                    logger.info(f"✅ Cleaned up failed download directory: {video_upload_dir}")
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️  Failed to clean up directory after download error: {cleanup_error}")
+        
         job_queue.update_job(
             job_id,
             {
@@ -210,12 +318,19 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info("🚀 STARTING VIDEO PROCESSING PIPELINE")
         logger.info("="*70)
 
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "transcribing",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
             job_id,
             {
                 "status": "transcribing",
-                "progress": "10",
+                "progress": "30",
                 "message": "Transcribing audio",
             },
         )
@@ -226,7 +341,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 original_job_id,
                 {
                     "status": "transcribing",
-                    "progress": "10",
+                    "progress": "30",
                     "message": "Transcribing audio",
                 },
             )
@@ -261,9 +376,16 @@ async def process_video_job(job_id: str, job_data: dict):
             logger.warning("Video appears to be silent or have no speech content")
             # Continue processing with empty transcript - don't fail
 
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "analyzing",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
-            job_id, {"status": "analyzing", "progress": "40", "message": "Analyzing content"},
+            job_id, {"status": "analyzing", "progress": "50", "message": "Analyzing content"},
         )
 
         if original_job_id:
@@ -271,7 +393,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 original_job_id,
                 {
                     "status": "analyzing",
-                    "progress": "40",
+                    "progress": "50",
                     "message": "Analyzing content",
                 },
             )
@@ -298,12 +420,19 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info(f"✅ STEP 2 COMPLETE: AI analysis finished in {step_elapsed:.2f} seconds")
         logger.info(f"   - Clips identified: {len(segments)}")
 
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "processing",
+                "updated_at": utc_now()
+            })
+
         # Update job status
         job_queue.update_job(
             job_id,
             {
                 "status": "processing",
-                "progress": "60",
+                "progress": "70",
                 "message": "Processing video clips",
             },
         )
@@ -313,7 +442,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 original_job_id,
                 {
                     "status": "processing",
-                    "progress": "60",
+                    "progress": "70",
                     "message": "Processing video clips",
                 },
             )
@@ -445,6 +574,15 @@ async def process_video_job(job_id: str, job_data: dict):
                 # Optionally add s3_url, etc. if you have them
             })
 
+        # Clean up uploaded video file and directory after successful processing
+        try:
+            video_upload_dir = upload_dir / video_id
+            if video_upload_dir.exists():
+                shutil.rmtree(video_upload_dir)
+                logger.info(f"✅ Cleaned up uploaded video directory: {video_upload_dir}")
+        except Exception as cleanup_error:
+            logger.warning(f"⚠️  Failed to clean up uploaded video directory {video_upload_dir}: {cleanup_error}")
+
         logger.info(f"Job {job_id} completed successfully with {len(clips)} clips")
 
     except Exception as e:
@@ -471,6 +609,22 @@ async def process_video_job(job_id: str, job_data: dict):
                     "error_message": str(e),
                     "processed_at": utc_now(),
                 })
+            
+            # Clean up failed processing files
+            try:
+                # Clean up uploads directory
+                video_upload_dir = upload_dir / video_id
+                if video_upload_dir.exists():
+                    shutil.rmtree(video_upload_dir)
+                    logger.info(f"✅ Cleaned up upload directory after processing failure: {video_upload_dir}")
+                
+                # Clean up outputs directory
+                video_output_dir = output_dir / video_id
+                if video_output_dir.exists():
+                    shutil.rmtree(video_output_dir)
+                    logger.info(f"✅ Cleaned up output directory after processing failure: {video_output_dir}")
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️  Failed to clean up directories after processing error: {cleanup_error}")
 
 
 async def process_manual_clip_job(job_id: str, job_data: dict):
@@ -624,9 +778,21 @@ async def worker_main():
     await initialize_worker()
 
     logger.info("Worker ready, waiting for jobs...")
+    
+    # Track last cleanup time
+    import time
+    last_cleanup_time = time.time()
+    cleanup_interval = 3600  # Run cleanup every hour
 
     while True:
         try:
+            # Periodic cleanup of old files
+            current_time = time.time()
+            if current_time - last_cleanup_time > cleanup_interval:
+                logger.info("🧹 Running periodic cleanup of old files...")
+                await cleanup_old_files(max_age_hours=24)  # Clean files older than 24 hours
+                last_cleanup_time = current_time
+            
             # Get next job from queue
             job_id = job_queue.get_next_job()
 

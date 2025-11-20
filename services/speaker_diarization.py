@@ -76,17 +76,17 @@ class SpeakerDiarization:
 
             # Load the pre-trained pipeline
             # This requires accepting the user agreement at:
-            # https://huggingface.co/pyannote/speaker-diarization-3.1
+            # https://huggingface.co/pyannote/speaker-diarization-3.0
             try:
                 # Try newer API with 'token' parameter (pyannote.audio >= 3.0)
                 self.pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-3.0",
                     use_auth_token=self.hf_token
                 )
             except TypeError:
                 # Fallback to older API with 'use_auth_token' parameter
                 self.pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-3.0",
                     use_auth_token=self.hf_token
                 )
 
@@ -102,7 +102,7 @@ class SpeakerDiarization:
             logger.error(f"Error loading speaker diarization pipeline: {str(e)}")
             logger.error(
                 "Make sure you have:\n"
-                "1. Accepted the user agreement at https://huggingface.co/pyannote/speaker-diarization-3.1\n"
+                "1. Accepted the user agreement at https://huggingface.co/pyannote/speaker-diarization-3.0\n"
                 "2. Set your HuggingFace token in HF_TOKEN environment variable\n"
                 "3. Installed pyannote.audio: pip install pyannote.audio"
             )
@@ -868,6 +868,6 @@ if __name__ == "__main__":
     else:
         print("Usage: python speaker_diarization.py <audio_file>")
         print("\nMake sure to:")
-        print("1. Accept terms at: https://huggingface.co/pyannote/speaker-diarization-3.1")
+        print("1. Accept terms at: https://huggingface.co/pyannote/speaker-diarization-3.0")
         print("2. Get token from: https://huggingface.co/settings/tokens")
         print("3. Set HF_TOKEN environment variable")
