@@ -108,14 +108,36 @@ async def identify_engaging_segments_from_text(
     logger.info(transcript_text)
     logger.info("="*70)
 
-    # Create prompt for OpenAI
-    # Create prompt for OpenAI
+    # Estimate total video duration from segments
+    try:
+        total_duration = 0.0
+        if segments:
+            last_end = max((s.get("end") or s.get("end_time") or 0) for s in segments)
+            first_start = min((s.get("start") or s.get("start_time") or 0) for s in segments)
+            total_duration = max(0.0, float(last_end) - float(first_start))
+        total_minutes = max(1, int(total_duration // 60))
+    except Exception:
+        total_duration = 0.0
+        total_minutes = 0
+
+    # Compute dynamic target clip counts (aiming for many clips on long videos)
+    # Rough density: ~1 clip per 2 minutes, clamped to MAX_CLIPS_PER_EPISODE
+    rough_target = int(total_duration / 120) if total_duration > 0 else 6
+    target_min = max(6 if total_minutes < 20 else 8, min(rough_target, settings.MAX_CLIPS_PER_EPISODE))
+    target_max = min(target_min + 10, settings.MAX_CLIPS_PER_EPISODE)
+
+    # Log targets
+    logger.info(f"Clip targets (speaker-labeled): duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
+
+    # Create prompt for OpenAI with explicit targets
     prompt = f"""
         You are an expert AI that identifies viral-worthy video clips from audio transcripts. You will be given a transcript with speaker labels and timestamps in the format:
 
         [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
 
-        YOUR MISSION: Find 3-10 engaging clips from different parts of the video. Look for MULTIPLE interesting moments throughout the entire transcript.
+        VIDEO DURATION (approx): ~{total_minutes} minutes
+        TARGET OUTPUT: Generate at least {target_min} and up to {target_max} genuinely engaging clips. If you discover more than {target_max} excellent moments, return the best {target_max}. If fewer exist, return as many as truly engaging.
+        DISTRIBUTION: Spread clips across the entire video (beginning/middle/end). Avoid clustering in one section.
 
         What makes a GREAT clip (prioritize these):
         ✅ Controversial or surprising statements
@@ -151,13 +173,11 @@ async def identify_engaging_segments_from_text(
         - Ensure total duration is 15-180 seconds
         - If naturally short, add surrounding context to reach 15+ seconds
 
-        CLIP GENERATION STRATEGY:
+                CLIP GENERATION STRATEGY:
         - Generate clips based ONLY on the number of genuinely interesting moments found
-        - Do NOT force a minimum or maximum number of clips
+                - Prefer {target_min}-{target_max} clips given the video length; do not exceed {target_max}
         - Quality over quantity - only include truly engaging segments
-        - If you find 2 great moments, return 2 clips
-        - If you find 15 great moments, return 15 clips
-        - Video length doesn't matter - focus on content quality and variety
+                - If you find only 2 great moments, return 2 clips; if you find more than {target_max}, select the strongest {target_max}
 
         IMPORTANT: Don't just pick one good moment - find ALL engaging segments throughout the video. Think like a social media editor who extracts every viral-worthy moment.
 
@@ -229,8 +249,12 @@ async def identify_engaging_segments_from_text(
             
             valid_segments.append(seg)
 
+        # Enforce global cap to avoid over-generation
+        if len(valid_segments) > settings.MAX_CLIPS_PER_EPISODE:
+            logger.info(f"⚠️ Truncating segments to MAX_CLIPS_PER_EPISODE={settings.MAX_CLIPS_PER_EPISODE}")
+            valid_segments = valid_segments[:settings.MAX_CLIPS_PER_EPISODE]
+
         logger.info(f"✅ Validated {len(valid_segments)} segments (filtered out {len(segments) - len(valid_segments)} invalid)")
-        
         return valid_segments
 
     except json.JSONDecodeError as e:
@@ -274,7 +298,26 @@ async def identify_engaging_segments(
     logger.info(transcript_text)
     logger.info("="*70)
 
-    # Create prompt for OpenAI
+    # Estimate total duration and compute dynamic targets
+    try:
+        total_duration = 0.0
+        if segments:
+            last_end = max((s.get("end") or 0) for s in segments)
+            first_start = min((s.get("start") or 0) for s in segments)
+            total_duration = max(0.0, float(last_end) - float(first_start))
+        total_minutes = max(1, int(total_duration // 60))
+    except Exception:
+        total_duration = 0.0
+        total_minutes = 0
+
+    rough_target = int(total_duration / 120) if total_duration > 0 else 6
+    target_min = max(6 if total_minutes < 20 else 8, min(rough_target, settings.MAX_CLIPS_PER_EPISODE))
+    target_max = min(target_min + 10, settings.MAX_CLIPS_PER_EPISODE)
+
+    # Log targets
+    logger.info(f"Clip targets: duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
+
+    # Create prompt for OpenAI with explicit targets
     prompt = f"""
         You are an AI assistant that helps extract short, engaging video clips from podcast audio transcripts. You will be given a raw transcript that contains timestamped segments in the format:
 
@@ -309,10 +352,12 @@ async def identify_engaging_segments(
         6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
         7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
 
-        IMPORTANT: Generate clips for EVERY genuinely interesting moment you find in the video.
-        - Do NOT limit yourself to a specific number of clips
-        - If there are 3 interesting moments, return 3 clips
-        - If there are 20 interesting moments, return 20 clips
+        VIDEO DURATION (approx): ~{total_minutes} minutes
+        TARGET OUTPUT: Generate at least {target_min} and up to {target_max} genuinely engaging clips. If you discover more than {target_max} excellent moments, return the best {target_max}. If fewer exist, return as many as truly engaging.
+        DISTRIBUTION: Spread clips across the entire video (beginning/middle/end). Avoid clustering in one section.
+
+        IMPORTANT: Generate clips for EVERY genuinely interesting moment you find in the video, prioritizing the {target_min}-{target_max} best moments for this length.
+        - Do NOT exceed {target_max} clips in total
         - Quality over quantity - but don't miss any viral-worthy segments
         - Each clip should be genuinely engaging and self-contained
         
@@ -329,7 +374,7 @@ async def identify_engaging_segments(
         - Complete thought/story (don't cut off mid-sentence)
         - Self-contained (makes sense without prior context)
 
-        Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations.
+        Respond ONLY with a JSON array of clip objects. Do not include extra commentary or explanations. Do not exceed {target_max} items.
 
         Transcript:
         {transcript_text}
@@ -404,6 +449,11 @@ async def identify_engaging_segments(
                     logger.warning(f"  ❌ REJECTED (too short): {duration:.1f} seconds - Minimum is {settings.MIN_CLIP_DURATION}s")
 
         logger.info("=" * 60)
+        # Enforce global cap to avoid over-generation
+        if len(valid_segments) > settings.MAX_CLIPS_PER_EPISODE:
+            logger.info(f"⚠️ Truncating segments to MAX_CLIPS_PER_EPISODE={settings.MAX_CLIPS_PER_EPISODE}")
+            valid_segments = valid_segments[:settings.MAX_CLIPS_PER_EPISODE]
+
         logger.info(f"✅ FINAL RESULT: {len(valid_segments)} valid segments out of {len(segments)} total")
         logger.info("=" * 60)
 
