@@ -12,12 +12,13 @@ from services.content_analysis import analyze_content
 
 # Import services
 from services.transcription import load_model, transcribe_audio
-from services.video_processing import generate_thumbnail, process_video
+from services.video_processing import generate_thumbnail, process_video, create_clip
+from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
 from utils.s3_storage import s3_client
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video
-from services.user_video_service import update_user_video, get_user_video_by_video_id, utc_now
 from logging_config import setup_logging
+import tempfile
 
 # Set up logging to backend.log file
 setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
@@ -221,10 +222,8 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                 },
             )
 
-            # CRITICAL FIX: Update MongoDB with process_task_id so frontend can find it
-            # This prevents 404 errors when frontend switches to polling the process task
-            # Status stays "downloaded" since download is complete and processing is about to start
-            logger.info(f"🔍 DEBUG: About to update process_task_id")
+            # Update MongoDB with process_task_id so frontend can track the processing job
+            logger.info(f"🔍 Updating process_task_id in database")
             logger.info(f"   user_id: {user_id}")
             logger.info(f"   video_id: {video_id}")
             logger.info(f"   process_job_id: {process_job_id}")
@@ -234,8 +233,10 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "process_task_id": process_job_id,
                     "updated_at": utc_now()
                 })
-                logger.info(f"✅ Update result: {update_result}")
-                logger.info(f"✅ Updated MongoDB: video {video_id} with process_task_id: {process_job_id}")
+                if update_result:
+                    logger.info(f"✅ Updated MongoDB: video {video_id} with process_task_id: {process_job_id}")
+                else:
+                    logger.error(f"❌ Failed to update process_task_id in MongoDB for video {video_id}")
             else:
                 logger.error(f"❌ Cannot update process_task_id - user_id is None!")
 
@@ -259,6 +260,9 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "user_id": user_id,  # Pass user_id to processing job
                 },
             )
+        
+        # Release lock on successful completion
+        job_queue.release_job_lock(job_id)
 
     except Exception as e:
         logger.error(f"Error in YouTube download job {job_id}: {str(e)}", exc_info=True)
@@ -290,6 +294,9 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                 "message": f"Error processing YouTube download: {str(e)}",
             },
         )
+        
+        # Release lock on error
+        job_queue.release_job_lock(job_id)
 
 
 async def process_video_job(job_id: str, job_data: dict):
@@ -461,61 +468,164 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info(f"✅ STEP 3 COMPLETE: Video processing finished in {step_elapsed:.2f} seconds")
         logger.info(f"   - Clips created: {len(clips) if clips else 0}")
 
-        # Generate thumbnails for each clip
-        for i, clip in enumerate(clips):
-            progress = 60 + (i * 30 / max(len(clips), 1))
-
+        # ====================================================================
+        # STEP 4: PARALLEL CLIP PROCESSING - S3 upload and thumbnail generation
+        # ====================================================================
+        
+        if clips and s3_client.available:
+            logger.info(f"[PARALLEL] Starting parallel processing of {len(clips)} clips")
+            
+            parallel_start_time = time.time()
+            
+            # Prepare for parallel processing
+            MAX_CONCURRENT_CLIPS = 3  # Adjust based on system resources
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIPS)
+            
+            async def bounded_process_clip(clip, idx):
+                """Process clip with concurrency limit"""
+                async with semaphore:
+                    return await process_single_clip_async(
+                        clip, idx, file_path, video_id, output_dir
+                    )
+            
+            # Update progress - starting parallel processing
             job_queue.update_job(
                 job_id,
                 {
-                    "progress": str(progress),
-                    "message": f"Processing clip {i + 1}/{len(clips)}",
+                    "progress": "75",
+                    "message": f"Uploading {len(clips)} clips to S3 in parallel...",
                 },
             )
-
+            
             if original_job_id:
                 job_queue.update_job(
                     original_job_id,
                     {
-                        "progress": str(progress),
-                        "message": f"Processing clip {i + 1}/{len(clips)}",
+                        "progress": "75",
+                        "message": f"Uploading {len(clips)} clips to S3 in parallel...",
                     },
                 )
-
-            # Generate thumbnail
-            clip_path = clip.get("path")
-            if clip_path and os.path.exists(clip_path):
-                thumbnail_filename = f"{clip.get('id')}_thumbnail.jpg"
-                thumbnail_path = os.path.abspath(str(clips_dir / thumbnail_filename))
-
-                clip_duration = clip.get("end_time", 0) - clip.get("start_time", 0)
-                thumbnail_timestamp = (
-                    min(clip_duration / 3, clip_duration - 0.5)
-                    if clip_duration > 1.5
-                    else 0
-                )
-
-                try:
-                    generated_path = await generate_thumbnail(
-                        clip_path, thumbnail_path, thumbnail_timestamp
-                    )
-
-                    if (
-                        generated_path
-                        and os.path.exists(thumbnail_path)
-                        and os.path.getsize(thumbnail_path) > 0
-                    ):
-                        clips[i]["thumbnail_path"] = thumbnail_path
-                        clips[i]["thumbnail_url"] = (
-                            f"/outputs/{video_id}/{thumbnail_filename}"
-                        )
+            
+            # Create all clip processing tasks
+            clip_tasks = [
+                bounded_process_clip(clip, i)
+                for i, clip in enumerate(clips)
+            ]
+            
+            # Run all tasks in parallel
+            logger.info(f"[PARALLEL] Running {len(clip_tasks)} clips in parallel (max {MAX_CONCURRENT_CLIPS} concurrent)")
+            results = await asyncio.gather(*clip_tasks, return_exceptions=True)
+            
+            # Process results
+            logger.info(f"[PARALLEL] All clips processed, updating results...")
+            for result in results:
+                if result and isinstance(result, tuple) and len(result) == 2:
+                    index, data = result
+                    if data and index < len(clips):
+                        clips[index]['s3_key'] = data.get('clip_s3_key')
+                        clips[index]['s3_url'] = s3_client.get_object_url(data['clip_s3_key']) if data.get('clip_s3_key') else None
+                        clips[index]['thumbnail_s3_key'] = data.get('thumbnail_s3_key')
+                        clips[index]['thumbnail_url'] = s3_client.get_object_url(data['thumbnail_s3_key']) if data.get('thumbnail_s3_key') else "/static/default_thumbnail.jpg"
+                        logger.info(f"[PARALLEL] ✅ Clip {index} complete - S3 URL: {clips[index].get('s3_url')}")
                     else:
-                        clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
-                except Exception as thumb_error:
-                    logger.error(f"Error generating thumbnail: {str(thumb_error)}")
-                    clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
+                        logger.warning(f"[PARALLEL] ❌ Clip {index} returned None results")
+                        if index < len(clips):
+                            clips[index]['thumbnail_url'] = "/static/default_thumbnail.jpg"
+                elif isinstance(result, Exception):
+                    logger.error(f"[PARALLEL] ❌ Clip raised exception: {result}")
+                else:
+                    logger.warning(f"[PARALLEL] ❌ Clip returned invalid result type")
+            
+            parallel_elapsed = time.time() - parallel_start_time
+            logger.info(f"[PARALLEL] ⏱️  Total time: {parallel_elapsed:.1f}s")
+            logger.info(f"[PARALLEL] 📊 Average per clip: {parallel_elapsed/len(clips):.1f}s")
+            if len(clips) > 1:
+                sequential_estimate = parallel_elapsed * len(clips) / MAX_CONCURRENT_CLIPS
+                speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
+                logger.info(f"[PARALLEL] 📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
+            
+            logger.info(f"[PARALLEL] ✅ Parallel processing complete for all {len(clips)} clips")
+        else:
+            if not clips:
+                logger.info("No clips to process")
+            elif not s3_client.available:
+                logger.warning("S3 client not available, skipping clip uploads")
+
+        # ====================================================================
+        # STEP 5: SAVE CLIPS TO DATABASE
+        # ====================================================================
+        
+        if clips and user_id:
+            logger.info(f"💾 STEP 5: Saving {len(clips)} clips to database...")
+            logger.info(f"🔍 CLIP SAVE CONTEXT:")
+            logger.info(f"   User ID: {user_id}")
+            logger.info(f"   Video ID: {video_id}")
+            logger.info(f"   Number of clips: {len(clips)}")
+            
+            # Verify video exists before saving clips
+            from services.user_video_service import get_user_video
+            verify_video = await get_user_video(user_id, video_id)
+            if verify_video:
+                logger.info(f"✅ Video found in DB before saving clips")
+                logger.info(f"   Video process_task_id: {verify_video.process_task_id}")
+                logger.info(f"   Current clips count: {len(verify_video.clips)}")
             else:
-                clips[i]["thumbnail_url"] = "/static/default_thumbnail.jpg"
+                logger.error(f"❌ Video {video_id} NOT FOUND in user {user_id}'s videos before saving clips!")
+            
+            clips_saved = 0
+            
+            for i, clip in enumerate(clips):
+                if clip.get("s3_url"):  # Only save clips with S3 URLs
+                    clip_data = {
+                        "title": clip.get("title", f"Clip {i+1}"),
+                        "start_time": clip.get("start_time", 0),
+                        "end_time": clip.get("end_time", 0),
+                        "s3_key": clip.get("s3_key"),
+                        "s3_url": clip.get("s3_url"),
+                        "thumbnail_url": clip.get("thumbnail_url"),
+                        "transcription": clip.get("transcription", ""),
+                        "summary": clip.get("summary", ""),
+                        "tags": clip.get("tags", []),
+                        "metadata": clip.get("metadata", {})
+                    }
+                    
+                    try:
+                        logger.info(f"📝 Attempting to save clip {i+1}/{len(clips)}...")
+                        clip_id = await add_clip_to_video(user_id, video_id, clip_data)
+                        if clip_id:
+                            logger.info(f"✅ Saved clip {i+1} to database with ID: {clip_id}")
+                            logger.info(f"   Clip title: {clip.get('title')}")
+                            logger.info(f"   S3 URL: {clip.get('s3_url')[:50]}..." if clip.get('s3_url') else "   S3 URL: None")
+                            clips_saved += 1
+                        else:
+                            logger.error(f"❌ Failed to save clip {i+1} to database - add_clip_to_video returned None")
+                            logger.error(f"   User ID: {user_id}")
+                            logger.error(f"   Video ID: {video_id}")
+                    except Exception as clip_save_error:
+                        logger.error(f"❌ Error saving clip {i+1}: {clip_save_error}")
+                        import traceback
+                        logger.error(f"Traceback:\n{traceback.format_exc()}")
+                else:
+                    logger.warning(f"⚠️ Skipping clip {i+1} - no S3 URL")
+            
+            logger.info(f"✅ Saved {clips_saved}/{len(clips)} clips to database")
+            
+            # Final verification - check if clips were actually saved
+            if clips_saved > 0:
+                from services.user_video_service import get_user_video
+                final_video = await get_user_video(user_id, video_id)
+                if final_video:
+                    logger.info(f"🔍 FINAL VERIFICATION:")
+                    logger.info(f"   Video ID: {video_id}")
+                    logger.info(f"   Process Task ID: {final_video.process_task_id}")
+                    logger.info(f"   Clips in DB: {len(final_video.clips)}")
+                    logger.info(f"   Expected clips: {clips_saved}")
+                    if len(final_video.clips) != clips_saved:
+                        logger.error(f"❌ MISMATCH: Expected {clips_saved} clips but found {len(final_video.clips)} in DB!")
+                    else:
+                        logger.info(f"✅ Clip count matches - all clips saved successfully")
+                else:
+                    logger.error(f"❌ Could not verify - video {video_id} not found after saving clips")
 
         # Save metadata
         metadata = {"video_id": video_id, "clips": clips}
@@ -584,6 +694,11 @@ async def process_video_job(job_id: str, job_data: dict):
             logger.warning(f"⚠️  Failed to clean up uploaded video directory {video_upload_dir}: {cleanup_error}")
 
         logger.info(f"Job {job_id} completed successfully with {len(clips)} clips")
+        
+        # Release lock on successful completion
+        job_queue.release_job_lock(job_id)
+        if original_job_id:
+            job_queue.release_job_lock(original_job_id)
 
     except Exception as e:
         logger.error(f"Error in video processing job {job_id}: {str(e)}", exc_info=True)
@@ -625,6 +740,11 @@ async def process_video_job(job_id: str, job_data: dict):
                     logger.info(f"✅ Cleaned up output directory after processing failure: {video_output_dir}")
             except Exception as cleanup_error:
                 logger.warning(f"⚠️  Failed to clean up directories after processing error: {cleanup_error}")
+        
+        # Release lock on error
+        job_queue.release_job_lock(job_id)
+        if original_job_id:
+            job_queue.release_job_lock(original_job_id)
 
 
 async def process_manual_clip_job(job_id: str, job_data: dict):
@@ -770,6 +890,387 @@ async def process_s3_download_job(job_id: str, job_data: dict):
         )
 
 
+async def _upload_clip_to_s3_async(clip_path: str, video_id: str, clip_id: str) -> tuple:
+    """Upload clip to S3 asynchronously"""
+    try:
+        loop = asyncio.get_event_loop()
+        file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+        
+        # Use multipart for large files
+        if file_size > 50 * 1024 * 1024:  # 50MB
+            success, s3_key = await loop.run_in_executor(
+                None,
+                lambda: s3_client.upload_clip_to_s3_multipart(
+                    clip_path, video_id, f"clip_{clip_id}.mp4"
+                )
+            )
+        else:
+            success, s3_key = await loop.run_in_executor(
+                None,
+                lambda: s3_client.upload_clip_to_s3(
+                    clip_path, video_id, f"clip_{clip_id}.mp4"
+                )
+            )
+        
+        return success, s3_key
+    except Exception as e:
+        logger.error(f"Error uploading clip to S3: {e}")
+        return False, None
+
+
+async def _upload_thumbnail_to_s3_async(thumbnail_path: str, video_id: str, clip_id: str) -> tuple:
+    """Upload thumbnail to S3 asynchronously"""
+    try:
+        loop = asyncio.get_event_loop()
+        success, s3_key = await loop.run_in_executor(
+            None,
+            lambda: s3_client.upload_thumbnail_to_s3(thumbnail_path, video_id, f"clip_{clip_id}_thumbnail.jpg")
+        )
+        return success, s3_key
+    except Exception as e:
+        logger.error(f"Error uploading thumbnail to S3: {e}")
+        return False, None
+
+
+async def process_single_clip_async(
+    clip: dict,
+    index: int,
+    file_path: str,
+    video_id: str,
+    output_dir_path: Path
+) -> tuple:
+    """Process a single clip: create, generate thumbnail, upload to S3"""
+    try:
+        logger.info(f"[PARALLEL] Starting clip {index}: {clip.get('id')}")
+        
+        # Step 1: Create the clip file
+        clips_dir = output_dir_path / video_id
+        clips_dir.mkdir(exist_ok=True, parents=True)
+        
+        clip_filename = f"{clip.get('id')}.mp4"
+        clip_path = str(clips_dir / clip_filename)
+        
+        # Use create_clip from video_processing service
+        created_clip_path = await create_clip(
+            video_path=file_path,
+            output_dir=str(clips_dir),
+            start_time=clip["start_time"],
+            end_time=clip["end_time"],
+            clip_id=clip.get("id"),
+        )
+        
+        if not created_clip_path:
+            logger.warning(f"[PARALLEL] Failed to create clip {index}")
+            return index, None
+        
+        logger.info(f"[PARALLEL] Clip {index} created at {created_clip_path}")
+        
+        # Step 2: Generate thumbnail
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_thumb:
+            thumbnail_path = temp_thumb.name
+        
+        clip_duration = clip.get("end_time", 0) - clip.get("start_time", 0)
+        thumbnail_timestamp = (
+            min(clip_duration / 3, clip_duration - 0.5)
+            if clip_duration > 1.5
+            else 0
+        )
+        
+        generated_path = await generate_thumbnail(
+            created_clip_path, thumbnail_path, thumbnail_timestamp
+        )
+        
+        logger.info(f"[PARALLEL] Clip {index} thumbnail generated")
+        
+        # Step 3: Upload to S3 (clip and thumbnail in parallel)
+        clip_upload = asyncio.create_task(
+            _upload_clip_to_s3_async(created_clip_path, video_id, clip.get("id"))
+        )
+        
+        thumbnail_upload = None
+        if generated_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+            thumbnail_upload = asyncio.create_task(
+                _upload_thumbnail_to_s3_async(thumbnail_path, video_id, clip.get("id"))
+            )
+        
+        # Wait for uploads
+        clip_result = await clip_upload
+        thumb_result = await thumbnail_upload if thumbnail_upload else (False, None)
+        
+        logger.info(f"[PARALLEL] Clip {index} S3 upload: clip={clip_result[0]}, thumb={thumb_result[0]}")
+        
+        # Step 4: Cleanup local files
+        try:
+            if os.path.exists(created_clip_path):
+                os.unlink(created_clip_path)
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.unlink(thumbnail_path)
+        except Exception as cleanup_err:
+            logger.warning(f"[PARALLEL] Cleanup error for clip {index}: {cleanup_err}")
+        
+        # Return results
+        return index, {
+            'clip_s3_key': clip_result[1],
+            'thumbnail_s3_key': thumb_result[1],
+            'title': clip.get('title'),
+            'start_time': clip.get('start_time'),
+            'end_time': clip.get('end_time'),
+            'transcription': clip.get('transcription', ''),
+            'summary': clip.get('summary', ''),
+            'tags': clip.get('tags', []),
+        }
+        
+    except Exception as e:
+        logger.error(f"[PARALLEL] Error processing clip {index}: {str(e)}")
+        import traceback
+        logger.error(f"[PARALLEL] Traceback: {traceback.format_exc()}")
+        return index, None
+
+
+async def process_uploaded_video_job(job_id: str, job_data: dict):
+    """Process uploaded video from S3"""
+    try:
+        video_id = job_data.get("video_id")
+        s3_key = job_data.get("s3_key")
+        user_id = job_data.get("user_id")
+
+        logger.info(f"Processing uploaded video job {job_id} for video {video_id}")
+        logger.info(f"   Job ID (task_id): {job_id}")
+        logger.info(f"   Video ID: {video_id}")
+        logger.info(f"   S3 Key: {s3_key}")
+
+        # Update job status
+        job_queue.update_job(
+            job_id,
+            {
+                "status": "downloading",
+                "progress": "5",
+                "message": "Downloading file from S3...",
+            },
+        )
+
+        # Create temporary file for processing
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+            local_path = temp_file.name
+
+        # Download from S3
+        success = s3_client.download_from_s3(s3_key, local_path)
+
+        if not success:
+            raise Exception("Failed to download file from S3")
+
+        # Update job status
+        job_queue.update_job(
+            job_id,
+            {
+                "status": "processing",
+                "progress": "10",
+                "message": "File downloaded, starting processing...",
+            },
+        )
+
+        # Process the video using the same pipeline as process_video_job
+        await process_video_job(job_id, {
+            "video_id": video_id,
+            "file_path": local_path,
+            "user_id": user_id
+        })
+        
+        # Release lock on successful completion (already handled in process_video_job)
+
+    except Exception as e:
+        logger.error(f"Error in uploaded video job {job_id}: {str(e)}", exc_info=True)
+        job_queue.update_job(
+            job_id,
+            {
+                "status": "error",
+                "progress": "0",
+                "message": f"Error processing uploaded video: {str(e)}",
+            },
+        )
+        # Release lock on error
+        job_queue.release_job_lock(job_id)
+    finally:
+        # Clean up temporary file
+        try:
+            if 'local_path' in locals() and os.path.exists(local_path):
+                os.unlink(local_path)
+        except:
+            pass
+
+
+async def process_youtube_download_job_v2(job_id: str, job_data: dict):
+    """Process YouTube download with three-tier fallback system"""
+    try:
+        video_id = job_data.get("video_id")
+        url = job_data.get("url")
+        auto_process = job_data.get("auto_process", True)
+        user_id = job_data.get("user_id")
+
+        logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
+        logger.info(f"   Job ID (task_id): {job_id}")
+        logger.info(f"   Video ID: {video_id}")
+        logger.info(f"   User ID: {user_id}")
+
+        # Update MongoDB video status
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "downloading",
+                "updated_at": utc_now()
+            })
+
+        # Update job status
+        job_queue.update_job(
+            job_id,
+            {
+                "status": "downloading",
+                "progress": "10",
+                "message": "Downloading video from YouTube...",
+            },
+        )
+
+        # Create video directory
+        video_dir = upload_dir / video_id
+        video_dir.mkdir(exist_ok=True)
+
+        # Three-tier download fallback system
+        file_path, title, video_info = None, None, None
+        max_retries = 3
+
+        # Tier 1: Try Sieve API
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"Job {job_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
+                file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
+                if file_path and title:
+                    logger.info(f"Job {job_id}: ✅ Sieve download successful")
+                    break
+            except Exception as sieve_error:
+                logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
+                if attempt == max_retries:
+                    logger.error(f"Job {job_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix.")
+                    break
+                await asyncio.sleep(5)
+
+        # Tier 2: Fallback to pytubefix if Sieve failed
+        if not file_path or not title:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.info(f"Job {job_id}: [Tier 2] Attempt {attempt} to download with pytubefix")
+                    file_path, title, video_info = await download_youtube_video(url, video_dir)
+                    if file_path and title:
+                        logger.info(f"Job {job_id}: ✅ pytubefix download successful")
+                        break
+                except Exception as pytubefix_error:
+                    logger.warning(f"Job {job_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
+                    if attempt == max_retries:
+                        logger.error(f"Job {job_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp.")
+                        break
+                    await asyncio.sleep(5)
+
+        # Tier 3: Final fallback to yt-dlp
+        if not file_path or not title:
+            try:
+                from utils.ytdlp_downloader import download_youtube_video_ytdlp
+                logger.info(f"Job {job_id}: [Tier 3] Attempting download with yt-dlp (final fallback)")
+                file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
+                if file_path and title:
+                    logger.info(f"Job {job_id}: ✅ yt-dlp download successful")
+            except Exception as ytdlp_error:
+                logger.error(f"Job {job_id}: yt-dlp download failed: {str(ytdlp_error)}")
+
+        if not file_path or not title:
+            raise Exception("Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)")
+
+        logger.info(f"Job {job_id}: Download completed successfully: {file_path}")
+
+        # Update video in database
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "title": title or "YouTube Video",
+                "filename": Path(file_path).name,
+                "source_url": url,
+                "status": "downloaded",
+                "video_type": "youtube",
+                "duration": video_info.get("length_seconds") if video_info else None,
+                "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else None,
+                "content_type": "video/mp4",
+                "updated_at": utc_now()
+            })
+
+        # Update job status
+        job_queue.update_job(
+            job_id,
+            {
+                "status": "downloaded",
+                "progress": "100",
+                "message": "YouTube video downloaded successfully",
+            },
+        )
+
+        # Start processing if requested
+        if auto_process:
+            await asyncio.sleep(2)
+
+            logger.info(f"🔄 Continuing with same job ID for processing: {job_id}")
+
+            # Update job status to indicate processing is starting
+            job_queue.update_job(
+                job_id,
+                {
+                    "status": "processing_started",
+                    "message": "Processing has started",
+                },
+            )
+
+            # Process the video using the same job_id
+            await process_video_job(
+                job_id,
+                {
+                    "video_id": video_id,
+                    "file_path": file_path,
+                    "user_id": user_id,
+                },
+            )
+            
+            # Lock already released in process_video_job
+
+    except Exception as e:
+        logger.error(f"Error in YouTube download job {job_id}: {str(e)}", exc_info=True)
+
+        # Update MongoDB video status to failed
+        user_id = job_data.get("user_id")
+        if user_id and 'video_id' in locals():
+            await update_user_video(user_id, video_id, {
+                "status": "failed",
+                "error_message": str(e),
+                "updated_at": utc_now()
+            })
+
+        job_queue.update_job(
+            job_id,
+            {
+                "status": "error",
+                "progress": "0",
+                "message": f"Error: {str(e)}",
+            },
+        )
+
+        # Clean up failed download files
+        if 'video_id' in locals():
+            try:
+                video_upload_dir = upload_dir / video_id
+                if video_upload_dir.exists():
+                    shutil.rmtree(video_upload_dir)
+                    logger.info(f"✅ Cleaned up failed YouTube download directory: {video_upload_dir}")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to clean up directory: {cleanup_error}")
+        
+        # Release lock on error
+        job_queue.release_job_lock(job_id)
+
+
 async def worker_main():
     """Main worker loop"""
     logger.info("Starting worker...")
@@ -821,6 +1322,10 @@ async def worker_main():
                 # Process job based on type
                 if job_type == "youtube_download":
                     await process_youtube_download_job(job_id, job_data)
+                elif job_type == "process_youtube_download":
+                    await process_youtube_download_job_v2(job_id, job_data)
+                elif job_type == "process_uploaded_video":
+                    await process_uploaded_video_job(job_id, job_data)
                 elif job_type == "process_video":
                     await process_video_job(job_id, job_data)
                 elif job_type == "manual_clip":
