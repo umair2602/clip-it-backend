@@ -4,9 +4,16 @@ import os
 from typing import Dict, Any, Annotated
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
+import httpx
+import io
+import asyncio
 from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.responses import StreamingResponse
+from googleapiclient.http import MediaIoBaseUpload
+from pydantic import BaseModel, Field
+
 from config import settings
 from services.auth import auth_service
 from services.youtube_tokens import youtube_token_service
@@ -18,7 +25,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/youtube", tags=["youtube"])
 
+
+class YouTubeUploadRequest(BaseModel):
+    video_url: str = Field(..., description="S3 URL of the video to upload")
+    title: str = Field(..., max_length=100, description="Video title")
+    description: str = Field("", max_length=5000, description="Video description")
+    privacy_status: str = Field("private", description="one of private, public, or unlisted")
+
+class YouTubeUploadResponse(BaseModel):
+    video_id: str
+
 security = HTTPBearer()
+
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
@@ -124,6 +142,70 @@ class YouTubeProfileResponse(BaseModel):
     email: Optional[str] = None
     name: str
     picture: Optional[str] = None
+
+@router.post("/upload", response_model=YouTubeUploadResponse)
+async def upload_to_youtube(
+    upload_request: YouTubeUploadRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Uploads a video from an S3 URL to the user's YouTube channel.
+    """
+    user_id = _extract_user_id(current_user)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context")
+
+    credentials = await youtube_token_service.refresh_tokens_if_needed(user_id)
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube account not connected.")
+
+    try:
+        # 1. Fetch video from S3 URL
+        async with httpx.AsyncClient() as client:
+            response = await client.get(upload_request.video_url, follow_redirects=True, timeout=60)
+            response.raise_for_status()
+            video_content = response.content
+
+        video_file = io.BytesIO(video_content)
+
+        # 2. Build YouTube service
+        youtube = googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
+
+        # 3. Prepare video metadata
+        body = {
+            "snippet": {
+                "title": upload_request.title,
+                "description": upload_request.description,
+                "tags": [],
+                "categoryId": "22"  # Default category, consider making this configurable
+            },
+            "status": {
+                "privacyStatus": upload_request.privacy_status
+            }
+        }
+
+        # 4. Perform the upload
+        media = MediaIoBaseUpload(video_file, mimetype='video/*', chunksize=1024*1024, resumable=True)
+        
+        insert_request = youtube.videos().insert(
+            part=",".join(body.keys()),
+            body=body,
+            media_body=media
+        )
+
+        # The googleapiclient is synchronous, so we run it in a thread pool
+        loop = asyncio.get_event_loop()
+        upload_response = await loop.run_in_executor(None, insert_request.execute)
+
+        return YouTubeUploadResponse(video_id=upload_response["id"])
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Failed to download video from S3: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to download video from the provided URL.")
+    except Exception as e:
+        logger.error(f"Failed to upload video to YouTube: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to upload video to YouTube: {str(e)}")
+
 
 @router.get("/me", response_model=YouTubeProfileResponse)
 async def get_youtube_profile(current_user: dict = Depends(get_current_user)):
