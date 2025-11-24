@@ -160,6 +160,9 @@ while IFS='=' read -r key value || [ -n "$key" ]; do
         PROXY_BASE_URL)
             set_parameter "/clip-it/proxy-base-url" "$value" "Proxy base URL"
             ;;
+        ASSEMBLYAI_API_KEY)
+            set_parameter "/clip-it/assemblyai-api-key" "$value" "AssemblyAI API Key"
+            ;;
         *)
             echo "⚠️  Unknown environment variable: $key (skipping)"
             ;;
