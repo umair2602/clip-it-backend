@@ -380,9 +380,13 @@ class ClipItStack(Stack):
                 healthy_http_codes="200",
                 path="/health",
                 protocol=elbv2.Protocol.HTTP,
-                timeout=cdk.Duration.seconds(5),
-                interval=cdk.Duration.seconds(30)
-            )
+                timeout=cdk.Duration.seconds(10),  # Increased from 5 to 10 seconds
+                interval=cdk.Duration.seconds(30),
+                healthy_threshold_count=2,
+                unhealthy_threshold_count=3
+            ),
+            # Increase deregistration delay to allow in-flight requests to complete
+            deregistration_delay=cdk.Duration.seconds(30)
         )
 
         # Get SSL certificate ARN from environment variable, CDK context, or SSM

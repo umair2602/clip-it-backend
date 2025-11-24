@@ -38,6 +38,7 @@ class VideoStatus(str, Enum):
     """Video processing status"""
     UPLOADING = "uploading"
     DOWNLOADING = "downloading"
+    DOWNLOADED = "downloaded"  # Added missing status
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -58,6 +59,7 @@ class VideoBase(BaseModel):
     thumbnail_url: Optional[str] = None
     status: VideoStatus = VideoStatus.UPLOADING
     error_message: Optional[str] = None
+    process_task_id: Optional[str] = None  # Task ID for processing job (for task switching)
 
     class Config:
         json_encoders = {ObjectId: str}
@@ -106,6 +108,7 @@ class Video(VideoBase):
     created_at: datetime
     updated_at: datetime
     processed_at: Optional[datetime] = None
+    clips: Optional[List[Dict[str, Any]]] = []  # Array of clips for this video
 
 
 class ClipBase(BaseModel):

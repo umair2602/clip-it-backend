@@ -29,6 +29,7 @@ setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
 
 # Import configuration
 from config import settings
+from services.user_video_service import utc_now
 from services.content_analysis import analyze_content
 from services.face_tracking import track_faces
 
@@ -353,8 +354,12 @@ class YouTubeRequest(BaseModel):
     auto_process: bool = True
 
 
-# In-memory storage for task status (replace with a proper database in production)
-tasks = {}
+# DEPRECATED: In-memory storage for task status 
+# WARNING: This is NOT safe for multi-instance deployments!
+# This dictionary is NOT shared across containers - each web instance has its own copy.
+# Status should ONLY be checked via Redis job queue or MongoDB.
+# TODO: Remove all tasks[...] assignments and use only Redis/MongoDB
+tasks = {}  # ⚠️ DO NOT USE in production with multiple instances!
 
 # Tiktok
 @app.get(f"/tiktok{settings.TIKTOK_VERIFICATION_KEY}.txt")
@@ -569,8 +574,19 @@ async def upload_video(
             logging.error(f"Failed to create video document for user {current_user.id}")
             # Don't fail the upload if database save fails
 
-        # Create a task for processing
-        task_id = str(uuid.uuid4())
+        # Add job to Redis queue for worker to process
+        # The job_id returned IS the task_id that frontend will poll
+        from jobs import job_queue
+        task_id = job_queue.add_job(
+            "process_uploaded_video",
+            {
+                "video_id": created_video_id or video_id,
+                "s3_key": s3_key,
+                "user_id": current_user.id
+            }
+        )
+        
+        # Also store in tasks dict for backwards compatibility with /status endpoint
         tasks[task_id] = {
             "status": "processing",
             "progress": 0,
@@ -579,11 +595,6 @@ async def upload_video(
             "s3_key": s3_key,
             "s3_url": s3_url,
         }
-
-        # Start background processing immediately with S3
-        background_tasks.add_task(
-            process_s3_podcast, task_id=task_id, video_id=created_video_id or video_id, s3_key=s3_key, local_path=None, user_id=current_user.id
-        )
 
         # Return the video ID and task ID with S3 information
         response = {
@@ -609,10 +620,326 @@ async def upload_video(
 
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
+    """Get task status from Redis job queue, in-memory tasks, or MongoDB video document
+    
+    Optimized for fast responses to prevent timeout issues.
+    """
+    try:
+        logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logging.info(f"📡 STATUS REQUEST for task_id: {task_id}")
+        
+        # Priority 1: Check Redis job queue (for worker-processed jobs)
+        from jobs import job_queue
+        job = job_queue.get_job(task_id)
+        if job:
+            logging.info(f"   ✅ Found in Redis job queue")
+            # Extract video_id from job data (stringified JSON or dict)
+            raw_data = job.get("data", {})
+            if isinstance(raw_data, str):
+                try:
+                    raw_data = json.loads(raw_data)
+                except Exception:
+                    raw_data = {}
+            video_id_in_job = raw_data.get("video_id")
 
-    return tasks[task_id]
+            # Attempt to fetch process_task_id from MongoDB if we have a video_id
+            process_task_id = None
+            if video_id_in_job:
+                try:
+                    db = get_database()
+                    users_collection = db.users
+                    user_with_video = users_collection.find_one(
+                        {"videos.id": video_id_in_job}, {"videos.$": 1}
+                    )
+                    if user_with_video and user_with_video.get("videos"):
+                        candidate_video = user_with_video["videos"][0]
+                        process_task_id = candidate_video.get("process_task_id")
+                        logging.info(f"   🔍 Retrieved process_task_id from MongoDB: {process_task_id}")
+                except Exception as e:
+                    logging.warning(f"   ⚠️ Failed to lookup process_task_id for video {video_id_in_job}: {e}")
+
+            # Fallback: if process_task_id not stored yet but unified pipeline is used, use current task_id
+            if not process_task_id:
+                # Unified pipeline sets process_task_id equal to initial job id at creation
+                process_task_id = task_id
+                logging.info(f"   ↩️ Using task_id as process_task_id fallback: {process_task_id}")
+
+            # Convert Redis job format to task response format with early process_task_id
+            response = {
+                "status": job.get("status", "unknown"),
+                "progress": int(job.get("progress", 0)),
+                "message": job.get("message", ""),
+                "video_id": video_id_in_job,
+                "process_task_id": process_task_id,
+                "created_at": job.get("created_at"),
+                "updated_at": job.get("updated_at"),
+            }
+            
+            # If completed, fetch clips from MongoDB (for both YouTube and direct upload)
+            if job.get("status") == "completed" and video_id_in_job:
+                try:
+                    logging.info(f"   📦 Job completed - fetching clips from MongoDB for video: {video_id_in_job}")
+                    db = get_database()
+                    users_collection = db.users
+                    user_with_video = users_collection.find_one(
+                        {"videos.id": video_id_in_job}, {"videos.$": 1}
+                    )
+                    if user_with_video and user_with_video.get("videos"):
+                        video = user_with_video["videos"][0]
+                        clips = video.get("clips", [])
+                        response["clips_count"] = len(clips) if clips else 0
+                        
+                        # Format clips for frontend
+                        clips_formatted = []
+                        for clip_doc in clips:
+                            clip_data = {
+                                "id": str(clip_doc.get("id")),
+                                "title": clip_doc.get("title"),
+                                "start_time": clip_doc.get("start_time", 0),
+                                "end_time": clip_doc.get("end_time", 0),
+                                "duration": clip_doc.get("duration", 0),
+                                "s3_key": clip_doc.get("s3_key"),
+                                "s3_url": clip_doc.get("s3_url"),
+                                "thumbnail_url": clip_doc.get("thumbnail_url"),
+                                "transcription": clip_doc.get("transcription", ""),
+                            }
+                            clips_formatted.append(clip_data)
+                        
+                        response["clips"] = clips_formatted
+                        logging.info(f"   ✅ Added {len(clips_formatted)} clips to Redis response")
+                    else:
+                        logging.warning(f"   ⚠️ Video {video_id_in_job} not found in MongoDB")
+                except Exception as e:
+                    logging.warning(f"   ⚠️ Failed to fetch clips from MongoDB: {e}")
+                    # Don't fail the request if clip fetching fails
+            
+            return response
+        
+        # Priority 2: REMOVED in-memory tasks check (not safe for multi-instance)
+        # Old code: if task_id in tasks: return tasks[task_id]
+        # This was causing 404s when different web instances handled request vs status
+        
+        # Priority 3: Query MongoDB directly for speed (avoid service layer overhead)
+        db = get_database()
+        
+        # NEW PATTERN: Search in users.videos[] array
+        users_collection = db.users
+        video_info = None
+        
+        # Try to find video in users collection by video ID
+        user = users_collection.find_one(
+            {"videos.id": task_id},
+            {"videos.$": 1}  # Only return matching video
+        )
+        
+        if user and user.get('videos'):
+            video_info = user['videos'][0]
+            logging.info(f"   ✅ Found video {task_id} in users.videos array (by video ID)")
+        
+        # If not found by video ID, try to find by process_task_id
+        if not video_info:
+            user = users_collection.find_one(
+                {"videos.process_task_id": task_id},
+                {"videos.$": 1}  # Only return matching video
+            )
+            
+            if user and user.get('videos'):
+                video_info = user['videos'][0]
+                logging.info(f"   ✅ Found video in users.videos array (by process_task_id: {task_id})")
+        
+        # OLD PATTERN: Fallback to videos collection
+        if not video_info:
+            videos_collection = db.videos
+            
+            # Try to find video by _id or video_id
+            try:
+                # First try by ObjectId if it's a valid ObjectId
+                if len(task_id) == 24:  # MongoDB ObjectId length
+                    video_info = videos_collection.find_one({"_id": ObjectId(task_id)})
+            except:
+                pass
+            
+            # If not found, try by video_id field
+            if not video_info:
+                video_info = videos_collection.find_one({"video_id": task_id})
+            
+            # If still not found, try by id field
+            if not video_info:
+                video_info = videos_collection.find_one({"id": task_id})
+            
+            if video_info:
+                logging.info(f"Found video {task_id} in videos collection")
+        
+        if not video_info:
+            logging.warning(f"   ❌ Video NOT FOUND for task_id: {task_id}")
+            logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Log what we found
+        logging.info(f"   📄 Video found in MongoDB:")
+        logging.info(f"      ID: {video_info.get('id', 'N/A')}")
+        logging.info(f"      Status: {video_info.get('status', 'N/A')}")
+        logging.info(f"      Process Task ID: {video_info.get('process_task_id', 'NONE')}")
+        logging.info(f"      Clips count: {len(video_info.get('clips', []))}")
+        logging.info(f"      Has clips array: {('clips' in video_info)}")
+        
+        # Convert video status to task status format
+        status_map = {
+            "downloading": "downloading",
+            "downloaded": "downloaded",
+            "processing": "processing",
+            "completed": "completed",
+            "failed": "error",
+            "uploading": "downloading",
+            "queued": "queued",
+            "transcribing": "transcribing",
+            "analyzing": "analyzing"
+        }
+        
+        video_status = video_info.get("status", "downloading")
+        
+        task_status = {
+            "status": status_map.get(video_status, "downloading"),
+            "progress": get_progress_from_status(video_status),
+            "message": get_message_from_status(video_status, video_info.get("error_message")),
+            "video_id": str(video_info.get("_id", video_info.get("id", task_id))),
+        }
+        
+        # Add timestamps if available
+        if "updated_at" in video_info:
+            updated_at = video_info["updated_at"]
+            if isinstance(updated_at, datetime.datetime):
+                task_status["updated_at"] = updated_at.isoformat()
+            else:
+                task_status["updated_at"] = str(updated_at)
+        
+        if "created_at" in video_info:
+            created_at = video_info["created_at"]
+            if isinstance(created_at, datetime.datetime):
+                task_status["created_at"] = created_at.isoformat()
+            else:
+                task_status["created_at"] = str(created_at)
+        
+        # Add process_task_id if available (for YouTube downloads)
+        if "process_task_id" in video_info:
+            task_status["process_task_id"] = video_info["process_task_id"]
+        
+        # Add clips data if completed (frontend needs this to display clips)
+        if video_status == "completed":
+            clips = video_info.get("clips", [])
+            task_status["clips_count"] = len(clips) if clips else 0
+            
+            # Include full clips data for frontend display
+            clips_formatted = []
+            for clip_doc in clips:
+                clip_data = {
+                    "id": str(clip_doc.get("id")),
+                    "title": clip_doc.get("title"),
+                    "start_time": clip_doc.get("start_time", 0),
+                    "end_time": clip_doc.get("end_time", 0),
+                    "duration": clip_doc.get("duration", 0),
+                    "s3_key": clip_doc.get("s3_key"),
+                    "s3_url": clip_doc.get("s3_url"),
+                    "thumbnail_url": clip_doc.get("thumbnail_url"),
+                    "transcription": clip_doc.get("transcription", ""),
+                }
+                clips_formatted.append(clip_data)
+            
+            task_status["clips"] = clips_formatted
+        
+        # Log the response
+        logging.info(f"   📤 RESPONSE:")
+        logging.info(f"      Status: {task_status['status']}")
+        logging.info(f"      Progress: {task_status['progress']}%")
+        logging.info(f"      Video ID: {task_status.get('video_id', 'N/A')}")
+        logging.info(f"      Process Task ID: {task_status.get('process_task_id', 'NONE')}")
+        logging.info(f"      Clips in response: {len(task_status.get('clips', []))}")
+        logging.info(f"      Clips count field: {task_status.get('clips_count', 'N/A')}")
+        logging.info(f"      Requested Task ID: {task_id}")
+        logging.info(f"      Task ID Match: {'✅ MATCH' if task_status.get('process_task_id') == task_id or task_status.get('video_id') == task_id else '⚠️ MISMATCH'}")
+        logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        
+        return task_status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error getting task status for {task_id}: {str(e)}")
+        logging.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def get_progress_from_status(status: str) -> int:
+    """Map video status to progress percentage - aligned with actual pipeline steps"""
+    progress_map = {
+        # Step 1: Downloading YouTube video
+        "queued": 5,                    # Job queued
+        "downloading": 10,              # Downloading YouTube video
+        "downloaded": 15,               # Download complete
+        "uploading": 18,                # Uploading to storage
+        
+        # Step 2: Transcribing
+        "processing_started": 20,       # Starting processing
+        "transcribing": 30,             # Transcribing audio with Whisper
+        
+        # Step 3: Finding interesting content
+        "analyzing": 50,                # AI analyzing content for best moments
+        
+        # Step 4: Generating clips
+        "processing": 70,               # Creating video clips with FFmpeg
+        
+        # Step 5: Clips download/upload (final stages)
+        "uploading_clips": 90,          # Uploading clips to S3
+        
+        # Step 6: Finished
+        "completed": 100,               # All done!
+        
+        # Error states
+        "failed": 0,
+        "error": 0,
+        "timeout": 0,
+        "stuck": 0
+    }
+    return progress_map.get(status, 0)
+
+
+def get_message_from_status(status: str, error_message: str = None) -> str:
+    """Map video status to user-friendly message - aligned with actual pipeline"""
+    if status == "failed" and error_message:
+        return f"Error: {error_message}"
+    if status == "error" and error_message:
+        return f"Error: {error_message}"
+    
+    message_map = {
+        # Step 1: Downloading YouTube video
+        "queued": "Queued for processing...",
+        "downloading": "Downloading YouTube video...",
+        "downloaded": "Download complete",
+        "uploading": "Uploading video to storage...",
+        
+        # Step 2: Transcribing
+        "processing_started": "Starting video processing...",
+        "transcribing": "Transcribing audio...",
+        
+        # Step 3: Finding interesting content
+        "analyzing": "Finding interesting content...",
+        
+        # Step 4: Generating clips
+        "processing": "Generating clips...",
+        
+        # Step 5: Clips download (upload to S3)
+        "uploading_clips": "Uploading clips...",
+        
+        # Step 6: Finished
+        "completed": "Finished!",
+        
+        # Error states
+        "failed": "Processing failed",
+        "error": "An error occurred",
+        "timeout": "Processing timed out",
+        "stuck": "Processing stuck"
+    }
+    return message_map.get(status, "Processing...")
 
 
 @app.get("/clips/{video_id}")
@@ -902,49 +1229,64 @@ async def process_s3_video(
 
 @app.post("/youtube-download")
 async def download_from_youtube(
-    background_tasks: BackgroundTasks, 
+    background_tasks: BackgroundTasks,
     request: YouTubeRequest,
     current_user: Annotated[User, Depends(get_current_user)]
 ):
-    """Download a video from YouTube directly to S3 and optionally start processing it"""
+    """Download a video from YouTube locally and process it (no S3 upload of original video).
+
+    Updated: Create the background job first and immediately persist process_task_id on the embedded user video.
+    """
     try:
-        # Generate a unique ID for the video
-        video_id = str(uuid.uuid4())
         now = datetime.datetime.now()
-        # Immediately create the video record in the DB
+
+        # Generate a stable video_id first
+        video_id = str(uuid.uuid4())
+
+        # Create background job FIRST to get the task_id (same as job_id)
+        from jobs import job_queue
+        task_id = job_queue.add_job(
+            "process_youtube_download",  # unified v2 handler keeps same job_id across download+process
+            {
+                "video_id": video_id,
+                "url": str(request.url),
+                "auto_process": request.auto_process,
+                "user_id": current_user.id,
+            },
+        )
+
+        # Immediately create the embedded user video with process_task_id set
         video_data = {
             "id": video_id,
             "title": f"YouTube Video {video_id}",
-            "description": f"Video submitted for processing",
+            "description": "Video submitted for processing",
             "status": "downloading",
             "video_type": "youtube",
             "user_id": current_user.id,
             "created_at": now,
             "updated_at": now,
+            "process_task_id": task_id,
         }
         await create_user_video(current_user.id, video_data)
-        # Create a task ID
-        task_id = str(uuid.uuid4())
-        # Initialize task status
+
+        # Also store in tasks dict for backwards compatibility with /status endpoint
         tasks[task_id] = {
             "status": "downloading",
             "progress": 0,
-            "message": "Starting YouTube download to S3...",
+            "message": "Starting YouTube download...",
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
             "video_id": video_id,
             "user_id": current_user.id,
         }
-        # Start download in background
-        background_tasks.add_task(
-            process_youtube_download_s3,
-            task_id=task_id,
-            video_id=video_id,
-            url=str(request.url),
-            auto_process=request.auto_process,
-            user_id=current_user.id,
-        )
-        return {"video_id": video_id, "task_id": task_id, "status": "downloading"}
+
+        # Return with explicit process_task_id for the frontend
+        return {
+            "video_id": video_id,
+            "task_id": task_id,
+            "process_task_id": task_id,
+            "status": "downloading",
+        }
     except Exception as e:
         logging.error(f"Error in YouTube download: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -952,10 +1294,186 @@ async def download_from_youtube(
         )
 
 
+async def process_youtube_download_local(
+    task_id: str, video_id: str, url: str, auto_process: bool = True, user_id: str = None
+):
+    """Process a YouTube download locally (no S3 upload of original video)"""
+    try:
+        # Import user video service
+        from services.user_video_service import update_user_video
+        
+        # Update video status in MongoDB (primary source of truth)
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "downloading",
+                "updated_at": utc_now()
+            })
+        
+        # Also update in-memory tasks for backwards compatibility
+        tasks[task_id] = {
+            "status": "downloading",
+            "progress": 10,
+            "message": "Downloading video from YouTube locally...",
+            "created_at": datetime.datetime.now().isoformat(),
+            "updated_at": datetime.datetime.now().isoformat(),
+            "video_id": video_id,
+        }
+        logging.info(f"Task {task_id}: Starting local YouTube download for URL: {url}")
+
+        # Create video directory
+        video_dir = upload_dir / video_id
+        video_dir.mkdir(exist_ok=True)
+
+        # Three-tier download fallback system
+        file_path, title, video_info = None, None, None
+        max_retries = 3
+        
+        # Tier 1: Try Sieve API (fastest, requires valid API key)
+        for attempt in range(1, max_retries + 1):
+            try:
+                logging.info(f"Task {task_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
+                file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
+                if file_path and title:
+                    logging.info(f"Task {task_id}: ✅ Sieve download successful")
+                    break
+            except Exception as sieve_error:
+                logging.warning(f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
+                if attempt == max_retries:
+                    logging.error(f"Task {task_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix.")
+                    break
+                await asyncio.sleep(5)
+        
+        # Tier 2: Fallback to pytubefix if Sieve failed
+        if not file_path or not title:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logging.info(f"Task {task_id}: [Tier 2] Attempt {attempt} to download with pytubefix")
+                    file_path, title, video_info = await download_youtube_video(url, video_dir)
+                    if file_path and title:
+                        logging.info(f"Task {task_id}: ✅ pytubefix download successful")
+                        break
+                except Exception as pytubefix_error:
+                    logging.warning(f"Task {task_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
+                    if attempt == max_retries:
+                        logging.error(f"Task {task_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp.")
+                        break
+                    await asyncio.sleep(5)
+        
+        # Tier 3: Final fallback to yt-dlp if both Sieve and pytubefix failed
+        if not file_path or not title:
+            try:
+                from utils.ytdlp_downloader import download_youtube_video_ytdlp
+                logging.info(f"Task {task_id}: [Tier 3] Attempting download with yt-dlp (final fallback)")
+                file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
+                if file_path and title:
+                    logging.info(f"Task {task_id}: ✅ yt-dlp download successful")
+            except Exception as ytdlp_error:
+                logging.error(f"Task {task_id}: yt-dlp download failed: {str(ytdlp_error)}")
+
+        if not file_path or not title:
+            raise Exception(f"Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)")
+
+        logging.info(f"Task {task_id}: Download completed successfully to local file: {file_path}")
+        
+        # Update video in database
+        try:
+            video_data = {
+                "title": title or f"YouTube Video",
+                "description": f"YouTube video downloaded from {url}",
+                "filename": Path(file_path).name,
+                "source_url": url,
+                "status": "downloaded",
+                "video_type": "youtube",
+                "duration": video_info.get("length_seconds") if video_info else None,
+                "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else None,
+                "content_type": "video/mp4"
+            }
+            from services.user_video_service import update_user_video
+            await update_user_video(user_id, video_id, video_data)
+            logging.info(f"Updated YouTube video {video_id} in database.")
+        except Exception as e:
+            logging.error(f"Error updating YouTube video in database: {e}", exc_info=True)
+        
+        # Update task
+        tasks[task_id] = {
+            "status": "downloaded",
+            "progress": 100,
+            "message": "YouTube video downloaded successfully (local)",
+            "video_info": {
+                "video_id": video_id,
+                "filename": Path(file_path).name,
+                "title": title,
+                "thumbnail": video_info.get("thumbnail_url") if video_info else None,
+                "duration": video_info.get("length_seconds") if video_info else None,
+            },
+            "updated_at": datetime.datetime.now().isoformat(),
+            "video_id": video_id,
+        }
+
+        # Start processing if requested
+        if auto_process:
+            try:
+                process_task_id = str(uuid.uuid4())
+                logging.info(f"Task {task_id}: Created process task ID: {process_task_id}")
+                
+                tasks[process_task_id] = {
+                    "status": "queued",
+                    "progress": 0,
+                    "message": "Queued for processing",
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "updated_at": datetime.datetime.now().isoformat(),
+                    "video_id": video_id,
+                    "original_task_id": task_id,
+                }
+                
+                tasks[task_id]["process_task_id"] = process_task_id
+                tasks[task_id]["status"] = "processing_started"
+                tasks[task_id]["message"] = "Processing has started"
+                tasks[task_id]["updated_at"] = datetime.datetime.now().isoformat()
+                
+                # 🔍 Save process_task_id to MongoDB
+                logging.info(f"🔍 DEBUG [API]: About to update process_task_id in MongoDB")
+                logging.info(f"   user_id: {user_id}")
+                logging.info(f"   video_id: {video_id}")
+                logging.info(f"   process_task_id: {process_task_id}")
+                
+                if user_id:
+                    update_result = await update_user_video(user_id, video_id, {
+                        "process_task_id": process_task_id,
+                        "updated_at": utc_now()
+                    })
+                    logging.info(f"✅ Updated MongoDB [API]: video {video_id} with process_task_id: {process_task_id}, result: {update_result}")
+                else:
+                    logging.warning(f"⚠️ WARNING [API]: user_id is None, cannot update MongoDB with process_task_id")
+                
+                # Process directly from local file (no S3 download needed)
+                await process_podcast(
+                    process_task_id, video_id, file_path, original_task_id=task_id, user_id=user_id
+                )
+                
+            except Exception as process_error:
+                logging.error(f"Error starting processing for task {task_id}: {str(process_error)}", exc_info=True)
+                tasks[task_id].update({
+                    "status": "error",
+                    "message": f"Error starting processing: {str(process_error)}",
+                    "updated_at": datetime.datetime.now().isoformat(),
+                })
+                
+    except Exception as e:
+        logging.error(f"Error in YouTube download process: {str(e)}", exc_info=True)
+        tasks[task_id] = {
+            "status": "error",
+            "progress": 0,
+            "message": f"Error processing YouTube download: {str(e)}",
+            "updated_at": datetime.datetime.now().isoformat(),
+        }
+
+
+# DEPRECATED: Old S3-based YouTube download (kept for reference, not used)
 async def process_youtube_download_s3(
     task_id: str, video_id: str, url: str, auto_process: bool = True, user_id: str = None
 ):
-    """Process a YouTube download directly to S3 in the background"""
+    """DEPRECATED: Process a YouTube download directly to S3 (no longer used - we process locally)"""
     try:
         # Update task status
         tasks[task_id] = {
@@ -1132,7 +1650,7 @@ async def process_podcast(
         # Update task status
         tasks[task_id] = {
             "status": "transcribing",
-            "progress": 10,
+            "progress": 30,
             "message": "Transcribing audio",
             "video_id": video_id,
             "user_id": user_id,  # Store user_id in task
@@ -1145,7 +1663,7 @@ async def process_podcast(
             tasks[original_task_id].update(
                 {
                     "status": "transcribing",
-                    "progress": 10,
+                    "progress": 30,
                     "message": "Transcribing audio",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }
@@ -1301,7 +1819,7 @@ async def process_podcast(
         tasks[task_id].update(
             {
                 "status": "analyzing",
-                "progress": 40,
+                "progress": 50,
                 "message": "Analyzing content",
                 "updated_at": datetime.datetime.now().isoformat(),
             }
@@ -1312,7 +1830,7 @@ async def process_podcast(
             tasks[original_task_id].update(
                 {
                     "status": "analyzing",
-                    "progress": 40,
+                    "progress": 50,
                     "message": "Analyzing content",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }
@@ -1347,7 +1865,7 @@ async def process_podcast(
         tasks[task_id].update(
             {
                 "status": "processing",
-                "progress": 60,
+                "progress": 70,
                 "message": "Processing video clips",
                 "updated_at": datetime.datetime.now().isoformat(),
             }
@@ -1358,7 +1876,7 @@ async def process_podcast(
             tasks[original_task_id].update(
                 {
                     "status": "processing",
-                    "progress": 60,
+                    "progress": 70,
                     "message": "Processing video clips",
                     "updated_at": datetime.datetime.now().isoformat(),
                 }

@@ -4,6 +4,7 @@ import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
+import time
 
 import redis
 
@@ -21,11 +22,16 @@ class JobQueue:
             # Test connection
             self.redis_client.ping()
             logger.info(f"Connected to Redis at {redis_url}")
+            
+            # Worker identification for distributed locking
+            self.worker_id = f"worker-{uuid.uuid4()}"
+            logger.info(f"Worker ID: {self.worker_id}")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             # Fallback to in-memory storage for local development
             self.redis_client = None
             self._memory_storage = {}
+            self.worker_id = "local-worker"
 
     def add_job(self, job_type: str, job_data: Dict[str, Any]) -> str:
         """Add a job to the queue"""
@@ -35,6 +41,8 @@ class JobQueue:
             "type": job_type,
             "data": job_data,
             "status": "queued",
+            "progress": "0",
+            "message": "Job queued",
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }
@@ -76,13 +84,60 @@ class JobQueue:
         logger.info(f"Updated job {job_id}: {updates}")
 
     def get_next_job(self) -> Optional[str]:
-        """Get the next job from the queue (blocking)"""
+        """Get the next job from the queue (blocking) with distributed locking"""
         if self.redis_client:
             result = self.redis_client.brpop("job_queue", timeout=30)
-            return result[1] if result else None
+            if not result:
+                return None
+                
+            job_id = result[1]
+            
+            # Try to acquire lock for this job (prevents duplicate processing)
+            lock_key = f"job:lock:{job_id}"
+            lock_acquired = self.redis_client.set(
+                lock_key,
+                self.worker_id,
+                nx=True,  # Only set if not exists
+                ex=3600   # Lock expires in 1 hour (safety mechanism)
+            )
+            
+            if lock_acquired:
+                logger.info(f"Worker {self.worker_id} acquired lock for job {job_id}")
+                # Mark job as processing
+                self.update_job(job_id, {
+                    "status": "processing",
+                    "worker_id": self.worker_id,
+                    "processing_started_at": datetime.now().isoformat()
+                })
+                return job_id
+            else:
+                # Another worker got this job, put it back and try again
+                lock_owner = self.redis_client.get(lock_key)
+                logger.warning(f"Job {job_id} already locked by worker {lock_owner}, requeueing...")
+                self.redis_client.lpush("job_queue", job_id)
+                return None
         else:
             # For memory storage, just return None (no queuing in development)
             return None
+    
+    def release_job_lock(self, job_id: str):
+        """Release the distributed lock for a job"""
+        if self.redis_client:
+            lock_key = f"job:lock:{job_id}"
+            # Only release if we own the lock
+            lock_owner = self.redis_client.get(lock_key)
+            if lock_owner == self.worker_id:
+                self.redis_client.delete(lock_key)
+                logger.info(f"Worker {self.worker_id} released lock for job {job_id}")
+            else:
+                logger.warning(f"Cannot release lock for job {job_id} - owned by {lock_owner}")
+    
+    def requeue_job(self, job_id: str):
+        """Requeue a job (e.g., on failure) and release lock"""
+        if self.redis_client:
+            self.release_job_lock(job_id)
+            self.redis_client.lpush("job_queue", job_id)
+            logger.info(f"Job {job_id} requeued for retry")
 
     def get_all_jobs(self) -> Dict[str, Dict[str, Any]]:
         """Get all jobs (for debugging)"""

@@ -83,7 +83,7 @@ class Settings:
     MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-180 second range for complete context)
     MAX_CLIP_DURATION = 180 # Maximum clip duration in seconds (3 minutes for in-depth conversations)
     PREFERRED_CLIP_DURATION = 45  # Preferred clip duration in seconds (45 sec for complete thoughts)
-    MAX_CLIPS_PER_EPISODE = 20  # Maximum number of clips to extract per episode
+    MAX_CLIPS_PER_EPISODE = 40  # Limit to 40 clips per episode to manage processing load
     
     # Video settings
     OUTPUT_WIDTH = 1080  # Width for vertical video (9:16 aspect ratio)
@@ -101,8 +101,11 @@ class Settings:
     # JWT settings
     JWT_SECRET_KEY = get_secret("/clip-it/jwt-secret-key", "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
     JWT_ALGORITHM = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 180
-    JWT_REFRESH_TOKEN_EXPIRE_DAYS = 10
+    # Make expirations configurable via env; increase sensible defaults
+    # Access token default: 24 hours (1440 minutes)
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+    # Refresh token default: 30 days
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
     
     # TikTok settings - Clean any quotes that might be accidentally added

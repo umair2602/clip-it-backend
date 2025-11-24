@@ -10,6 +10,12 @@ from config import settings
 # Initialize Sieve with API key
 sieve.api_key = settings.SIEVE_API_KEY
 
+# Check if API key is configured
+if not sieve.api_key or sieve.api_key == "":
+    logging.warning("⚠️  SIEVE_API_KEY is not configured - Sieve downloader will fail")
+else:
+    logging.info(f"✅ Sieve API key configured (length: {len(sieve.api_key)} chars)")
+
 async def download_youtube_video_sieve(url: str, output_dir: Path) -> tuple:
     """
     Download a YouTube video using Sieve API
@@ -22,6 +28,11 @@ async def download_youtube_video_sieve(url: str, output_dir: Path) -> tuple:
         tuple: (file_path, title, video_info)
     """
     try:
+        # Early validation - check if API key is set
+        if not sieve.api_key or sieve.api_key == "":
+            logging.error("❌ SIEVE_API_KEY is not configured - skipping Sieve download")
+            return None, None, None
+        
         logging.info(f"🎬 Starting Sieve YouTube download")
         logging.info(f"   URL: {url}")
         logging.info(f"   Output dir: {output_dir}")
@@ -105,83 +116,110 @@ def _download_video_sieve(url: str, output_dir: Path) -> tuple:
         logging.info(f"✅ Sieve API call completed")
         logging.info(f"   Output type: {type(output)}")
         
-        # Process the output
+        # Process the output - Sieve returns 2 objects: metadata dict + file
+        logging.info(f"🔄 Starting to iterate over Sieve output generator...")
+        logging.info(f"   This may take several minutes while Sieve processes the video remotely...")
         output_count = 0
+        metadata = {}
+        temp_file_path = None
+        
         for output_object in output:
             output_count += 1
-            # Log the output_object to understand its structure
+            logging.info(f"🎯 Received output object from Sieve generator (iteration {output_count})")
             logging.info(f"📦 Processing Sieve output object #{output_count}")
             logging.info(f"   Object type: {type(output_object)}")
             logging.info(f"   Object content: {output_object}")
             
-            # Get the file path from the output - using dictionary access instead of attribute access
+            # First object is usually metadata (dict)
             if isinstance(output_object, dict):
-                temp_file_path = output_object.get('path')
-                logging.info(f"   Dict access - path: {temp_file_path}")
+                logging.info(f"   📋 Found metadata dictionary")
+                metadata = output_object
+                logging.info(f"   Metadata keys: {list(metadata.keys())}")
+                continue
+            
+            # Second object is the file (sieve.File)
+            # Get the file path from the output
+            if hasattr(output_object, 'path'):
+                logging.info(f"   ⏳ Accessing .path property (this triggers download from Sieve)...")
+                temp_file_path = output_object.path
+                logging.info(f"   ✅ Found file path: {temp_file_path}")
+                break  # We have the file, exit loop
             else:
-                # Try attribute access if it's not a dictionary
-                temp_file_path = getattr(output_object, 'path', None)
-                logging.info(f"   Attribute access - path: {temp_file_path}")
-                
-            if not temp_file_path:
-                logging.error("❌ No path found in output object")
-                logging.error(f"   Object keys (if dict): {output_object.keys() if isinstance(output_object, dict) else 'N/A'}")
-                logging.error(f"   Object attributes: {dir(output_object) if hasattr(output_object, '__dict__') else 'N/A'}")
+                logging.warning(f"   ⚠️ Object has no 'path' attribute")
+                logging.warning(f"   Object attributes: {dir(output_object)}")
                 continue
                 
-            logging.info(f"📂 Downloaded file from Sieve: {temp_file_path}")
-            logging.info(f"   File exists: {os.path.exists(temp_file_path) if temp_file_path else False}")
-            
-            # Extract metadata if available
-            metadata = {}
-            if isinstance(output_object, dict):
-                metadata = output_object.get('metadata', {})
-                logging.info(f"   Metadata (dict): {metadata}")
-            else:
-                metadata = getattr(output_object, 'metadata', {})
-                logging.info(f"   Metadata (attr): {metadata}")
+        if not temp_file_path:
+            logging.error("❌ No file path found in any output object")
+            logging.error(f"   Total objects received: {output_count}")
+            logging.error(f"   Metadata: {metadata}")
+            return None, None, None
                 
-            if isinstance(metadata, dict) and not metadata:
-                # If metadata is empty, check if it's directly in the output_object
-                if isinstance(output_object, dict) and 'title' in output_object:
-                    metadata = output_object
-                    logging.info(f"   Using output_object as metadata: {metadata}")
-            
-            # Get or generate title
-            title = metadata.get('title', f"youtube_{os.path.basename(temp_file_path)}")
-            logging.info(f"📝 Video title: {title}")
-            
-            # Create final file path in the output directory
-            file_name = f"{title.replace(' ', '_')}.mp4"
-            safe_file_name = ''.join(c for c in file_name if c.isalnum() or c in ['_', '-', '.']).rstrip()
-            final_file_path = os.path.join(output_dir, safe_file_name)
-            logging.info(f"💾 Copying to final location: {final_file_path}")
-            
-            # Copy the file to the output directory
-            shutil.copy2(temp_file_path, final_file_path)
-            
-            # Verify the copy
-            if os.path.exists(final_file_path):
-                final_size = os.path.getsize(final_file_path)
-                logging.info(f"✅ File copied successfully")
-                logging.info(f"   Size: {final_size:,} bytes ({final_size/1024/1024:.2f} MB)")
+        logging.info(f"📂 Downloaded file from Sieve: {temp_file_path}")
+        logging.info(f"   File exists: {os.path.exists(temp_file_path) if temp_file_path else False}")
+        
+        # Get or generate title from metadata
+        title = metadata.get('title', f"youtube_{os.path.basename(temp_file_path)}")
+        logging.info(f"📝 Video title: {title}")
+        
+        # Get duration from metadata - it's in "HH:MM:SS" format
+        duration_str = metadata.get('duration', '0')
+        if isinstance(duration_str, str) and ':' in duration_str:
+            # Parse "HH:MM:SS" to seconds
+            parts = duration_str.split(':')
+            if len(parts) == 3:
+                duration = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
             else:
-                logging.error(f"❌ File copy failed - file does not exist at {final_file_path}")
+                duration = 0
+        else:
+            duration = metadata.get('duration', 0) if isinstance(metadata.get('duration'), (int, float)) else 0
             
-            # Create video info dictionary with the correct field names
-            video_info = {
-                "title": title,
-                "author": metadata.get("channel_id", "Unknown"),  # Use channel_id instead of author
-                "length_seconds": metadata.get("duration", 0),    # Use duration instead of length_seconds
-                "thumbnail_url": metadata.get("thumbnail", ""),   # Use thumbnail instead of thumbnail_url
-                "resolution": "unknown"  # Sieve might not provide this information
-            }
-            
-            logging.info(f"✅ Sieve download completed successfully")
-            logging.info(f"   Final path: {final_file_path}")
-            logging.info(f"   Title: {title}")
-            logging.info(f"   Video info: {video_info}")
-            return final_file_path, title, video_info
+        # Get thumbnail_url from nested dict structure: thumbnails -> high/medium/default -> url
+        thumbnail_url = None
+        thumbnails = metadata.get('thumbnails', {})
+        if isinstance(thumbnails, dict):
+            # Try high quality first, then medium, then default
+            for quality in ['high', 'medium', 'default']:
+                if quality in thumbnails and isinstance(thumbnails[quality], dict):
+                    thumbnail_url = thumbnails[quality].get('url')
+                    if thumbnail_url:
+                        break
+        
+        logging.info(f"📊 Extracted metadata:")
+        logging.info(f"   Duration: {duration}s (from '{duration_str}')")
+        logging.info(f"   Thumbnail URL: {thumbnail_url}")
+        
+        # Create final file path in the output directory
+        file_name = f"{title.replace(' ', '_')}.mp4"
+        safe_file_name = ''.join(c for c in file_name if c.isalnum() or c in ['_', '-', '.']).rstrip()
+        final_file_path = os.path.join(output_dir, safe_file_name)
+        logging.info(f"💾 Copying to final location: {final_file_path}")
+        
+        # Copy the file to the output directory
+        shutil.copy2(temp_file_path, final_file_path)
+        
+        # Verify the copy
+        if os.path.exists(final_file_path):
+            final_size = os.path.getsize(final_file_path)
+            logging.info(f"✅ File copied successfully")
+            logging.info(f"   Size: {final_size:,} bytes ({final_size/1024/1024:.2f} MB)")
+        else:
+            logging.error(f"❌ File copy failed - file does not exist at {final_file_path}")
+        
+        # Create video info dictionary with the correct field names
+        video_info = {
+            "title": title,
+            "author": metadata.get("channel_id", "Unknown"),
+            "length_seconds": duration,
+            "thumbnail_url": thumbnail_url or "",
+            "resolution": "unknown"
+        }
+        
+        logging.info(f"✅ Sieve download completed successfully")
+        logging.info(f"   Final path: {final_file_path}")
+        logging.info(f"   Title: {title}")
+        logging.info(f"   Video info: {video_info}")
+        return final_file_path, title, video_info
             
         # If we get here, no output was returned
         logging.error("❌ No output returned from Sieve API")

@@ -39,6 +39,10 @@ class VideoStatus(str, Enum):
     """Video processing status"""
     UPLOADING = "uploading"
     DOWNLOADING = "downloading"
+    DOWNLOADED = "downloaded"  # After download, before processing
+    TRANSCRIBING = "transcribing"
+    ANALYZING = "analyzing"
+    PROCESSING_STARTED = "processing_started"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -85,6 +89,7 @@ class VideoModel(BaseModel):
     error_message: Optional[str] = None
     filename: str
     clips: List[ClipModel] = []
+    process_task_id: Optional[str] = None  # Task ID for processing job (for task switching)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     processed_at: Optional[datetime] = None

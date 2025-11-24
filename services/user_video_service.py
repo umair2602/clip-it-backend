@@ -34,6 +34,10 @@ async def create_user_video(user_id: str, video_data: Dict[str, Any]) -> Optiona
         users_collection = db.users
         
         # Create video model
+        logger.info(f"🔍 Creating video model with data:")
+        logger.info(f"   process_task_id in video_data: {video_data.get('process_task_id', 'NOT PROVIDED')}")
+        logger.info(f"   job_id in video_data: {video_data.get('job_id', 'NOT PROVIDED')}")
+        
         video = VideoModel(
             id=video_data.get('id', str(ObjectId())),  # Use provided ID or generate new one
             title=video_data.get('title'),
@@ -50,9 +54,12 @@ async def create_user_video(user_id: str, video_data: Dict[str, Any]) -> Optiona
             error_message=video_data.get('error_message'),
             filename=video_data.get('filename', ''),
             clips=[],
+            process_task_id=video_data.get('process_task_id'),  # Include process_task_id!
             created_at=utc_now(),
             updated_at=utc_now()
         )
+        
+        logger.info(f"📝 Video model created with process_task_id: {video.process_task_id}")
         
         # Add video to user's videos array
         result = users_collection.update_one(
@@ -64,7 +71,22 @@ async def create_user_video(user_id: str, video_data: Dict[str, Any]) -> Optiona
         )
         
         if result.modified_count > 0:
-            logger.info(f"Created video {video.id} for user {user_id}")
+            logger.info(f"✅ Created video {video.id} for user {user_id}")
+            logger.info(f"   Process Task ID saved: {video.process_task_id}")
+            
+            # Verify it was actually saved
+            verify_user = users_collection.find_one({"_id": ObjectId(user_id)})
+            if verify_user:
+                saved_video = None
+                for v in verify_user.get('videos', []):
+                    if v.get('id') == video.id:
+                        saved_video = v
+                        break
+                if saved_video:
+                    logger.info(f"🔍 VERIFICATION: Video in DB has process_task_id: {saved_video.get('process_task_id', 'MISSING')}")
+                else:
+                    logger.error(f"❌ VERIFICATION FAILED: Could not find video {video.id} in user's videos array")
+            
             return video.id
         else:
             logger.error(f"Failed to create video for user {user_id}")
