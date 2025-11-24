@@ -11,7 +11,8 @@ from jobs import job_queue
 from services.content_analysis import analyze_content
 
 # Import services
-from services.transcription import load_model, transcribe_audio
+# Using AssemblyAI for better speaker diarization and sentence boundaries
+from services.transcription_assemblyai import transcribe_audio
 from services.video_processing import generate_thumbnail, process_video, create_clip
 from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
 from utils.s3_storage import s3_client
@@ -30,8 +31,7 @@ output_dir = Path("outputs")
 upload_dir.mkdir(exist_ok=True)
 output_dir.mkdir(exist_ok=True)
 
-# Global Whisper model
-whisper_model = None
+# Note: Removed Whisper model - now using AssemblyAI cloud service
 
 
 async def cleanup_old_files(max_age_hours: int = 24):
@@ -359,20 +359,19 @@ async def process_video_job(job_id: str, job_data: dict):
 
         # ⏱️ STEP 1: TRANSCRIPTION
         step_start = time.time()
-        logger.info("📝 STEP 1: Starting transcription (Whisper + Diarization + Alignment)...")
+        logger.info("📝 STEP 1: Starting transcription (AssemblyAI + Speaker Diarization)...")
         
-        transcript = await transcribe_audio(
-            file_path, 
-            model_size="base",
-            job_id=job_id,
-            job_queue=job_queue
-        )
+        # AssemblyAI handles transcription in the cloud - no local model needed
+        transcript = await transcribe_audio(file_path)
+        
         if not transcript:
             raise ValueError("Transcription returned None")
         
         step_elapsed = time.time() - step_start
         logger.info(f"✅ STEP 1 COMPLETE: Transcription finished in {step_elapsed:.2f} seconds ({step_elapsed/60:.2f} minutes)")
         logger.info(f"   - Total segments: {len(transcript.get('segments', []))}")
+        logger.info(f"   - Total sentences: {len(transcript.get('sentences', []))}")
+        logger.info(f"   - Speakers detected: {len(transcript.get('speakers', []))}")
         logger.info(f"   - Has speaker labels: {'Yes' if transcript.get('transcript_for_ai') else 'No'}")
 
         # Handle empty segments gracefully - this is valid for silent/corrupted videos
@@ -684,14 +683,30 @@ async def process_video_job(job_id: str, job_data: dict):
                 # Optionally add s3_url, etc. if you have them
             })
 
-        # Clean up uploaded video file and directory after successful processing
+        # Clean up all local files immediately after successful processing
+        # (Don't wait 24 hours - original videos aren't needed after clips are generated)
+        cleanup_success = True
         try:
+            # Clean up uploads directory (original video)
             video_upload_dir = upload_dir / video_id
             if video_upload_dir.exists():
+                dir_size_mb = sum(f.stat().st_size for f in video_upload_dir.rglob('*') if f.is_file()) / (1024 * 1024)
                 shutil.rmtree(video_upload_dir)
-                logger.info(f"✅ Cleaned up uploaded video directory: {video_upload_dir}")
+                logger.info(f"🗑️ Deleted original video directory: {video_upload_dir} ({dir_size_mb:.1f}MB freed)")
+            
+            # Clean up outputs directory (local clips - already uploaded to S3)
+            video_output_dir = output_dir / video_id
+            if video_output_dir.exists():
+                dir_size_mb = sum(f.stat().st_size for f in video_output_dir.rglob('*') if f.is_file()) / (1024 * 1024)
+                shutil.rmtree(video_output_dir)
+                logger.info(f"🗑️ Deleted output directory: {video_output_dir} ({dir_size_mb:.1f}MB freed)")
+                
         except Exception as cleanup_error:
-            logger.warning(f"⚠️  Failed to clean up uploaded video directory {video_upload_dir}: {cleanup_error}")
+            cleanup_success = False
+            logger.warning(f"⚠️ Failed to clean up directories: {cleanup_error}")
+        
+        if cleanup_success:
+            logger.info("✅ Immediate cleanup complete - all local files deleted")
 
         logger.info(f"Job {job_id} completed successfully with {len(clips)} clips")
         
