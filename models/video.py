@@ -1,31 +1,19 @@
 """
-Video models for tracking user uploads, YouTube downloads, and processing results.
+Standalone Video model for videos collection
 """
-
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Annotated
-from pydantic import BaseModel, Field, BeforeValidator
-from bson import ObjectId
 from enum import Enum
+from typing import Optional, List
+from bson import ObjectId
+from pydantic import BaseModel, Field
+
+# Re-export Clip for compatibility with routes
+from models.clip import Clip
 
 
 def utc_now():
     """Get current UTC datetime"""
     return datetime.now(timezone.utc)
-
-
-def validate_object_id(v):
-    """Validate ObjectId"""
-    if isinstance(v, ObjectId):
-        return str(v)
-    if isinstance(v, str):
-        if ObjectId.is_valid(v):
-            return v
-        raise ValueError("Invalid ObjectId")
-    raise ValueError("Invalid ObjectId")
-
-
-PyObjectId = Annotated[str, BeforeValidator(validate_object_id)]
 
 
 class VideoType(str, Enum):
@@ -38,15 +26,19 @@ class VideoStatus(str, Enum):
     """Video processing status"""
     UPLOADING = "uploading"
     DOWNLOADING = "downloading"
-    DOWNLOADED = "downloaded"  # Added missing status
+    DOWNLOADED = "downloaded"
+    TRANSCRIBING = "transcribing"
+    ANALYZING = "analyzing"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
 
-class VideoBase(BaseModel):
-    """Base video model"""
+class Video(BaseModel):
+    """Standalone Video model for videos collection"""
+    id: str = Field(default_factory=lambda: str(ObjectId()), alias="_id")
+    user_id: str  # Foreign key to users collection
     title: Optional[str] = None
     description: Optional[str] = None
     duration: Optional[float] = None  # Duration in seconds
@@ -59,113 +51,46 @@ class VideoBase(BaseModel):
     thumbnail_url: Optional[str] = None
     status: VideoStatus = VideoStatus.UPLOADING
     error_message: Optional[str] = None
-    process_task_id: Optional[str] = None  # Task ID for processing job (for task switching)
+    filename: str = ""
+    process_task_id: Optional[str] = None  # Task ID for processing job
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    processed_at: Optional[datetime] = None
 
     class Config:
-        json_encoders = {ObjectId: str}
+        populate_by_name = True
+        json_encoders = {ObjectId: str, datetime: lambda v: v.isoformat()}
 
 
-class VideoCreate(VideoBase):
-    """Video creation model"""
+class VideoCreate(BaseModel):
+    """Model for creating a new video"""
     user_id: str
     filename: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    s3_key: Optional[str] = None
+    s3_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    status: VideoStatus = VideoStatus.UPLOADING
+    video_type: VideoType = VideoType.UPLOAD
+    source_url: Optional[str] = None
+    process_task_id: Optional[str] = None
 
 
 class VideoUpdate(BaseModel):
-    """Video update model"""
+    """Model for updating a video"""
     title: Optional[str] = None
     description: Optional[str] = None
-    duration: Optional[float] = None
-    file_size: Optional[int] = None
-    content_type: Optional[str] = None
-    s3_key: Optional[str] = None
+    status: Optional[VideoStatus] = None
     s3_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
-    status: Optional[VideoStatus] = None
     error_message: Optional[str] = None
 
 
-class VideoInDB(VideoBase):
-    """Video model as stored in database"""
-    id: Optional[PyObjectId] = Field(default=None, alias="_id")
-    user_id: str
-    filename: str
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-    processed_at: Optional[datetime] = None
-
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Video(VideoBase):
-    """Video model for API responses"""
-    id: str
-    user_id: str
-    filename: str
-    created_at: datetime
-    updated_at: datetime
-    processed_at: Optional[datetime] = None
-    clips: Optional[List[Dict[str, Any]]] = []  # Array of clips for this video
-
-
-class ClipBase(BaseModel):
-    """Base clip model"""
-    video_id: str
-    title: Optional[str] = None
-    description: Optional[str] = None
-    start_time: float
-    end_time: float
-    duration: float
-    s3_key: Optional[str] = None
-    s3_url: Optional[str] = None
-    thumbnail_url: Optional[str] = None
-    transcription: Optional[str] = None
-    summary: Optional[str] = None
-    tags: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    
-    # Speaker diarization fields
-    speaker_segments: Optional[List[Dict[str, Any]]] = None  # Raw speaker segments from pyannote
-    speaker_stats: Optional[Dict[str, Any]] = None  # Speaker statistics (duration, percentage, etc.)
-    transcription_with_speakers: Optional[str] = None  # Formatted transcript with speaker labels
-    transcript_for_ai: Optional[str] = None  # AI-optimized format: "start end SPEAKER text"
-
-    class Config:
-        json_encoders = {ObjectId: str}
-
-
-class ClipCreate(ClipBase):
-    """Clip creation model"""
-    user_id: str
-
-
-class ClipInDB(ClipBase):
-    """Clip model as stored in database"""
-    id: Optional[PyObjectId] = Field(default=None, alias="_id")
-    user_id: str
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Clip(ClipBase):
-    """Clip model for API responses"""
-    id: str
-    user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
 class VideoHistoryResponse(BaseModel):
-    """Response model for user video history"""
-    videos: List[Video]
+    """Response model for video history"""
+    user_id: str
+    videos: list
     total_count: int
     page: int
     page_size: int
@@ -173,9 +98,10 @@ class VideoHistoryResponse(BaseModel):
 
 
 class ClipHistoryResponse(BaseModel):
-    """Response model for user clip history"""
-    clips: List[Clip]
+    """Response model for clip history"""
+    user_id: str
+    clips: list
     total_count: int
     page: int
     page_size: int
-    total_pages: int 
+    total_pages: int

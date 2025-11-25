@@ -14,7 +14,8 @@ from services.content_analysis import analyze_content
 # Using AssemblyAI for better speaker diarization and sentence boundaries
 from services.transcription_assemblyai import transcribe_audio
 from services.video_processing import generate_thumbnail, process_video, create_clip
-from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
+from services.video_service import video_service
+from services.clip_service import create_clip as create_clip_db
 from utils.s3_storage import s3_client
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video

@@ -403,7 +403,7 @@ async def update_video(
     Returns updated video details.
     """
     try:
-        video = await video_service.update_video(video_id, current_user.id, update_data)
+        video = await video_service.update_video(video_id, current_user.id, update_data.dict(exclude_unset=True))
         
         if not video:
             raise HTTPException(
