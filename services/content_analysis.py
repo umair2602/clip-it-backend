@@ -129,164 +129,66 @@ async def identify_engaging_segments_from_text(
     # Log targets
     logger.info(f"Clip targets (speaker-labeled): duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
 
-    # Enhanced prompt that leverages AssemblyAI's perfect sentence boundaries
+    # Create prompt for OpenAI with explicit targets
     prompt = f"""
-You are an expert AI specialized in extracting viral-worthy video clips from speaker-diarized transcripts. You have been given a PERFECTLY FORMATTED transcript where each line represents a complete sentence with precise timestamps and speaker labels:
+        You are an expert AI that identifies viral-worthy video clips from audio transcripts. You will be given a transcript with speaker labels and timestamps in the format:
 
-FORMAT: [START_TIME - END_TIME] SPEAKER_X: complete sentence
+        [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
 
-VIDEO DURATION: ~{total_minutes} minutes
-TARGET: Generate {target_min}-{target_max} exceptional clips (quality over quantity)
+        VIDEO DURATION (approx): ~{total_minutes} minutes
+        TARGET OUTPUT: Generate at least {target_min} and up to {target_max} genuinely engaging clips. If you discover more than {target_max} excellent moments, return the best {target_max}. If fewer exist, return as many as truly engaging.
+        DISTRIBUTION: Spread clips across the entire video (beginning/middle/end). Avoid clustering in one section.
 
-═══════════════════════════════════════════════════════════════
-🎯 CRITICAL BOUNDARY RULES (MUST FOLLOW):
-═══════════════════════════════════════════════════════════════
+        What makes a GREAT clip (prioritize these):
+        ✅ Controversial or surprising statements
+        ✅ Strong opinions or hot takes  
+        ✅ Funny moments, jokes, or witty remarks
+        ✅ Unexpected facts or revelations
+        ✅ Emotional stories or personal anecdotes
+        ✅ Practical advice or life tips
+        ✅ Debates, disagreements, or tension between speakers
+        ✅ "Aha!" moments or insights
+        ✅ Behind-the-scenes revelations
+        ✅ Predictions or bold claims
 
-1. **SENTENCE BOUNDARIES ARE SACRED**:
-   - ✅ ALWAYS start at [START_TIME] of a sentence
-   - ✅ ALWAYS end at [END_TIME] of a sentence
-   - ❌ NEVER start or end mid-sentence
-   - ❌ NEVER use arbitrary timestamps between sentences
+        STRICT REQUIREMENTS:
+        • Each clip MUST be 15-180 seconds (prefer 20-60 seconds)
+        • Generate MULTIPLE clips - scan the ENTIRE transcript
+        • Each clip should be from a DIFFERENT part of the conversation
+        • Clips should be STANDALONE - no prior context needed
+        • Focus on the MOST engaging parts that could go viral
 
-2. **SELECTING START POINT**:
-   - Find the interesting moment
-   - Go back to find the FIRST sentence that provides necessary context
-   - Use that sentence's START_TIME as your clip start
-   - Example: If exciting moment is at [120.5], but setup starts at [115.2], use 115.2
+        SEARCH STRATEGY - Apply this systematically:
+        1. Scan the beginning (first 25% of transcript) - find 1-2 clips
+        2. Scan the middle (25%-75% of transcript) - find 2-4 clips  
+        3. Scan the end (last 25% of transcript) - find 1-2 clips
+        4. Look for topic changes, energy shifts, laughter, emphasis
+        5. Identify moments where speakers disagree or debate
+        6. Find moments where speakers get excited or passionate
 
-3. **SELECTING END POINT**:
-   - From the interesting moment, continue forward to the LAST sentence that completes the thought
-   - Use that sentence's END_TIME as your clip end
-   - Example: If punchline is at [135.8] but speaker continues to [140.3], use 140.3
+        DURATION CALCULATION:
+        - Find the interesting moment
+        - Expand backwards to include setup/context (2-5 seconds)
+        - Expand forwards to include the complete thought/punchline
+        - Ensure total duration is 15-180 seconds
+        - If naturally short, add surrounding context to reach 15+ seconds
 
-4. **SPEAKER TURN AWARENESS**:
-   - If a clip involves dialogue, include complete exchanges
-   - Don't end mid-conversation - wait for a natural conversational pause
-   - Example: 
-     ❌ BAD: [100.0 - 110.0] cuts off during SPEAKER_B's response
-     ✅ GOOD: [100.0 - 115.5] includes full exchange: A asks, B responds completely
+                CLIP GENERATION STRATEGY:
+        - Generate clips based ONLY on the number of genuinely interesting moments found
+                - Prefer {target_min}-{target_max} clips given the video length; do not exceed {target_max}
+        - Quality over quantity - only include truly engaging segments
+                - If you find only 2 great moments, return 2 clips; if you find more than {target_max}, select the strongest {target_max}
 
-═══════════════════════════════════════════════════════════════
-🔥 WHAT MAKES A VIRAL CLIP:
-═══════════════════════════════════════════════════════════════
+        IMPORTANT: Don't just pick one good moment - find ALL engaging segments throughout the video. Think like a social media editor who extracts every viral-worthy moment.
 
-**TIER 1 - MUST INCLUDE** (highest priority):
-  • Controversial statements or hot takes
-  • Shocking revelations or plot twists
-  • Heated debates or disagreements
-  • Unexpected punchlines or comebacks
-  • "Did they really just say that?" moments
+        Return ONLY a JSON array with this format:
+        [
+          {{"start_time": X, "end_time": Y, "title": "Compelling Title"}}
+        ]
 
-**TIER 2 - HIGHLY VALUABLE**:
-  • Funny jokes or witty remarks
-  • Emotional stories that give chills
-  • Practical life-changing advice
-  • Behind-the-scenes secrets
-  • Bold predictions or claims
-
-**TIER 3 - GOOD TO INCLUDE**:
-  • Interesting facts or statistics
-  • Personal anecdotes with lessons
-  • "Aha!" moments or insights
-  • Topic introductions that hook viewers
-
-═══════════════════════════════════════════════════════════════
-📋 SELECTION PROCESS:
-═══════════════════════════════════════════════════════════════
-
-STEP 1: READ THE ENTIRE TRANSCRIPT
-- Identify ALL potentially viral moments
-- Mark moments where you felt: surprised, intrigued, entertained, or informed
-
-STEP 2: PRIORITIZE BY TIER
-- Start with Tier 1 moments (controversial, shocking)
-- Add Tier 2 moments (funny, emotional)
-- Fill remaining slots with Tier 3 (interesting, insightful)
-
-STEP 3: FOR EACH SELECTED MOMENT:
-a) Find the sentence containing the key moment
-b) Expand backwards: What context is needed? (usual: 1-3 sentences)
-c) Expand forwards: Is the thought complete? (usual: 1-2 sentences)
-d) Verify: Does this stand alone without prior video knowledge?
-e) Check duration: 15-180 seconds? (prefer 20-60s)
-
-STEP 4: APPLY BOUNDARIES
-- Use START_TIME of first sentence
-- Use END_TIME of last sentence
-- NEVER modify timestamps - use exact values from transcript
-
-═══════════════════════════════════════════════════════════════
-⚙️ TECHNICAL REQUIREMENTS:
-═══════════════════════════════════════════════════════════════
-
-Duration: 15-180 seconds (prefer 20-60 seconds)
-Count: {target_min} minimum, {target_max} maximum
-Distribution: Spread across beginning (25%), middle (50%), end (25%)
-Overlap: Clips should NOT overlap in time
-Quality: Every clip should be genuinely share-worthy
-
-═══════════════════════════════════════════════════════════════
-📝 EXAMPLES (SHOWING CORRECT BOUNDARY SELECTION):
-═══════════════════════════════════════════════════════════════
-
-EXAMPLE 1: Controversial Statement
-Transcript:
-[100.0 - 103.5] SPEAKER_A: So here's my controversial take.
-[103.5 - 108.2] SPEAKER_A: I think social media is actually making us happier, not sadder.
-[108.2 - 112.8] SPEAKER_A: Everyone says it's toxic, but I disagree completely.
-[112.8 - 115.0] SPEAKER_B: Wait, really?
-[115.0 - 120.5] SPEAKER_B: That's a hot take considering all the research.
-
-✅ CORRECT CLIP: {{"start_time": 100.0, "end_time": 120.5, "title": "Social Media Makes Us Happier?"}}
-   - Includes setup ("here's my controversial take")
-   - Includes full statement
-   - Includes reaction (adds context/tension)
-   - Uses exact sentence boundaries
-
-❌ WRONG: {{"start_time": 103.5, "end_time": 112.8"}}
-   - Missing setup context
-   - Cuts off mid-conversation (no reaction)
-
-EXAMPLE 2: Funny Moment
-Transcript:
-[200.0 - 205.3] SPEAKER_A: I tried to impress my date by cooking.
-[205.3 - 210.8] SPEAKER_A: I set off the fire alarm making toast.
-[210.8 - 213.5] SPEAKER_B: Toast? You set off the alarm with toast?
-[213.5 - 218.2] SPEAKER_A: In my defense, it was very crispy toast.
-
-✅ CORRECT CLIP: {{"start_time": 200.0, "end_time": 218.2, "title": "Fire Alarm From Toast"}}
-   - Complete story arc: setup → punchline → reaction → callback
-   - Natural ending after final joke
-
-═══════════════════════════════════════════════════════════════
-🎬 OUTPUT FORMAT:
-═══════════════════════════════════════════════════════════════
-
-Return ONLY a JSON array. Each clip must have:
-- start_time: EXACT timestamp from transcript (sentence START_TIME)
-- end_time: EXACT timestamp from transcript (sentence END_TIME)  
-- title: Compelling, curiosity-inducing title (4-8 words)
-
-Example:
-[
-  {{"start_time": 100.0, "end_time": 120.5, "title": "Why I Quit My $500K Job"}},
-  {{"start_time": 300.2, "end_time": 335.8, "title": "The Hardest Truth About Success"}}
-]
-
-═══════════════════════════════════════════════════════════════
-📊 TRANSCRIPT TO ANALYZE:
-═══════════════════════════════════════════════════════════════
-
-{transcript_text}
-
-═══════════════════════════════════════════════════════════════
-REMEMBER:
-- Use EXACT timestamps from sentences (don't create new ones)
-- NEVER cut mid-sentence or mid-word
-- Prioritize viral potential over number of clips
-- Each clip should make someone want to watch / share immediately
-═══════════════════════════════════════════════════════════════
-"""
+        Transcript to analyze:
+        {transcript_text}
+        """
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
