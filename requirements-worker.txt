@@ -1,5 +1,6 @@
 # Core dependencies for worker
 openai>=1.0.0
+assemblyai>=0.17.0
 openai-whisper>=20231117
 torch>=2.0.0
 opencv-python>=4.8.0
