@@ -34,7 +34,7 @@ from services.content_analysis import analyze_content
 from services.face_tracking import track_faces
 
 # Import services
-from services.transcription import load_model, transcribe_audio, transcribe_audio_sync
+# Note: Transcription now handled by AssemblyAI in worker.py
 from services.video_processing import create_clip, generate_thumbnail, process_video
 from services.user_video_service import create_user_video, update_video_s3_url, get_user_video, get_user_videos, get_user_clips, add_clip_to_video
 
@@ -1713,107 +1713,8 @@ async def process_podcast(
                 # Continue processing with empty transcript - don't fail
         except Exception as e:
             logging.error(f"Transcription failed: {str(e)}")
-
-            # Try one more time with CPU-only mode
-            logging.info("Retrying transcription with CPU-only mode")
-            try:
-                # Force CPU transcription by temporarily setting CUDA_VISIBLE_DEVICES
-                original_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-                os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-                # Reload the model on CPU
-                from services.transcription import load_model
-
-                cpu_model = load_model(model_size="tiny")
-
-                # Transcribe with CPU
-
-                audio_path = file_path
-                if not file_path.lower().endswith((".mp3", ".wav", ".flac", ".aac")):
-                    from services.transcription import extract_audio
-
-                    audio_path = extract_audio(file_path)
-
-                try:
-                    from services.transcription import safe_whisper_transcribe
-
-                    transcript = safe_whisper_transcribe(
-                        cpu_model, audio_path, fp16=False
-                    )
-                except Exception as transcribe_error:
-                    error_str = str(transcribe_error).lower()
-                    # Check for empty audio related errors
-                    if any(
-                        pattern in error_str
-                        for pattern in [
-                            "reshape tensor",
-                            "0 elements",
-                            "linear(",
-                            "unknown parameter type",
-                            "dimension size -1",
-                            "ambiguous",
-                            "in_features",
-                            "out_features",
-                            "cannot reshape",
-                            "unspecified dimension",
-                            "failed to load audio",
-                            "ffmpeg version",
-                            "could not open",
-                            "invalid data found",
-                        ]
-                    ):
-                        logging.info(
-                            "CPU transcription detected empty/silent audio - using empty transcript"
-                        )
-                        transcript = {"text": "", "segments": [], "language": "en"}
-                    else:
-                        raise transcribe_error
-
-                # Restore original CUDA settings
-                if original_cuda_devices is not None:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_devices
-                else:
-                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-
-                # Don't fail if we have empty segments - that's OK for silent videos
-                if not transcript:
-                    raise ValueError("CPU transcription returned None")
-
-                logging.info(
-                    f"CPU transcription completed with {len(transcript.get('segments', []))} segments"
-                )
-            except Exception as cpu_error:
-                logging.error(f"CPU transcription also failed: {str(cpu_error)}")
-
-                # If CPU also fails with empty audio errors, create empty transcript
-                error_str = str(cpu_error).lower()
-                if any(
-                    pattern in error_str
-                    for pattern in [
-                        "reshape tensor",
-                        "0 elements",
-                        "linear(",
-                        "unknown parameter type",
-                        "dimension size -1",
-                        "ambiguous",
-                        "in_features",
-                        "out_features",
-                        "cannot reshape",
-                        "unspecified dimension",
-                        "failed to load audio",
-                        "ffmpeg version",
-                        "could not open",
-                        "invalid data found",
-                    ]
-                ):
-                    logging.info(
-                        "Both transcription attempts failed with empty audio - proceeding with empty transcript"
-                    )
-                    transcript = {"text": "", "segments": [], "language": "en"}
-                else:
-                    raise ValueError(
-                        f"Transcription failed after multiple attempts: {str(e)}"
-                    )
+            # No fallback - transcription is handled by worker using AssemblyAI
+            raise ValueError(f"Transcription failed: {str(e)}")
 
         # Update task status
         tasks[task_id].update(
