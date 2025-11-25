@@ -290,6 +290,12 @@ class ClipItStack(Stack):
                     parameter_name="/clip-it/huggingface-token"
                 )
             ),
+            "ASSEMBLYAI_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "AssemblyAIAPIKeyRef",
+                    parameter_name="/clip-it/assemblyai-api-key"
+                )
+            ),
         }
 
         # Web service task definition
