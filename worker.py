@@ -21,8 +21,8 @@ from utils.youtube_downloader import download_youtube_video
 from logging_config import setup_logging
 import tempfile
 
-# Set up logging to backend.log file
-setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
+# Set up logging to worker.log file
+setup_logging(log_dir="logs", log_file="worker.log", log_level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Create directories
@@ -84,23 +84,21 @@ async def cleanup_old_files(max_age_hours: int = 24):
 
 
 async def initialize_worker():
-    """Initialize the worker with the Whisper model"""
-    global whisper_model
+    """Initialize the worker - verify AssemblyAI API key is configured"""
     try:
-        logger.info("Initializing worker - loading Whisper model...")
-        # Check for GPU availability
-        import torch
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda":
-            logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
-        else:
-            logger.warning("No GPU detected. Using CPU for transcription")
-
-        whisper_model = load_model(model_size="tiny")
-        logger.info("Worker initialized successfully.")
+        logger.info("🚀 Initializing worker with AssemblyAI...")
+        
+        # Verify AssemblyAI API key is configured
+        from config import settings
+        if not settings.ASSEMBLYAI_API_KEY:
+            raise ValueError("ASSEMBLYAI_API_KEY not configured in environment")
+        
+        logger.info("✅ Worker initialized successfully with AssemblyAI")
+        logger.info("📝 Transcription will use cloud-based AssemblyAI service")
+        
     except Exception as e:
-        logger.error(f"Error initializing worker: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error initializing worker: {str(e)}", exc_info=True)
+        raise
 
 
 async def process_youtube_download_job(job_id: str, job_data: dict):
