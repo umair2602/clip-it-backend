@@ -34,7 +34,6 @@ from services.content_analysis import analyze_content
 from services.face_tracking import track_faces
 
 # Import services
-# Note: Transcription now handled by AssemblyAI in worker.py
 from services.video_processing import create_clip, generate_thumbnail, process_video
 from services.user_video_service import create_user_video, update_video_s3_url, get_user_video, get_user_videos, get_user_clips, add_clip_to_video
 
@@ -241,14 +240,8 @@ def serve_tiktok_verification():
 
 
 
-# Pre-load the Whisper model
-whisper_model = None
-
-
 @app.on_event("startup")
 async def startup_event():
-    global whisper_model
-
     # Initialize MongoDB connection
     try:
         logging.info("Connecting to MongoDB...")
@@ -258,34 +251,6 @@ async def startup_event():
             logging.error("Failed to connect to MongoDB")
     except Exception as e:
         logging.error(f"Error connecting to MongoDB: {str(e)}")
-
-    # Pre-load Whisper model
-    try:
-        logging.info("Pre-loading Whisper model...")
-        # Check for GPU availability
-        import torch
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda":
-            logging.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
-            try:
-                logging.info(f"CUDA version: {torch.version.cuda}")
-            except AttributeError:
-                logging.info("CUDA version information not available")
-            logging.info(
-                f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB"
-            )
-        else:
-            logging.warning(
-                "No GPU detected. Using CPU for transcription (will be slower)"
-            )
-
-        whisper_model = load_model(model_size="tiny")
-        logging.info("Whisper model loaded successfully.")
-    except Exception as e:
-        logging.error(f"Error loading Whisper model: {str(e)}", exc_info=True)
-        # We'll continue without pre-loading and let the transcribe_audio function
-        # handle model loading when needed
 
 
 # Configure CORS
@@ -447,7 +412,7 @@ async def auth_endpoint(
 @app.get("/health")
 async def health_check():
     """Health check endpoint to verify the API is running"""
-    return {"status": "ok", "whisper_model_loaded": whisper_model is not None}
+    return {"status": "ok"}
 
 
 @app.get("/heartbeat")
@@ -642,6 +607,15 @@ async def get_status(task_id: str):
                     raw_data = {}
             video_id_in_job = raw_data.get("video_id")
 
+            # NOTE: previously we attempted to treat jobs whose referenced
+            # video_id could not be found in the DB as 'orphaned' and removed
+            # them from the Redis queue. This caused some valid new tasks to be
+            # marked orphaned prematurely (e.g. race conditions where the
+            # video doc wasn't present yet). That behavior has been removed
+            # to allow the unified background pipeline to proceed; the
+            # frontend already stops polling on explicit orphan responses
+            # from the backend when appropriate.
+
             # Attempt to fetch process_task_id from MongoDB if we have a video_id
             process_task_id = None
             if video_id_in_job:
@@ -665,7 +639,7 @@ async def get_status(task_id: str):
                 logging.info(f"   ↩️ Using task_id as process_task_id fallback: {process_task_id}")
 
             # Convert Redis job format to task response format with early process_task_id
-            response = {
+            return {
                 "status": job.get("status", "unknown"),
                 "progress": int(job.get("progress", 0)),
                 "message": job.get("message", ""),
@@ -674,46 +648,6 @@ async def get_status(task_id: str):
                 "created_at": job.get("created_at"),
                 "updated_at": job.get("updated_at"),
             }
-            
-            # If completed, fetch clips from MongoDB (for both YouTube and direct upload)
-            if job.get("status") == "completed" and video_id_in_job:
-                try:
-                    logging.info(f"   📦 Job completed - fetching clips from MongoDB for video: {video_id_in_job}")
-                    db = get_database()
-                    users_collection = db.users
-                    user_with_video = users_collection.find_one(
-                        {"videos.id": video_id_in_job}, {"videos.$": 1}
-                    )
-                    if user_with_video and user_with_video.get("videos"):
-                        video = user_with_video["videos"][0]
-                        clips = video.get("clips", [])
-                        response["clips_count"] = len(clips) if clips else 0
-                        
-                        # Format clips for frontend
-                        clips_formatted = []
-                        for clip_doc in clips:
-                            clip_data = {
-                                "id": str(clip_doc.get("id")),
-                                "title": clip_doc.get("title"),
-                                "start_time": clip_doc.get("start_time", 0),
-                                "end_time": clip_doc.get("end_time", 0),
-                                "duration": clip_doc.get("duration", 0),
-                                "s3_key": clip_doc.get("s3_key"),
-                                "s3_url": clip_doc.get("s3_url"),
-                                "thumbnail_url": clip_doc.get("thumbnail_url"),
-                                "transcription": clip_doc.get("transcription", ""),
-                            }
-                            clips_formatted.append(clip_data)
-                        
-                        response["clips"] = clips_formatted
-                        logging.info(f"   ✅ Added {len(clips_formatted)} clips to Redis response")
-                    else:
-                        logging.warning(f"   ⚠️ Video {video_id_in_job} not found in MongoDB")
-                except Exception as e:
-                    logging.warning(f"   ⚠️ Failed to fetch clips from MongoDB: {e}")
-                    # Don't fail the request if clip fetching fails
-            
-            return response
         
         # Priority 2: REMOVED in-memory tasks check (not safe for multi-instance)
         # Old code: if task_id in tasks: return tasks[task_id]
@@ -880,7 +814,7 @@ def get_progress_from_status(status: str) -> int:
         
         # Step 2: Transcribing
         "processing_started": 20,       # Starting processing
-        "transcribing": 30,             # Transcribing audio with Whisper
+        "transcribing": 30,             # Transcribing audio with AssemblyAI
         
         # Step 3: Finding interesting content
         "analyzing": 50,                # AI analyzing content for best moments
@@ -1642,7 +1576,7 @@ async def process_podcast(
     task_id: str, video_id: str, file_path: str, original_task_id: Optional[str] = None, user_id: str = None
 ):
     try:
-        global whisper_model
+
         logging.info(
             f"Starting podcast processing for task {task_id}, video {video_id}"
         )
@@ -1676,45 +1610,13 @@ async def process_podcast(
             print(f"Video file not found at path: {file_path}")
             raise FileNotFoundError(f"Video file not found at path: {file_path}")
 
-        # Transcribe the audio using the pre-loaded model
-        try:
-            # Make transcription non-blocking by running in thread pool
-            import asyncio
-            import functools
-            from concurrent.futures import ThreadPoolExecutor
-
-            # Use limited thread pool to prevent resource exhaustion
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="whisper-worker"
-            )
-            loop = asyncio.get_event_loop()
-
-            # Run transcription in separate thread to keep API responsive
-            transcript = await loop.run_in_executor(
-                executor, functools.partial(
-                    transcribe_audio_sync, 
-                    file_path, 
-                    "tiny",
-                    enable_diarization=True  # Enable speaker diarization
-                )
-            )
-            if not transcript:
-                raise ValueError("Transcription returned None")
-
-            # Print the transcript output to the console for debugging
-            print("\n--- TRANSCRIPTION OUTPUT ---\n", transcript, "\n--- END TRANSCRIPTION OUTPUT ---\n")
-
-            # Handle empty segments gracefully - this is valid for silent/corrupted videos
-            segments_count = len(transcript.get("segments", []))
-            logging.info(f"Transcription completed with {segments_count} segments")
-
-            if segments_count == 0:
-                logging.warning("Video appears to be silent or have no speech content")
-                # Continue processing with empty transcript - don't fail
-        except Exception as e:
-            logging.error(f"Transcription failed: {str(e)}")
-            # No fallback - transcription is handled by worker using AssemblyAI
-            raise ValueError(f"Transcription failed: {str(e)}")
+        # DEPRECATED: Transcription is now handled by worker.py using AssemblyAI
+        # This code path should never execute
+        logging.error("DEPRECATED: process_podcast transcription block reached")
+        raise ValueError(
+            "Transcription should be handled by worker service, not process_podcast. "
+            "This function is deprecated."
+        )
 
         # Update task status
         tasks[task_id].update(
@@ -2218,7 +2120,7 @@ async def generate_clip_task(
     title: Optional[str],
 ):
     try:
-        global whisper_model
+
         logging.info(
             f"Starting manual clip generation for task {task_id}, video {video_id}"
         )

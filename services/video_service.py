@@ -67,6 +67,7 @@ class VideoService:
             thumbnail_url=video.thumbnail_url,
             status=video.status,
             error_message=video.error_message,
+            process_task_id=video.process_task_id,
             created_at=video.created_at,
             updated_at=video.updated_at,
             processed_at=video.processed_at
@@ -142,6 +143,7 @@ class VideoService:
                     thumbnail_url=video.thumbnail_url,
                     status=video.status,
                     error_message=video.error_message,
+                    process_task_id=video.process_task_id,
                     created_at=video.created_at,
                     updated_at=video.updated_at,
                     processed_at=video.processed_at,
@@ -248,6 +250,7 @@ class VideoService:
                         thumbnail_url=video_model.thumbnail_url,
                         status=video_model.status,
                         error_message=video_model.error_message,
+                        process_task_id=video_model.process_task_id,
                         created_at=video_model.created_at,
                         updated_at=video_model.updated_at,
                         processed_at=video_model.processed_at,

@@ -275,7 +275,7 @@ async def get_video_history(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     video_type: Optional[VideoType] = Query(None, description="Filter by video type"),
-    status: Optional[VideoStatus] = Query(None, description="Filter by status")
+    status_filter: Optional[VideoStatus] = Query(None, description="Filter by status")
 ):
     """
     Get user's video upload and download history.
@@ -293,7 +293,7 @@ async def get_video_history(
             page=page,
             page_size=page_size,
             video_type=video_type,
-            status=status
+            status=status_filter
         )
         
         return history

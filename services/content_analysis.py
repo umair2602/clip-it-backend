@@ -23,7 +23,7 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Analyze transcript to identify engaging segments.
 
     Args:
-        transcript: Transcript from Whisper with segments and timestamps.
+        transcript: Transcript from AssemblyAI transcription service with segments and timestamps.
                    May include 'transcript_for_ai' field with speaker-labeled text.
 
     Returns:
