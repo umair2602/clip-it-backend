@@ -35,7 +35,7 @@ from services.face_tracking import track_faces
 
 # Import services
 from services.video_processing import create_clip, generate_thumbnail, process_video
-from services.user_video_service import create_user_video, update_video_s3_url, get_user_video, get_user_videos, get_user_clips, add_clip_to_video
+from services.user_video_service import create_user_video, update_video_s3_url, get_user_video, get_user_videos, get_user_clips, add_clip_to_video, update_user_video
 
 # Import S3 client and validator
 from utils.s3_storage import s3_client
@@ -551,6 +551,23 @@ async def upload_video(
             }
         )
         
+        # Update the video document with the process_task_id so frontend can poll it
+        # This matches the YouTube download flow
+        if created_video_id:
+            try:
+                await update_user_video(
+                    current_user.id,
+                    created_video_id,
+                    {
+                        "process_task_id": task_id,
+                        "job_id": task_id
+                    }
+                )
+                logging.info(f"✅ Updated video {created_video_id} with process_task_id: {task_id}")
+            except Exception as e:
+                logging.error(f"Failed to update video with process_task_id: {str(e)}")
+                # Don't fail the upload if this update fails
+        
         # Also store in tasks dict for backwards compatibility with /status endpoint
         tasks[task_id] = {
             "status": "processing",
@@ -567,6 +584,7 @@ async def upload_video(
             "filename": file.filename,
             "status": "processing",
             "task_id": task_id,
+            "process_task_id": task_id,  # Include process_task_id for frontend tracking
             "s3_url": s3_url
         }
         
