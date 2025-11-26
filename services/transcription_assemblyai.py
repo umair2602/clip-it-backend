@@ -1,7 +1,7 @@
 """
 AssemblyAI Transcription Service
 
-Provides transcription with native speaker diarization and sentence boundaries.
+Provides transcription with native speaker identification and sentence boundaries.
 This replaces Whisper for better clip boundary detection.
 """
 
@@ -21,7 +21,7 @@ async def transcribe_audio_assemblyai(
     **kwargs
 ) -> Dict[str, Any]:
     """
-    Transcribe audio using AssemblyAI with speaker diarization.
+    Transcribe audio using AssemblyAI with speaker labels.
     
     Args:
         audio_path: Path to the audio/video file
@@ -42,7 +42,7 @@ async def transcribe_audio_assemblyai(
         
         # Configure transcription settings
         config = aai.TranscriptionConfig(
-            speaker_labels=True,          # Enable speaker diarization
+            speaker_labels=True,          # Enable speaker labels
             punctuate=True,                # Add punctuation
             format_text=True,              # Format text properly
         )

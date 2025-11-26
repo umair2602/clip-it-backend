@@ -29,7 +29,7 @@ async def process_video(
 
     Args:
         video_path: Path to the video file
-        transcript: Transcript from Whisper
+        transcript: Transcript from AssemblyAI transcription service
         segments: List of engaging segments with start and end times
 
     Returns:

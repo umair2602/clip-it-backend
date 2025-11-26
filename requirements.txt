@@ -2,7 +2,6 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 openai>=1.0.0
-openai-whisper>=20231117
 torch>=2.0.0
 opencv-python>=4.8.0
 mediapipe>=0.10.7
@@ -35,7 +34,6 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 openai>=1.0.0
-openai-whisper>=20231117
 torch>=2.0.0
 opencv-python>=4.8.0
 mediapipe>=0.10.7
@@ -66,12 +64,3 @@ pytest>=7.4.0
 pytest-asyncio>=0.21.0
 respx>=0.20.0
 assemblyai>=0.17.0
-# Speaker diarization dependencies
-pyannote.audio
-pyannote.core
-pyannote.database
-pyannote.metrics
-soundfile  # Required for pyannote.audio to load audio files
-
-# WhisperX for word-level alignment with speaker diarization
-whisperx
