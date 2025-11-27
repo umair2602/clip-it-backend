@@ -67,6 +67,7 @@ class VideoService:
             thumbnail_url=video.thumbnail_url,
             status=video.status,
             error_message=video.error_message,
+            process_task_id=video.process_task_id,
             created_at=video.created_at,
             updated_at=video.updated_at,
             processed_at=video.processed_at
@@ -115,7 +116,17 @@ class VideoService:
             from services.user_video_service import get_user_video
             video = await get_user_video(user_id, video_id)
             if video:
-                # Convert VideoModel to Video response format
+                # Convert VideoModel to Video response format with clips
+                # Extract clips and convert ObjectIds to strings
+                clips = []
+                if video.clips:
+                    for clip in video.clips:
+                        clip_dict = clip.dict() if hasattr(clip, 'dict') else clip
+                        # Convert ObjectId to string if present
+                        if 'id' in clip_dict and hasattr(clip_dict['id'], '__str__'):
+                            clip_dict['id'] = str(clip_dict['id'])
+                        clips.append(clip_dict)
+                
                 return Video(
                     id=video.id,
                     user_id=user_id,
@@ -132,9 +143,11 @@ class VideoService:
                     thumbnail_url=video.thumbnail_url,
                     status=video.status,
                     error_message=video.error_message,
+                    process_task_id=video.process_task_id,
                     created_at=video.created_at,
                     updated_at=video.updated_at,
-                    processed_at=video.processed_at
+                    processed_at=video.processed_at,
+                    clips=clips
                 )
             
             # Fallback to old structure if not found in new structure
@@ -205,6 +218,22 @@ class VideoService:
                 # Convert VideoModel objects to Video response format
                 videos = []
                 for video_model in result["videos"]:
+                    # Convert clips to dict format
+                    clips_data = []
+                    for clip in video_model.clips:
+                        clip_dict = {
+                            "id": clip.id if hasattr(clip, 'id') else clip.get('id'),
+                            "title": clip.title if hasattr(clip, 'title') else clip.get('title'),
+                            "start_time": clip.start_time if hasattr(clip, 'start_time') else clip.get('start_time', 0),
+                            "end_time": clip.end_time if hasattr(clip, 'end_time') else clip.get('end_time', 0),
+                            "duration": clip.duration if hasattr(clip, 'duration') else clip.get('duration', 0),
+                            "s3_key": clip.s3_key if hasattr(clip, 's3_key') else clip.get('s3_key'),
+                            "s3_url": clip.s3_url if hasattr(clip, 's3_url') else clip.get('s3_url'),
+                            "thumbnail_url": clip.thumbnail_url if hasattr(clip, 'thumbnail_url') else clip.get('thumbnail_url'),
+                            "transcription": clip.transcription if hasattr(clip, 'transcription') else clip.get('transcription', ''),
+                        }
+                        clips_data.append(clip_dict)
+                    
                     video = Video(
                         id=video_model.id,
                         user_id=user_id,
@@ -221,9 +250,11 @@ class VideoService:
                         thumbnail_url=video_model.thumbnail_url,
                         status=video_model.status,
                         error_message=video_model.error_message,
+                        process_task_id=video_model.process_task_id,
                         created_at=video_model.created_at,
                         updated_at=video_model.updated_at,
-                        processed_at=video_model.processed_at
+                        processed_at=video_model.processed_at,
+                        clips=clips_data  # Include clips in response
                     )
                     videos.append(video)
                 

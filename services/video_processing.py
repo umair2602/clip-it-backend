@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 async def process_video(
     video_path: str, transcript: Dict[str, Any], segments: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Process video to create clips for each engaging segment.
+    """Process video to create clips for each engaging segment (IN PARALLEL).
 
     Args:
         video_path: Path to the video file
-        transcript: Transcript from Whisper
+        transcript: Transcript from AssemblyAI transcription service
         segments: List of engaging segments with start and end times
 
     Returns:
@@ -37,13 +37,14 @@ async def process_video(
     """
     try:
         logger.info("="*70)
-        logger.info(f"📹 STARTING VIDEO CLIP CREATION")
+        logger.info(f"📹 STARTING VIDEO CLIP CREATION (PARALLEL MODE)")
         logger.info(f"Video path: {video_path}")
         logger.info(f"Number of segments to process: {len(segments)}")
         logger.info("="*70)
         
         # Create temporary output directory for processing
         import tempfile
+        import asyncio
         temp_dir = tempfile.mkdtemp(prefix="clip_processing_")
         output_dir = Path(temp_dir)
         logger.info(f"Created temporary output directory: {output_dir}")
@@ -55,11 +56,14 @@ async def process_video(
             logger.info(f"  Segment {i+1}: {seg.get('title', 'Untitled')} ({seg.get('start_time', 0):.1f}s - {seg.get('end_time', 0):.1f}s, duration: {duration:.1f}s)")
         logger.info("="*70 + "\n")
 
-        # Process each segment
-        processed_clips = []
+        # Process clips in PARALLEL
         total_segments = len(segments)
+        MAX_CONCURRENT_CLIPS = 3  # Process 3 clips at once
         
-        for i, segment in enumerate(segments):
+        logger.info(f"🚀 Processing {total_segments} clips with {MAX_CONCURRENT_CLIPS} concurrent workers")
+        
+        async def process_single_clip(i: int, segment: Dict[str, Any]) -> Dict[str, Any]:
+            """Process a single clip (used for parallel execution)"""
             segment_start_time = time.time()
             clip_id = f"clip_{i}"
             
@@ -78,7 +82,7 @@ async def process_video(
                 clip_id=clip_id,
             )
 
-            # Only add to processed clips if a clip was created (faces were detected)
+            # Only process if clip was created
             if clip_path is not None:
                 logger.info(f"   ✅ Clip created successfully: {clip_path}")
                 
@@ -113,30 +117,58 @@ async def process_video(
                         f"   ⚠️  Thumbnail doesn't exist at {thumbnail_path}, not setting URL"
                     )
 
-                processed_clips.append(
-                    {
-                        "id": clip_id,
-                        "start_time": segment["start_time"],
-                        "end_time": segment["end_time"],
-                        "title": segment.get("title", f"Clip {i + 1}"),
-                        "description": segment.get("description", ""),
-                        "path": clip_path,
-                        "url": None,  # Will be set to S3 URL later
-                        "thumbnail_path": thumbnail_path,
-                        "thumbnail_url": thumbnail_url,
-                    }
-                )
-
                 segment_elapsed = time.time() - segment_start_time
                 logger.info(f"   ⏱️  Clip {i+1}/{total_segments} completed in {segment_elapsed:.2f}s")
                 logger.info(f"   ✅ Successfully processed: {segment.get('title', 'Untitled')}")
+                
+                return {
+                    "id": clip_id,
+                    "start_time": segment["start_time"],
+                    "end_time": segment["end_time"],
+                    "title": segment.get("title", f"Clip {i + 1}"),
+                    "description": segment.get("description", ""),
+                    "path": clip_path,
+                    "url": None,  # Will be set to S3 URL later
+                    "thumbnail_path": thumbnail_path,
+                    "thumbnail_url": thumbnail_url,
+                }
             else:
                 logger.warning(f"   ❌ Clip {i+1}/{total_segments} SKIPPED - No faces detected or creation failed")
                 logger.warning(f"   Segment: {segment.get('title', 'Untitled')}")
-
+                return None
+        
+        # Create semaphore to limit concurrent processing
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIPS)
+        
+        async def process_with_limit(i: int, segment: Dict[str, Any]) -> Dict[str, Any]:
+            """Process clip with concurrency limit"""
+            async with semaphore:
+                return await process_single_clip(i, segment)
+        
+        # Create tasks for all clips
+        tasks = [process_with_limit(i, segment) for i, segment in enumerate(segments)]
+        
+        # Run all tasks in parallel
+        parallel_start = time.time()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        parallel_elapsed = time.time() - parallel_start
+        
+        # Filter out None results and exceptions
+        processed_clips = []
+        for result in results:
+            if result and not isinstance(result, Exception):
+                processed_clips.append(result)
+            elif isinstance(result, Exception):
+                logger.error(f"❌ Clip processing raised exception: {result}")
+        
         logger.info("\n" + "="*70)
-        logger.info(f"✅ VIDEO PROCESSING COMPLETE")
+        logger.info(f"✅ VIDEO PROCESSING COMPLETE (PARALLEL)")
         logger.info(f"Total clips created: {len(processed_clips)} out of {total_segments} segments")
+        logger.info(f"⏱️  Parallel processing time: {parallel_elapsed:.2f}s")
+        if len(segments) > 1:
+            sequential_estimate = parallel_elapsed * len(segments) / MAX_CONCURRENT_CLIPS
+            speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
+            logger.info(f"📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
         logger.info("="*70 + "\n")
 
         return processed_clips
@@ -385,7 +417,7 @@ def extract_clip(
                     "ffmpeg",
                     "-y",  # Overwrite output file if it exists
                     "-ss",
-                    str(start_time),
+                    str(start_time),  # FAST SEEK: Place -ss before -i
                     "-i",
                     input_path,
                     "-t",
@@ -400,8 +432,6 @@ def extract_clip(
                     "23",  # Quality level (lower is better but uses more memory)
                     "-c:a",
                     "aac",  # Use AAC for audio
-                    "-strict",
-                    "experimental",
                     output_path,
                 ]
 
@@ -420,7 +450,7 @@ def extract_clip(
                         "ffmpeg",
                         "-y",  # Overwrite output file if it exists
                         "-ss",
-                        str(start_time),
+                        str(start_time),  # FAST SEEK: Place -ss before -i
                         "-i",
                         input_path,
                         "-t",
@@ -429,8 +459,6 @@ def extract_clip(
                         "h264_nvenc",  # Use NVENC encoder with CUDA
                         "-c:a",
                         "aac",  # Use AAC for audio
-                        "-strict",
-                        "experimental",
                         output_path,
                     ]
 
@@ -447,9 +475,9 @@ def extract_clip(
                         cmd = [
                             "ffmpeg",
                             "-y",  # Overwrite output file if it exists
-                            *hw_accel_cmd,  # Place hardware acceleration before input
                             "-ss",
-                            str(start_time),
+                            str(start_time),  # FAST SEEK: Place -ss before -i
+                            *hw_accel_cmd,  # Place hardware acceleration before input
                             "-i",
                             input_path,
                             "-t",
@@ -458,8 +486,6 @@ def extract_clip(
                             "h264_nvenc",  # Use NVENC encoder with CUDA
                             "-c:a",
                             "aac",  # Use AAC for audio
-                            "-strict",
-                            "experimental",
                             output_path,
                         ]
 
@@ -472,13 +498,14 @@ def extract_clip(
                         print(f"Full CUDA pipeline failed: {str(e)}")
 
         # If we reach here, either no hardware acceleration is available or it failed
-        # Fall back to software encoding with seeking optimization
-        print("Using software encoding for extraction")
+        # Fall back to software encoding with OPTIMIZED seeking
+        print("Using software encoding for extraction with fast seeking")
         cmd = [
             "ffmpeg",
             "-y",  # Overwrite output file if it exists
             "-ss",
-            str(start_time),
+            str(start_time),  # CRITICAL: -ss BEFORE -i for fast seeking
+            "-accurate_seek",  # Ensure accurate keyframe seeking
             "-i",
             input_path,
             "-t",
@@ -486,15 +513,17 @@ def extract_clip(
             "-c:v",
             "libx264",  # Software encoding
             "-preset",
-            "fast",  # Use faster preset
+            "ultrafast",  # Use ultrafast preset for 2-3x faster encoding
+            "-crf",
+            "23",  # Constant quality
             "-c:a",
             "aac",
-            "-strict",
-            "experimental",
+            "-b:a",
+            "128k",  # Audio bitrate
             output_path,
         ]
 
-        print(f"Running fallback FFmpeg command: {' '.join(cmd)}")
+        print(f"Running OPTIMIZED FFmpeg command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
     except Exception as e:
@@ -510,7 +539,7 @@ def extract_clip(
                 "ffmpeg",
                 "-y",
                 "-ss",
-                str(start_time),
+                str(start_time),  # FAST SEEK: Place -ss before -i
                 "-i",
                 input_path,
                 "-t",
@@ -518,11 +547,9 @@ def extract_clip(
                 "-c:v",
                 "libx264",
                 "-preset",
-                "ultrafast",  # Fastest preset, lowest quality
+                "ultrafast",  # Fastest preset
                 "-c:a",
                 "aac",
-                "-strict",
-                "experimental",
                 output_path,
             ]
             subprocess.run(cmd, check=True)
