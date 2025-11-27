@@ -385,7 +385,7 @@ def extract_clip(
                     "ffmpeg",
                     "-y",  # Overwrite output file if it exists
                     "-ss",
-                    str(start_time),
+                    str(start_time),  # FAST SEEK: Place -ss before -i
                     "-i",
                     input_path,
                     "-t",
@@ -400,8 +400,6 @@ def extract_clip(
                     "23",  # Quality level (lower is better but uses more memory)
                     "-c:a",
                     "aac",  # Use AAC for audio
-                    "-strict",
-                    "experimental",
                     output_path,
                 ]
 
@@ -420,7 +418,7 @@ def extract_clip(
                         "ffmpeg",
                         "-y",  # Overwrite output file if it exists
                         "-ss",
-                        str(start_time),
+                        str(start_time),  # FAST SEEK: Place -ss before -i
                         "-i",
                         input_path,
                         "-t",
@@ -429,8 +427,6 @@ def extract_clip(
                         "h264_nvenc",  # Use NVENC encoder with CUDA
                         "-c:a",
                         "aac",  # Use AAC for audio
-                        "-strict",
-                        "experimental",
                         output_path,
                     ]
 
@@ -447,9 +443,9 @@ def extract_clip(
                         cmd = [
                             "ffmpeg",
                             "-y",  # Overwrite output file if it exists
-                            *hw_accel_cmd,  # Place hardware acceleration before input
                             "-ss",
-                            str(start_time),
+                            str(start_time),  # FAST SEEK: Place -ss before -i
+                            *hw_accel_cmd,  # Place hardware acceleration before input
                             "-i",
                             input_path,
                             "-t",
@@ -458,8 +454,6 @@ def extract_clip(
                             "h264_nvenc",  # Use NVENC encoder with CUDA
                             "-c:a",
                             "aac",  # Use AAC for audio
-                            "-strict",
-                            "experimental",
                             output_path,
                         ]
 
@@ -472,13 +466,14 @@ def extract_clip(
                         print(f"Full CUDA pipeline failed: {str(e)}")
 
         # If we reach here, either no hardware acceleration is available or it failed
-        # Fall back to software encoding with seeking optimization
-        print("Using software encoding for extraction")
+        # Fall back to software encoding with OPTIMIZED seeking
+        print("Using software encoding for extraction with fast seeking")
         cmd = [
             "ffmpeg",
             "-y",  # Overwrite output file if it exists
             "-ss",
-            str(start_time),
+            str(start_time),  # CRITICAL: -ss BEFORE -i for fast seeking
+            "-accurate_seek",  # Ensure accurate keyframe seeking
             "-i",
             input_path,
             "-t",
@@ -486,15 +481,17 @@ def extract_clip(
             "-c:v",
             "libx264",  # Software encoding
             "-preset",
-            "fast",  # Use faster preset
+            "ultrafast",  # Use ultrafast preset for 2-3x faster encoding
+            "-crf",
+            "23",  # Constant quality
             "-c:a",
             "aac",
-            "-strict",
-            "experimental",
+            "-b:a",
+            "128k",  # Audio bitrate
             output_path,
         ]
 
-        print(f"Running fallback FFmpeg command: {' '.join(cmd)}")
+        print(f"Running OPTIMIZED FFmpeg command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
     except Exception as e:
@@ -510,7 +507,7 @@ def extract_clip(
                 "ffmpeg",
                 "-y",
                 "-ss",
-                str(start_time),
+                str(start_time),  # FAST SEEK: Place -ss before -i
                 "-i",
                 input_path,
                 "-t",
@@ -518,11 +515,9 @@ def extract_clip(
                 "-c:v",
                 "libx264",
                 "-preset",
-                "ultrafast",  # Fastest preset, lowest quality
+                "ultrafast",  # Fastest preset
                 "-c:a",
                 "aac",
-                "-strict",
-                "experimental",
                 output_path,
             ]
             subprocess.run(cmd, check=True)
