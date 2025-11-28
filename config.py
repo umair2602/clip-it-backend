@@ -130,7 +130,7 @@ class Settings:
     #youtube
     YOUTUBE_CLIENT_ID = clean_env_value(get_secret("/clip-it/youtube-client-id", "YOUTUBE_CLIENT_ID", "784400682902-masbc207h16jkjf6hhlbdap8pkcn5p2i.apps.googleusercontent.com"))
     YOUTUBE_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/youtube-client-secret", "YOUTUBE_CLIENT_SECRET", "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"))
-    YOUTUBE_REDIRECT_URI = clean_env_value(get_secret("/clip-it/youtube-redirect-uri", "YOUTUBE_REDIRECT_URI", "http://localhost:8000/youtube/callback"))
+    YOUTUBE_REDIRECT_URI = clean_env_value(get_secret("/clip-it/youtube-redirect-uri", "YOUTUBE_REDIRECT_URI", "https://api.klipz.ai/youtube/callback"))
     YOUTUBE_SCOPES = [
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/userinfo.profile",
