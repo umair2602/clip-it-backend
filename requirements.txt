@@ -64,3 +64,8 @@ pytest>=7.4.0
 pytest-asyncio>=0.21.0
 respx>=0.20.0
 assemblyai>=0.17.0
+
+# Google API client
+google-auth
+google-auth-oauthlib
+google-api-python-client

@@ -52,6 +52,7 @@ from routes.auth import router as auth_router, get_current_user
 # Import video routes
 from routes.video import router as video_router
 from routes.tiktok import router as tiktok_router
+from routes.youtube import router as youtube_router
 
 # Import models
 from models.user import User, VideoType, VideoStatus
@@ -224,6 +225,9 @@ app.include_router(video_router)
 
 # Include TikTok routes
 app.include_router(tiktok_router)
+
+# Include YouTube routes
+app.include_router(youtube_router)
 
 # TikTok site verification
 VERIFICATION_FILENAME = "tiktok4QPEpS6YFmd4DmFfdr2Kjw4YKsWvEWky.txt"
