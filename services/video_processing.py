@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 # Import other services
-# face tracking removed to simplify and speed up clip creation
+from services.face_tracking import get_face_coordinates, track_faces
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import settings
@@ -345,7 +345,50 @@ async def create_clip(
 #         raise
 
 
-# face-detection helpers removed — pipeline simplified to center crop/letterbox
+def find_continuous_face_segments(
+    face_tracking_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Find continuous segments where faces are detected.
+
+    Args:
+        face_tracking_data: List of face tracking data for each frame
+
+    Returns:
+        List of segments with start and end frames where faces are continuously detected
+    """
+    segments = []
+    current_segment = None
+
+    # Minimum number of consecutive frames with faces to consider a valid segment
+    min_segment_length = 15  # Approximately half a second at 30fps
+
+    for i, frame_data in enumerate(face_tracking_data):
+        has_face = bool(frame_data.get("faces"))
+
+        if has_face:
+            # Start a new segment or continue the current one
+            if current_segment is None:
+                current_segment = {"start_frame": i, "end_frame": i}
+            else:
+                current_segment["end_frame"] = i
+        elif current_segment is not None:
+            # End of a segment, check if it's long enough
+            segment_length = (
+                current_segment["end_frame"] - current_segment["start_frame"] + 1
+            )
+            if segment_length >= min_segment_length:
+                segments.append(current_segment)
+            current_segment = None
+
+    # Don't forget the last segment if it's still open
+    if current_segment is not None:
+        segment_length = (
+            current_segment["end_frame"] - current_segment["start_frame"] + 1
+        )
+        if segment_length >= min_segment_length:
+            segments.append(current_segment)
+
+    return segments
 
 
 def extract_clip(
@@ -637,63 +680,273 @@ def get_hardware_acceleration_cmd():
         return []
 
 
-def convert_to_vertical(input_path: str, output_path: str) -> None:
-    """Convert video to vertical (9:16) format using a simple center crop or letterbox.
+def convert_to_vertical(
+    input_path: str, output_path: str, face_tracking_data: List[Dict[str, Any]]
+) -> None:
+    """Convert video to vertical format with face tracking.
 
-    This simplified version does not use face-tracking. It calculates a center crop
-    (or pads if needed) and performs a single ffmpeg pass to produce the output.
+    Args:
+        input_path: Path to the input video
+        output_path: Path to save the output clip
+        face_tracking_data: Face tracking data for each frame
     """
     try:
         # Get video properties
         cap = cv2.VideoCapture(input_path)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
 
-        # Target portrait dimensions (1080x1920)
-        target_width = 1080
-        target_height = 1920
+        # Calculate target dimensions (9:16 aspect ratio)
+        target_width = int(height * 9 / 16)
+        # Ensure even width for video encoder compatibility (libx264 requires even dimensions)
+        if target_width % 2 != 0:
+            target_width -= 1
 
-        # Compute crop width to preserve full height and achieve 9:16 (width = height * 9/16)
-        crop_width = int(height * 9 / 16)
-        if crop_width % 2 != 0:
-            crop_width -= 1
-
-        # Bound crop width to video width
-        if crop_width > width:
-            # Not enough width: we'll letterbox/pad instead of crop
-            vf = f"scale=iw*min({target_width}/iw\,{target_height}/ih):ih*min({target_width}/iw\,{target_height}/ih),pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2"
+        # Determine if we need to crop or pad
+        if target_width <= width:
+            # Need to crop horizontally
+            crop_width = target_width
+            crop_height = height
+            pad_width = 0
+            pad_height = 0
         else:
-            # Center crop horizontally then scale/pad to target
-            x_offset = max(0, (width - crop_width) // 2)
-            # Ensure even offsets
-            if x_offset % 2 != 0:
-                x_offset -= 1
-            vf = f"crop={crop_width}:{height}:{x_offset}:0,scale=iw*min({target_width}/iw\,{target_height}/ih):ih*min({target_width}/iw\,{target_height}/ih),pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2"
+            # Need to pad horizontally
+            crop_width = width
+            crop_height = height
+            pad_width = target_width - width
+            pad_height = 0
 
-        # Run a single ffmpeg pass to perform crop/scale/pad
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            input_path,
-            "-vf",
-            vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "copy",
-            output_path,
-        ]
+        # Get hardware acceleration command
+        hw_accel_cmd = get_hardware_acceleration_cmd()
 
-        print(f"Running vertical conversion (center crop/letterbox): {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
+        if face_tracking_data and any(
+            frame.get("faces") for frame in face_tracking_data
+        ):
+            # Use face tracking to determine crop position
+            print("Using face tracking data for dynamic cropping")
+
+            # Create a temporary file for the cropped video
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+                temp_path = temp_file.name
+
+            # Extract face positions for each frame
+            face_positions = []
+            for frame in face_tracking_data:
+                faces = frame.get("faces", [])
+                if faces:
+                    # Use the average x-coordinate of all faces
+                    avg_x = sum(face.get("x", 0.5) for face in faces) / len(faces)
+                    face_positions.append(avg_x)
+                else:
+                    # Default to center if no faces detected
+                    face_positions.append(0.5)
+
+            # Smooth the face positions to avoid jerky movements
+            smoothed_positions = smooth_positions(face_positions, window_size=15)
+
+            # SIMPLIFIED: Use average face position instead of frame-by-frame tracking
+            # Calculate average face position to avoid complex FFmpeg filters
+            if smoothed_positions:
+                avg_face_position = sum(smoothed_positions) / len(smoothed_positions)
+            else:
+                avg_face_position = 0.5  # Center fallback
+
+            # Calculate single crop position based on average
+            max_x_offset = max(0, width - crop_width)
+            center_x = int(avg_face_position * width)
+            x_offset = max(0, min(center_x - crop_width // 2, max_x_offset))
+
+            print(
+                f"Smart crop: avg face position {avg_face_position:.2f}, crop offset: {x_offset}"
+            )
+
+            # Use simple crop filter instead of complex frame-by-frame filter
+            filter_complex = (
+                f"[0:v]crop={crop_width}:{crop_height}:{x_offset}:0[cropped]"
+            )
+
+            try:
+                # Apply the dynamic cropping
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    *hw_accel_cmd,  # Hardware acceleration before input
+                    "-i",
+                    input_path,
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[cropped]",
+                    "-map",
+                    "0:a",
+                    "-c:a",
+                    "copy",
+                    temp_path,
+                ]
+
+                print(f"Running dynamic cropping: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+
+                # Now convert the cropped video to vertical format
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    *hw_accel_cmd,  # Hardware acceleration before input
+                    "-i",
+                    temp_path,
+                    "-vf",
+                    f"scale={target_width}:{height}",
+                    "-c:a",
+                    "copy",
+                    output_path,
+                ]
+
+                print(f"Running vertical conversion: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"Error with hardware acceleration: {e}")
+                print("Falling back to software encoding")
+
+                # Fallback to software encoding
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    input_path,
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[cropped]",
+                    "-map",
+                    "0:a",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "copy",
+                    temp_path,
+                ]
+
+                print(f"Running fallback dynamic cropping: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+
+                # Convert to vertical format with software encoding
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    temp_path,
+                    "-vf",
+                    f"scale={target_width}:{height}",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "copy",
+                    output_path,
+                ]
+
+                print(f"Running fallback vertical conversion: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+
+            # Clean up temporary file
+            os.unlink(temp_path)
+
+        else:
+            # No face tracking data, use center crop
+            print("No face tracking data available, using center crop")
+
+            # Calculate crop position (center crop) with bounds checking
+            max_x_offset = max(0, width - crop_width)
+            max_y_offset = max(0, height - crop_height)
+            x_offset = min(max_x_offset, (width - crop_width) // 2)
+            y_offset = min(max_y_offset, (height - crop_height) // 2)
+
+            # Ensure crop dimensions don't exceed video dimensions
+            actual_crop_width = min(crop_width, width)
+            actual_crop_height = min(crop_height, height)
+
+            # Ensure even dimensions for video encoder compatibility
+            if actual_crop_width % 2 != 0:
+                actual_crop_width -= 1
+            if actual_crop_height % 2 != 0:
+                actual_crop_height -= 1
+
+            print(f"Video dimensions: {width}x{height}")
+            print(
+                f"Crop settings: {actual_crop_width}x{actual_crop_height} at ({x_offset},{y_offset})"
+            )
+
+            try:
+                # Apply the center crop and convert to vertical format
+                # Check if we have CUDA acceleration
+                if hw_accel_cmd and "cuda" in " ".join(hw_accel_cmd):
+                    # When using CUDA acceleration, just use hardware decoding but do processing in CPU
+                    # This avoids format conversion issues between CUDA memory and filters
+                    cmd = [
+                        "ffmpeg",
+                        "-y",
+                        "-hwaccel",
+                        "cuda",  # Use CUDA for decoding only, don't set -hwaccel_output_format cuda
+                        "-i",
+                        input_path,
+                        "-vf",
+                        f"crop={actual_crop_width}:{actual_crop_height}:{x_offset}:{y_offset},scale={target_width}:{height}",
+                        "-c:v",
+                        "h264_nvenc",  # Use NVENC encoder
+                        "-preset",
+                        "p1",  # Lower latency preset
+                        "-c:a",
+                        "copy",
+                        output_path,
+                    ]
+                else:
+                    # Without hardware acceleration - use safer parameters
+                    cmd = [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        input_path,
+                        "-vf",
+                        f"crop={actual_crop_width}:{actual_crop_height}:{x_offset}:{y_offset},scale={target_width}:{height}",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "medium",
+                        "-crf",
+                        "23",  # Good quality
+                        "-pix_fmt",
+                        "yuv420p",  # Ensure compatible pixel format
+                        "-c:a",
+                        "copy",
+                        output_path,
+                    ]
+
+                print(f"Running center crop and vertical conversion: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"Error with hardware acceleration: {e}")
+                print("Falling back to software encoding")
+
+                # Fallback to software encoding
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    input_path,
+                    "-vf",
+                    f"crop={actual_crop_width}:{actual_crop_height}:{x_offset}:{y_offset},scale={target_width}:{height}",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "copy",
+                    output_path,
+                ]
+
+                print(
+                    f"Running fallback center crop and vertical conversion: {' '.join(cmd)}"
+                )
+                subprocess.run(cmd, check=True)
 
     except Exception as e:
         print(f"Error in convert_to_vertical: {str(e)}")
@@ -1000,3 +1253,30 @@ async def generate_thumbnail(
         raise RuntimeError(f"Failed to generate thumbnail at {abs_output_path}")
 
 
+def smooth_positions(positions, window_size=15):
+    """Smooth an array of positions using a moving average to prevent jerky camera movement.
+
+    Args:
+        positions: List of position values (typically between 0 and 1)
+        window_size: Size of the smoothing window
+
+    Returns:
+        List of smoothed positions
+    """
+    if not positions:
+        return []
+
+    # Pad the beginning and end with the first and last values
+    padded = (
+        [positions[0]] * (window_size // 2)
+        + positions
+        + [positions[-1]] * (window_size // 2)
+    )
+
+    # Apply moving average
+    smoothed = []
+    for i in range(len(positions)):
+        window = padded[i : i + window_size]
+        smoothed.append(sum(window) / len(window))
+
+    return smoothed

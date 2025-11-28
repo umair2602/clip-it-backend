@@ -9,8 +9,6 @@ import logging
 from typing import Dict, List, Any
 import assemblyai as aai
 from config import settings
-import time
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +39,6 @@ async def transcribe_audio_assemblyai(
     """
     try:
         logger.info(f"🎙️ Starting AssemblyAI transcription for: {audio_path}")
-        # Log file size and basic info to help diagnose slow uploads
-        try:
-            file_size = os.path.getsize(audio_path)
-            logger.info(f"   File size: {file_size / (1024*1024):.2f} MB")
-        except Exception:
-            logger.info("   File size: unknown")
-        overall_start = time.time()
         
         # Configure transcription settings
         config = aai.TranscriptionConfig(
@@ -56,46 +47,24 @@ async def transcribe_audio_assemblyai(
             format_text=True,              # Format text properly
         )
         
-        # Create transcriber
-        t0 = time.time()
+        # Create transcriber and transcribe
         transcriber = aai.Transcriber()
-        logger.info(f"   Transcriber initialized in {time.time()-t0:.2f}s")
-
-        # Start transcription (this handles upload + processing internally)
-        t_start_transcribe = time.time()
-        logger.info("   Uploading and submitting file to AssemblyAI (this may take some time)...")
         transcript = transcriber.transcribe(audio_path, config=config)
-        t_end_transcribe = time.time()
-        logger.info(f"   AssemblyAI transcribe() returned in {t_end_transcribe - t_start_transcribe:.2f}s")
         
         # Check for errors
         if transcript.status == aai.TranscriptStatus.error:
             raise Exception(f"Transcription failed: {transcript.error}")
         
-        logger.info(f"✅ AssemblyAI transcription completed (status={getattr(transcript,'status',None)})")
-        # Try to log a few useful SDK fields if present
-        try:
-            audio_duration = getattr(transcript, 'audio_duration', None)
-            if audio_duration is not None:
-                logger.info(f"   Audio duration (ms): {audio_duration} -> {audio_duration/1000:.1f}s")
-        except Exception:
-            pass
-        try:
-            confidence = getattr(transcript, 'confidence', None)
-            if confidence is not None:
-                logger.info(f"   Confidence: {confidence * 100:.1f}%")
-        except Exception:
-            pass
-        logger.info(f"   Total transcription (upload+process) elapsed: {time.time() - overall_start:.2f}s")
+        logger.info(f"✅ AssemblyAI transcription completed")
+        logger.info(f"   Duration: {transcript.audio_duration / 1000:.1f}s")
+        logger.info(f"   Confidence: {transcript.confidence * 100:.1f}%")
         
         # Extract full text
-        t_segments_start = time.time()
         full_text = transcript.text
         
         # Convert words to segments (compatible with existing code)
         segments = []
-        # Build word-level segments
-        for word in getattr(transcript, 'words', []):
+        for word in transcript.words:
             segments.append({
                 'start': word.start / 1000,  # Convert ms to seconds
                 'end': word.end / 1000,
@@ -108,19 +77,16 @@ async def transcribe_audio_assemblyai(
         sentences = []
         speakers = set()
         
-        # Sentence-level utterances with speaker labels
-        for utterance in getattr(transcript, 'utterances', []) or []:
-            sentences.append({
-                'start': utterance.start / 1000,
-                'end': utterance.end / 1000,
-                'text': utterance.text,
-                'speaker': utterance.speaker,
-                'confidence': utterance.confidence
-            })
-            speakers.add(utterance.speaker)
-
-        t_segments_end = time.time()
-        logger.info(f"   Segment/sentence extraction time: {t_segments_end - t_segments_start:.2f}s")
+        if transcript.utterances:
+            for utterance in transcript.utterances:
+                sentences.append({
+                    'start': utterance.start / 1000,
+                    'end': utterance.end / 1000,
+                    'text': utterance.text,
+                    'speaker': utterance.speaker,
+                    'confidence': utterance.confidence
+                })
+                speakers.add(utterance.speaker)
         
         # Format transcript for AI analysis (with speaker labels)
         transcript_for_ai = ""
@@ -135,7 +101,6 @@ async def transcribe_audio_assemblyai(
         logger.info(f"   Total words: {len(segments)}")
         logger.info(f"   Total sentences: {len(sentences)}")
         logger.info(f"   Speakers detected: {len(speakers)}")
-        logger.info(f"   Total transcription end-to-end time: {time.time() - overall_start:.2f}s")
         
         return {
             'text': full_text,
