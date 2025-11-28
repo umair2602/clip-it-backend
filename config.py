@@ -128,8 +128,8 @@ class Settings:
     PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
 
     #youtube
-    YOUTUBE_CLIENT_ID = clean_env_value(get_secret("/clip-it/youtube-client-id", "YOUTUBE_CLIENT_ID", "your_youtube_client_id"))
-    YOUTUBE_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/youtube-client-secret", "YOUTUBE_CLIENT_SECRET", "your_youtube_client_secret"))
+    YOUTUBE_CLIENT_ID = clean_env_value(get_secret("/clip-it/youtube-client-id", "YOUTUBE_CLIENT_ID", "784400682902-masbc207h16jkjf6hhlbdap8pkcn5p2i.apps.googleusercontent.com"))
+    YOUTUBE_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/youtube-client-secret", "YOUTUBE_CLIENT_SECRET", "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"))
     YOUTUBE_REDIRECT_URI = clean_env_value(get_secret("/clip-it/youtube-redirect-uri", "YOUTUBE_REDIRECT_URI", "http://localhost:8000/youtube/callback"))
     YOUTUBE_SCOPES = [
         "https://www.googleapis.com/auth/youtube.upload",
