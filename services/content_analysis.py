@@ -408,11 +408,13 @@ async def identify_engaging_segments(
         total_duration = 0.0
         total_minutes = 0
 
-    # Compute dynamic target clip counts (conservative formula for quality over quantity)
-    # Rough density: ~1 clip per 6 minutes, scaled down for all video lengths
-    rough_target = min(max(2, int(total_duration / 360)), settings.MAX_CLIPS_PER_EPISODE) if total_duration > 0 else 2
-    target_min = min(rough_target, 3)  # Start with 2-3 clips minimum
-    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Add only 2 more for range
+    # Compute dynamic target clip counts (balanced formula for good coverage)
+    # Rough density: ~1 clip per 2.5 minutes for comprehensive coverage
+    rough_target = min(max(4, int(total_duration / 150)), settings.MAX_CLIPS_PER_EPISODE) if total_duration > 0 else 4
+    # For videos over 30 mins, ensure minimum of 8 clips
+    target_min = 8 if total_minutes >= 30 else max(4, min(rough_target - 1, 6))
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Tight range near target
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Tight range near target
 
     # Log targets
     logger.info(f"Clip targets: duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
