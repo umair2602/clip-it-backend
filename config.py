@@ -84,7 +84,7 @@ class Settings:
     MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-180 second range for complete context)
     MAX_CLIP_DURATION = 180 # Maximum clip duration in seconds (3 minutes for in-depth conversations)
     PREFERRED_CLIP_DURATION = 45  # Preferred clip duration in seconds (45 sec for complete thoughts)
-    MAX_CLIPS_PER_EPISODE = 40  # Limit to 40 clips per episode to manage processing load
+    MAX_CLIPS_PER_EPISODE = 10  # Limit to 10 clips per episode for quality over quantity
     
     # Video settings
     OUTPUT_WIDTH = 1080  # Width for vertical video (9:16 aspect ratio)

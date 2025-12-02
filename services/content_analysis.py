@@ -120,11 +120,11 @@ async def identify_engaging_segments_from_text(
         total_duration = 0.0
         total_minutes = 0
 
-    # Compute dynamic target clip counts (aiming for many clips on long videos)
-    # Rough density: ~1 clip per 2 minutes, clamped to MAX_CLIPS_PER_EPISODE
-    rough_target = int(total_duration / 120) if total_duration > 0 else 6
-    target_min = max(6 if total_minutes < 20 else 8, min(rough_target, settings.MAX_CLIPS_PER_EPISODE))
-    target_max = min(target_min + 10, settings.MAX_CLIPS_PER_EPISODE)
+    # Compute dynamic target clip counts (conservative formula for quality over quantity)
+    # Rough density: ~1 clip per 3-4 minutes, scaled down for all video lengths
+    rough_target = max(2, int(total_duration / 180)) if total_duration > 0 else 2
+    target_min = min(rough_target, 3)  # Start with 2-3 clips minimum
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Add only 2 more for range
 
     # Log targets
     logger.info(f"Clip targets (speaker-labeled): duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
@@ -408,9 +408,11 @@ async def identify_engaging_segments(
         total_duration = 0.0
         total_minutes = 0
 
-    rough_target = int(total_duration / 120) if total_duration > 0 else 6
-    target_min = max(6 if total_minutes < 20 else 8, min(rough_target, settings.MAX_CLIPS_PER_EPISODE))
-    target_max = min(target_min + 10, settings.MAX_CLIPS_PER_EPISODE)
+    # Compute dynamic target clip counts (conservative formula for quality over quantity)
+    # Rough density: ~1 clip per 6 minutes, scaled down for all video lengths
+    rough_target = min(max(2, int(total_duration / 360)), settings.MAX_CLIPS_PER_EPISODE) if total_duration > 0 else 2
+    target_min = min(rough_target, 3)  # Start with 2-3 clips minimum
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Add only 2 more for range
 
     # Log targets
     logger.info(f"Clip targets: duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
