@@ -138,17 +138,31 @@ class TikTokPostRequest(BaseModel):
     """Request model for posting to TikTok"""
 
     title: str = Field(..., max_length=150, description="Video title")
+    caption: Optional[str] = Field(None, description="Caption text")
+    hashtags: Optional[str] = Field(None, description="Hashtags, space or comma separated")
+    
     video_url: str = Field(..., description="S3 URL of the video to post")
+    
     privacy_level: str = Field(
         "PUBLIC_TO_EVERYONE",
         description="Privacy level: PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, SELF_ONLY",
     )
+    
     disable_duet: bool = Field(False, description="Disable duet")
     disable_comment: bool = Field(False, description="Disable comments")
     disable_stitch: bool = Field(False, description="Disable stitch")
+    
     video_cover_timestamp_ms: Optional[int] = Field(
         None, description="Video cover timestamp in milliseconds"
     )
+
+    schedule_date: Optional[str] = Field(
+        None, description="Scheduled date in YYYY-MM-DD format"
+    )
+    schedule_time: Optional[str] = Field(
+        None, description="Scheduled time in HH:MM format (24h)"
+    )
+
 
 
 class TikTokPostResponse(BaseModel):
@@ -982,175 +996,6 @@ async def get_creator_info(current_user: Dict[str, Any] = Depends(get_current_us
         logger.error(f"Error getting creator info: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
-# @router.post("/post/video", response_model=TikTokPostResponse)
-# async def post_video_to_tiktok(
-#     post_request: TikTokPostRequest,
-#     current_user: Dict[str, Any] = Depends(get_current_user),
-# ):
-#     """Post a video to TikTok using PULL_FROM_URL from S3"""
-
-#     # --- ADD THIS ---
-#     user_id = _extract_user_id(current_user)
-#     logger.info(f"POST /post/video called by user_id: {user_id}")
-#     logger.info(f"Post request payload: {post_request.dict() if hasattr(post_request, 'dict') else post_request}")
-
-#     try:
-#         user_id = _extract_user_id(current_user)
-#         if not user_id:
-#             raise HTTPException(status_code=401, detail="Invalid user context")
-
-#         tokens = await _refresh_if_needed(user_id)
-#         logger.info(f"Using TikTok access token: {tokens['access_token']}")
-
-#         # Validate video URL
-#         video_url = await _validate_video_url(post_request.video_url)
-#         await _preflight_check_video_url(video_url)
-
-#         # Fetch creator info to validate privacy level and constraints
-#         allowed_privacy_levels: List[str] = []
-#         creator_constraints: Dict[str, Any] = {}
-#         try:
-#             async with httpx.AsyncClient() as client:
-#                 ci_resp = await client.post(
-#                     f"{settings.TIKTOK_API_BASE}/post/publish/creator_info/query/",
-#                     headers={
-#                         "Authorization": f"Bearer {tokens['access_token']}",
-#                         "Content-Type": "application/json; charset=UTF-8",
-#                     },
-#                     json={},
-#                 )
-#                 if ci_resp.status_code == 200:
-#                     ci_json = ci_resp.json()
-#                     data = ci_json.get("data", {})
-#                     allowed_privacy_levels = data.get("privacy_level_options", []) or []
-#                     creator_constraints = {
-#                         "comment_disabled": data.get("comment_disabled", False),
-#                         "duet_disabled": data.get("duet_disabled", False),
-#                         "stitch_disabled": data.get("stitch_disabled", False),
-#                         "max_video_post_duration_sec": data.get(
-#                             "max_video_post_duration_sec"
-#                         ),
-#                     }
-#                 else:
-#                     logger.warning(
-#                         f"creator_info query failed ({ci_resp.status_code}): {ci_resp.text}"
-#                     )
-#         except Exception as e:
-#             logger.warning(f"creator_info query error: {e}")
-
-#         # If creator_info provided options, enforce them to avoid TikTok 403
-#         if allowed_privacy_levels:
-#             if post_request.privacy_level not in allowed_privacy_levels:
-#                 logger.error(
-#                     f"Requested privacy_level '{post_request.privacy_level}' not in allowed options: {allowed_privacy_levels}"
-#                 )
-#                 raise HTTPException(
-#                     status_code=400,
-#                     detail={
-#                         "message": "Invalid privacy_level for this creator",
-#                         "allowed_privacy_levels": allowed_privacy_levels,
-#                         "hint": "For unaudited clients you must use SELF_ONLY and the account must be set to private.",
-#                     },
-#                 )
-
-#         # Apply interaction constraints if provided (defensive)
-#         if creator_constraints:
-#             if creator_constraints.get("comment_disabled"):
-#                 post_request.disable_comment = True
-#             if creator_constraints.get("duet_disabled"):
-#                 post_request.disable_duet = True
-#             if creator_constraints.get("stitch_disabled"):
-#                 post_request.disable_stitch = True
-
-#         # Prepare post data for PULL_FROM_URL
-#         post_data = {
-#             "post_info": {
-#                 "title": post_request.title,
-#                 "privacy_level": post_request.privacy_level,
-#                 "disable_duet": post_request.disable_duet,
-#                 "disable_comment": post_request.disable_comment,
-#                 "disable_stitch": post_request.disable_stitch,
-#             },
-#             "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
-#         }
-
-#         logger.info(f"Posting to TikTok with data: {post_data}")
-
-#         # Add video cover timestamp if provided
-#         if post_request.video_cover_timestamp_ms:
-#             post_data["post_info"]["video_cover_timestamp_ms"] = (
-#                 post_request.video_cover_timestamp_ms
-#             )
-
-#         async with httpx.AsyncClient() as client:
-#             response = await client.post(
-#                 f"{settings.TIKTOK_API_BASE}/post/publish/video/init/",
-#                 headers={
-#                     "Authorization": f"Bearer {tokens['access_token']}",
-#                     "Content-Type": "application/json; charset=UTF-8",
-#                 },
-#                 json=post_data,
-#             )
-
-#             logger.info(f"TikTok response status: {response.status_code}")
-#             logger.info(f"TikTok response body: {response.text}")
-
-
-#             if response.status_code != 200:
-#                 # Try to parse error details
-#                 error_payload = None
-#                 try:
-#                     error_payload = response.json()
-#                 except Exception:
-#                     error_payload = {"raw": response.text}
-#                 error_obj = (
-#                     (error_payload or {}).get("error", {})
-#                     if isinstance(error_payload, dict)
-#                     else {}
-#                 )
-#                 log_id = (
-#                     error_obj.get("log_id")
-#                     or (error_payload or {}).get("log_id")
-#                     or "unknown"
-#                 )
-#                 code = error_obj.get("code") or (error_payload or {}).get("code")
-#                 message = (
-#                     error_obj.get("message")
-#                     or (error_payload or {}).get("message")
-#                     or "Failed to initialize TikTok post"
-#                 )
-#                 logger.error(
-#                     f"Failed to initialize TikTok post (status={response.status_code}, log_id={log_id}, code={code}): {response.text}"
-#                 )
-#                 # Provide actionable hint for common unaudited-client error
-#                 hint = None
-#                 if code == "unaudited_client_can_only_post_to_private_accounts":
-#                     hint = "Set the TikTok account to Private and use privacy_level=SELF_ONLY (unaudited clients)."
-#                 raise HTTPException(
-#                     status_code=400,
-#                     detail={
-#                         "message": message,
-#                         "code": code,
-#                         "log_id": log_id,
-#                         "status": response.status_code,
-#                         **({"hint": hint} if hint else {}),
-#                     },
-#                 )
-
-#             post_result = response.json()
-#             data = post_result.get("data", {})
-
-#             return TikTokPostResponse(
-#                 publish_id=data.get("publish_id"), status="initialized"
-#             )
-
-#     except HTTPException:
-#         raise
-#     except Exception as e:
-#         logger.error(f"Error posting to TikTok: {str(e)}")
-#         raise HTTPException(status_code=500, detail="Internal server error")
-
 @router.post("/post/video", response_model=TikTokPostResponse)
 async def post_video_to_tiktok(
     request: Request,
@@ -1163,74 +1008,83 @@ async def post_video_to_tiktok(
     user_id = _extract_user_id(current_user)
     logger.info(f"POST /post/video called by user_id: {user_id}")
 
-    # 1. Parse Request based on Content-Type
     content_type = request.headers.get("content-type", "")
-    
     post_request: TikTokPostRequest = None
     cover_file: Optional[UploadFile] = None
-    
+
     try:
+        # ---------------------
+        # JSON REQUEST BODY
+        # ---------------------
         if "application/json" in content_type:
             body = await request.json()
             post_request = TikTokPostRequest(**body)
+
+        # ---------------------
+        # MULTIPART FORM DATA
+        # ---------------------
         elif "multipart/form-data" in content_type:
             form = await request.form()
-            
-            # Helper to parse booleans from form data
+            logger.info(f"Received form keys: {form.keys()}")
+
             def parse_bool(value: Any) -> bool:
-                if isinstance(value, bool): return value
-                if isinstance(value, str): return value.lower() == "true"
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    return value.lower() == "true"
                 return False
 
-            # Extract fields
             post_request = TikTokPostRequest(
                 title=str(form.get("title", "")),
+                caption=str(form.get("caption", "")),
+                hashtags=str(form.get("hashtags", "")),
                 video_url=str(form.get("video_url", "")),
                 privacy_level=str(form.get("privacy_level", "PUBLIC_TO_EVERYONE")),
-                disable_duet=parse_bool(form.get("disable_duet", False)),
-                disable_comment=parse_bool(form.get("disable_comment", False)),
-                disable_stitch=parse_bool(form.get("disable_stitch", False)),
-                video_cover_timestamp_ms=int(form.get("video_cover_timestamp_ms")) if form.get("video_cover_timestamp_ms") else None
+                disable_duet=parse_bool(form.get("disable_duet")),
+                disable_comment=parse_bool(form.get("disable_comment")),
+                disable_stitch=parse_bool(form.get("disable_stitch")),
+                schedule_date=str(form.get("schedule_date")) if form.get("schedule_date") else None,
+                schedule_time=str(form.get("schedule_time")) if form.get("schedule_time") else None,
+                video_cover_timestamp_ms=int(form.get("video_cover_timestamp_ms"))
+                if form.get("video_cover_timestamp_ms") else None,
             )
-            
+
             cover_file_obj = form.get("cover_file")
             if isinstance(cover_file_obj, UploadFile):
                 cover_file = cover_file_obj
+
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported Content-Type: {content_type}")
-            
+
     except Exception as e:
         logger.error(f"Failed to parse request: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid request data: {str(e)}")
 
-    logger.info(
-        f"Post request payload: {post_request.dict() if hasattr(post_request, 'dict') else post_request}"
-    )
+    logger.info(f"Post request payload: {post_request.dict()}")
 
     try:
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid user context")
 
         tokens = await _refresh_if_needed(user_id)
-        logger.info(f"Using TikTok access token: {tokens['access_token']}")
+        logger.info(f"Using TikTok access token.")
 
-        # --- ensure we have a proxy URL for S3-hosted videos ---
-        original_video_url = post_request.video_url
-        if original_video_url:
-            proxied = build_proxy_url_from_s3(original_video_url)
-            if proxied != original_video_url:
-                logger.info(
-                    f"Rewriting video URL for TikTok pull_from_url: {original_video_url} -> {proxied}"
-                )
-                post_request.video_url = proxied
+        # ------------------------------
+        # Fix S3 proxy URL
+        # ------------------------------
+        if post_request.video_url:
+            proxied = build_proxy_url_from_s3(post_request.video_url)
+            post_request.video_url = proxied
 
-        # Validate video URL
         video_url = await _validate_video_url(post_request.video_url)
         await _preflight_check_video_url(video_url)
 
-        # Fetch creator info to validate privacy level and constraints
-        allowed_privacy_levels: List[str] = []
-        creator_constraints: Dict[str, Any] = {}
+        # ------------------------------
+        # Fetch creator info
+        # ------------------------------
+        allowed_privacy_levels = []
+        creator_constraints = {}
+
         try:
             async with httpx.AsyncClient() as client:
                 ci_resp = await client.post(
@@ -1249,98 +1103,123 @@ async def post_video_to_tiktok(
                         "comment_disabled": data.get("comment_disabled", False),
                         "duet_disabled": data.get("duet_disabled", False),
                         "stitch_disabled": data.get("stitch_disabled", False),
-                        "max_video_post_duration_sec": data.get(
-                            "max_video_post_duration_sec"
-                        ),
                     }
-                else:
-                    logger.warning(
-                        f"creator_info query failed ({ci_resp.status_code}): {ci_resp.text}"
-                    )
         except Exception as e:
             logger.warning(f"creator_info query error: {e}")
 
-        # Enforce privacy levels and interaction constraints
-        if allowed_privacy_levels:
-            if post_request.privacy_level not in allowed_privacy_levels:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "message": "Invalid privacy_level for this creator",
-                        "allowed_privacy_levels": allowed_privacy_levels,
-                        "hint": "For unaudited clients you must use SELF_ONLY and the account must be set to private.",
-                    },
-                )
+        if allowed_privacy_levels and post_request.privacy_level not in allowed_privacy_levels:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Invalid privacy_level for this creator",
+                    "allowed_privacy_levels": allowed_privacy_levels,
+                },
+            )
 
-        if creator_constraints:
-            if creator_constraints.get("comment_disabled"):
-                post_request.disable_comment = True
-            if creator_constraints.get("duet_disabled"):
-                post_request.disable_duet = True
-            if creator_constraints.get("stitch_disabled"):
-                post_request.disable_stitch = True
+        # Apply forced restrictions from TikTok
+        if creator_constraints.get("comment_disabled"):
+            post_request.disable_comment = True
+        if creator_constraints.get("duet_disabled"):
+            post_request.disable_duet = True
+        if creator_constraints.get("stitch_disabled"):
+            post_request.disable_stitch = True
 
-        # Prepare post data for TikTok PULL_FROM_URL
+        # ---------------------------------------------------------------
+        # Build post_data
+        # ---------------------------------------------------------------
+        post_info = {
+            "title": post_request.title,
+            "privacy_level": post_request.privacy_level,
+            "disable_duet": post_request.disable_duet,
+            "disable_comment": post_request.disable_comment,
+            "disable_stitch": post_request.disable_stitch,
+        }
+
+        # --------------------------
+        # Add caption
+        # --------------------------
+        if post_request.caption:
+            post_info["caption"] = post_request.caption
+
+        # --------------------------
+        # Add hashtags — TikTok expects an array, not a string
+        # --------------------------
+        # Merge hashtags into caption — TikTok only reads hashtags inside caption
+        final_caption = post_request.caption or ""
+
+        if post_request.hashtags:
+            tag_list = [
+                h.strip() for h in post_request.hashtags.replace(",", " ").split()
+                if h.startswith("#")
+            ]
+            if tag_list:
+                if final_caption:
+                    final_caption += "\n" + " ".join(tag_list)
+
+        if final_caption:
+            post_info["caption"] = final_caption
+
+
+        # --------------------------
+        # Scheduled Posting
+        # --------------------------
+        if post_request.schedule_date and post_request.schedule_time:
+            from datetime import datetime, timezone
+
+            scheduled_dt = datetime.strptime(
+                f"{post_request.schedule_date} {post_request.schedule_time}",
+                "%Y-%m-%d %H:%M"
+            )
+
+            # naive timestamp — TikTok interprets as local time
+            post_info["schedule_timestamp"] = int(scheduled_dt.timestamp())
+
+
+
+
+
+        # Cover timestamp
+        if post_request.video_cover_timestamp_ms:
+            post_info["video_cover_timestamp_ms"] = post_request.video_cover_timestamp_ms
+
+        # Final payload
         post_data = {
-            "post_info": {
-                "title": post_request.title,
-                "privacy_level": post_request.privacy_level,
-                "disable_duet": post_request.disable_duet,
-                "disable_comment": post_request.disable_comment,
-                "disable_stitch": post_request.disable_stitch,
-            },
+            "post_info": post_info,
             "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
         }
 
-        if post_request.video_cover_timestamp_ms:
-            post_data["post_info"]["video_cover_timestamp_ms"] = (
-                post_request.video_cover_timestamp_ms
-            )
-            
-        # Handle Custom Cover Image (if provided)
+        # ----------------------------
+        # Upload custom cover image
+        # ----------------------------
         if cover_file:
             try:
-                # Create a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(cover_file.filename)[1]) as tmp:
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=os.path.splitext(cover_file.filename)[1],
+                ) as tmp:
                     shutil.copyfileobj(cover_file.file, tmp)
                     tmp_path = tmp.name
-                
-                # Upload to S3
-                # We use a unique filename to avoid collisions
+
                 unique_filename = f"cover_{uuid.uuid4()}{os.path.splitext(cover_file.filename)[1]}"
                 success, s3_key = s3_client.upload_file_to_s3(
-                    tmp_path, 
-                    video_id="custom_covers", # Use a generic folder or user_id if available, but "custom_covers" is safe
+                    tmp_path,
+                    video_id="custom_covers",
                     filename=unique_filename,
                     content_type=cover_file.content_type or "image/jpeg"
                 )
-                
-                # Clean up temp file
+
                 os.unlink(tmp_path)
-                
-                if success and s3_key:
-                    # Generate a presigned URL (or public URL if bucket is public)
-                    # TikTok needs to be able to access it. 
-                    # Assuming get_object_url returns a usable URL.
-                    # If the bucket is private, we need a presigned URL.
-                    # Let's use presigned=True to be safe.
+
+                if success:
                     cover_url = s3_client.get_object_url(s3_key, presigned=True, expires_in=3600)
-                    logger.info(f"Generated cover URL: {cover_url}")
-                    
-                    # Add to post_info
-                    # Note: The field name 'cover_url' is a guess based on standard API patterns for PULL_FROM_URL.
-                    # If this is wrong, it might be ignored or cause error.
-                    # Some docs suggest 'cover_image_url'.
-                    post_data["post_info"]["cover_url"] = cover_url
-                else:
-                    logger.error("Failed to upload cover file to S3")
+                    post_info["cover_image_url"] = cover_url
+
             except Exception as e:
                 logger.error(f"Error processing cover file: {e}")
-                # We continue without the cover file if it fails, or we could raise error.
-                # Let's log and continue.
 
-        logger.info(f"Posting to TikTok with data: {post_data}")
-
+        # ----------------------------
+        # POST TO TIKTOK
+        # ----------------------------
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{settings.TIKTOK_API_BASE}/post/publish/video/init/",
@@ -1351,59 +1230,35 @@ async def post_video_to_tiktok(
                 json=post_data,
             )
 
-            logger.info(f"TikTok response status: {response.status_code}")
-            logger.info(f"TikTok response body: {response.text}")
-
             if response.status_code != 200:
                 try:
                     error_payload = response.json()
-                except Exception:
+                except:
                     error_payload = {"raw": response.text}
 
-                error_obj = (
-                    (error_payload or {}).get("error", {})
-                    if isinstance(error_payload, dict)
-                    else {}
-                )
-                log_id = (
-                    error_obj.get("log_id")
-                    or (error_payload or {}).get("log_id")
-                    or "unknown"
-                )
-                code = error_obj.get("code") or (error_payload or {}).get("code")
-                message = (
-                    error_obj.get("message")
-                    or (error_payload or {}).get("message")
-                    or "Failed to initialize TikTok post"
-                )
-
-                hint = None
-                if code == "unaudited_client_can_only_post_to_private_accounts":
-                    hint = "Set the TikTok account to Private and use privacy_level=SELF_ONLY (unaudited clients)."
-
+                error_obj = error_payload.get("error", {})
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "message": message,
-                        "code": code,
-                        "log_id": log_id,
-                        "status": response.status_code,
-                        **({"hint": hint} if hint else {}),
+                        "message": error_obj.get("message", "Failed to initialize TikTok post"),
+                        "code": error_obj.get("code"),
+                        "log_id": error_obj.get("log_id"),
                     },
                 )
 
-            post_result = response.json()
-            data = post_result.get("data", {})
-
+            data = response.json().get("data", {})
             return TikTokPostResponse(
-                publish_id=data.get("publish_id"), status="initialized"
+                publish_id=data.get("publish_id"),
+                status="initialized"
             )
 
     except HTTPException:
         raise
+
     except Exception as e:
         logger.error(f"Error posting to TikTok: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 
 @router.get("/post/status/{publish_id}")

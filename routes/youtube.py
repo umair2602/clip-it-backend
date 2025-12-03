@@ -208,7 +208,8 @@ async def upload_to_youtube(
         upload_response = await loop.run_in_executor(None, insert_request.execute)
         
         video_id_uploaded = upload_response["id"]
-        logger.info(f"Video uploaded successfully. ID: {video_id_uploaded}")
+        logger.info(f"Video uploaded successfully. ID: {video_id_uploaded}"
+        )
 
         # 5. Handle Custom Thumbnail
         thumbnail_path = None
