@@ -39,6 +39,10 @@ class VideoStatus(str, Enum):
     UPLOADING = "uploading"
     DOWNLOADING = "downloading"
     DOWNLOADED = "downloaded"  # Added missing status
+    PROCESSING_STARTED = "processing_started"
+    QUEUED = "queued"
+    TRANSCRIBING = "transcribing"
+    ANALYZING = "analyzing"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -108,6 +112,7 @@ class Video(VideoBase):
     created_at: datetime
     updated_at: datetime
     processed_at: Optional[datetime] = None
+    clips: Optional[List[Dict[str, Any]]] = []  # Array of clips for this video
 
 
 class ClipBase(BaseModel):

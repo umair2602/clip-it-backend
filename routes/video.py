@@ -16,6 +16,7 @@ from models.video import (
 )
 from services.auth import auth_service
 from services.video_service import video_service
+from services.user_video_service import create_user_video, update_user_video, utc_now
 from jobs import job_queue
 # from utils.sieve_downloader import download_youtube_video_sieve  # Temporarily disabled
 
@@ -165,75 +166,90 @@ async def download_youtube_video(
         video_id_from_url = url.path.split('/')[-1] if url.path else "unknown"
         logger.info(f"🔍 Extracted video ID from URL: {video_id_from_url}")
         
-        # Create initial video record
-        logger.info(f"📝 Creating initial video record...")
-        video_data = VideoCreate(
-            user_id=current_user.id,
-            filename=f"youtube_{video_id_from_url}.mp4",
-            title=title or f"YouTube Video {video_id_from_url}",
-            description=description,
-            source_url=str(url),
-            status=VideoStatus.DOWNLOADING,
-            video_type=VideoType.YOUTUBE
-        )
-        logger.info(f"   Video data created: {video_data.dict()}")
-        
-        # Insert video and fetch the document with _id
-        logger.info(f"💾 Inserting video into database...")
-        db = video_service.db
-        videos_collection = db["videos"]
-        video_dict = video_data.dict()
-        result = videos_collection.insert_one(video_dict)
-        logger.info(f"✅ Video inserted with ID: {result.inserted_id}")
-        
-        video = videos_collection.find_one({"_id": result.inserted_id})
-        # Convert ObjectId to string
-        video["_id"] = str(video["_id"])
-        video["video_id"] = video["_id"]
-        
-        logger.info(f"📊 Video record created:")
-        logger.info(f"   Database ID: {video['_id']}")
-        logger.info(f"   Video ID: {video['video_id']}")
-        logger.info(f"   Status: {video.get('status')}")
-        logger.info(f"   Type: {video.get('video_type')}")
-        
-        # S3 URL assertion
-        if video.get('s3_url') and not str(video['s3_url']).startswith('https://'):
-            logger.error(f"❌ Non-S3 URL detected in video object: {video.get('s3_url')}")
-            raise HTTPException(status_code=500, detail='Non-S3 URL detected in video object!')
-        
-        # Create background job for YouTube download
+        # Create background job FIRST to get the job_id
         logger.info(f"🎯 Creating background job for YouTube download...")
         job_id = job_queue.add_job(
-            "youtube_download",
+            "process_youtube_download",  # Use new unified job type
             {
                 "url": str(url),
-                "video_id": video["video_id"],
+                "video_id": None,  # Will be set after video is created
                 "user_id": current_user.id,
-                "auto_process": True  # Automatically process after download
+                "auto_process": True
             }
         )
         logger.info(f"✅ Background job created: {job_id}")
         
-        # Update video record with job_id
-        videos_collection.update_one(
-            {"_id": result.inserted_id},
-            {"$set": {"job_id": job_id}}
-        )
-        logger.info(f"📝 Video record updated with job_id: {job_id}")
+        # Create initial video record in user.videos array with process_task_id set from the start
+        logger.info(f"📝 Creating initial video record in user.videos array...")
+        video_data_dict = {
+            "title": title or f"YouTube Video {video_id_from_url}",
+            "description": description or "Video submitted for processing",
+            "filename": f"youtube_{video_id_from_url}.mp4",
+            "source_url": str(url),
+            "status": VideoStatus.DOWNLOADING,
+            "video_type": VideoType.YOUTUBE,
+            "process_task_id": job_id,  # Set immediately!
+            "job_id": job_id
+        }
+        
+        video_id = await create_user_video(current_user.id, video_data_dict)
+        
+        if not video_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create video record"
+            )
+        
+        logger.info(f"✅ Video created with ID: {video_id}")
+        logger.info(f"   Process Task ID: {job_id} (set immediately)")
+        
+        # Verify the video was created with process_task_id in database
+        from services.user_video_service import get_user_video
+        saved_video = await get_user_video(current_user.id, video_id)
+        if saved_video:
+            logger.info(f"🔍 VERIFICATION: Video saved in DB with process_task_id: {saved_video.process_task_id}")
+        else:
+            logger.error(f"❌ VERIFICATION FAILED: Could not retrieve saved video {video_id}")
+        
+        # Update job with the video_id
+        from jobs import job_queue as jq
+        job = jq.get_job(job_id)
+        if job:
+            job_data = job.get("data", "{}")
+            if isinstance(job_data, str):
+                import json
+                job_data = json.loads(job_data)
+            job_data["video_id"] = video_id
+            jq.update_job(job_id, {"data": job_data})
         
         logger.info(f"="*80)
         logger.info(f"🎉 YOUTUBE DOWNLOAD JOB CREATED SUCCESSFULLY")
-        logger.info(f"   Video ID: {video['video_id']}")
+        logger.info(f"   Video ID: {video_id}")
         logger.info(f"   Job ID: {job_id}")
-        logger.info(f"   Status: {video.get('status')}")
+        logger.info(f"   Process Task ID: {job_id}")
+        logger.info(f"   Status: downloading")
         logger.info(f"   Worker will process this job automatically")
         logger.info(f"="*80)
         
+        # Final verification before returning response
+        logger.info(f"📤 RESPONSE WILL CONTAIN:")
+        logger.info(f"   - video.process_task_id: {job_id}")
+        logger.info(f"   - process_task_id (top-level): {job_id}")
+        
         return {
             "message": "YouTube video download started",
-            "video": video,
+            "video": {
+                "video_id": video_id,
+                "id": video_id,
+                "title": title or f"YouTube Video {video_id_from_url}",
+                "status": "downloading",
+                "process_task_id": job_id,
+                "job_id": job_id,
+                "source_url": str(url),
+                "video_type": "youtube"
+            },
             "job_id": job_id,
+            "process_task_id": job_id,  # Include in response for immediate frontend tracking
             "status": "downloading"
         }
     except HTTPException:
@@ -259,7 +275,7 @@ async def get_video_history(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     video_type: Optional[VideoType] = Query(None, description="Filter by video type"),
-    status: Optional[VideoStatus] = Query(None, description="Filter by status")
+    status_filter: Optional[VideoStatus] = Query(None, description="Filter by status")
 ):
     """
     Get user's video upload and download history.
@@ -277,7 +293,7 @@ async def get_video_history(
             page=page,
             page_size=page_size,
             video_type=video_type,
-            status=status
+            status=status_filter
         )
         
         return history
