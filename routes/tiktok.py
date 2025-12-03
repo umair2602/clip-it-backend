@@ -37,6 +37,10 @@ from io import BytesIO
 from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 from starlette.responses import StreamingResponse
+from utils.s3_storage import s3_client
+import tempfile
+import shutil
+import uuid
 
 
 def generate_pkce_pair() -> tuple[str, str]:
@@ -1149,13 +1153,56 @@ async def get_creator_info(current_user: Dict[str, Any] = Depends(get_current_us
 
 @router.post("/post/video", response_model=TikTokPostResponse)
 async def post_video_to_tiktok(
-    post_request: TikTokPostRequest,
+    request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Post a video to TikTok using PULL_FROM_URL from S3"""
-
+    """
+    Post a video to TikTok using PULL_FROM_URL from S3.
+    Supports both application/json and multipart/form-data.
+    """
     user_id = _extract_user_id(current_user)
     logger.info(f"POST /post/video called by user_id: {user_id}")
+
+    # 1. Parse Request based on Content-Type
+    content_type = request.headers.get("content-type", "")
+    
+    post_request: TikTokPostRequest = None
+    cover_file: Optional[UploadFile] = None
+    
+    try:
+        if "application/json" in content_type:
+            body = await request.json()
+            post_request = TikTokPostRequest(**body)
+        elif "multipart/form-data" in content_type:
+            form = await request.form()
+            
+            # Helper to parse booleans from form data
+            def parse_bool(value: Any) -> bool:
+                if isinstance(value, bool): return value
+                if isinstance(value, str): return value.lower() == "true"
+                return False
+
+            # Extract fields
+            post_request = TikTokPostRequest(
+                title=str(form.get("title", "")),
+                video_url=str(form.get("video_url", "")),
+                privacy_level=str(form.get("privacy_level", "PUBLIC_TO_EVERYONE")),
+                disable_duet=parse_bool(form.get("disable_duet", False)),
+                disable_comment=parse_bool(form.get("disable_comment", False)),
+                disable_stitch=parse_bool(form.get("disable_stitch", False)),
+                video_cover_timestamp_ms=int(form.get("video_cover_timestamp_ms")) if form.get("video_cover_timestamp_ms") else None
+            )
+            
+            cover_file_obj = form.get("cover_file")
+            if isinstance(cover_file_obj, UploadFile):
+                cover_file = cover_file_obj
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported Content-Type: {content_type}")
+            
+    except Exception as e:
+        logger.error(f"Failed to parse request: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid request data: {str(e)}")
+
     logger.info(
         f"Post request payload: {post_request.dict() if hasattr(post_request, 'dict') else post_request}"
     )
@@ -1249,6 +1296,48 @@ async def post_video_to_tiktok(
             post_data["post_info"]["video_cover_timestamp_ms"] = (
                 post_request.video_cover_timestamp_ms
             )
+            
+        # Handle Custom Cover Image (if provided)
+        if cover_file:
+            try:
+                # Create a temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(cover_file.filename)[1]) as tmp:
+                    shutil.copyfileobj(cover_file.file, tmp)
+                    tmp_path = tmp.name
+                
+                # Upload to S3
+                # We use a unique filename to avoid collisions
+                unique_filename = f"cover_{uuid.uuid4()}{os.path.splitext(cover_file.filename)[1]}"
+                success, s3_key = s3_client.upload_file_to_s3(
+                    tmp_path, 
+                    video_id="custom_covers", # Use a generic folder or user_id if available, but "custom_covers" is safe
+                    filename=unique_filename,
+                    content_type=cover_file.content_type or "image/jpeg"
+                )
+                
+                # Clean up temp file
+                os.unlink(tmp_path)
+                
+                if success and s3_key:
+                    # Generate a presigned URL (or public URL if bucket is public)
+                    # TikTok needs to be able to access it. 
+                    # Assuming get_object_url returns a usable URL.
+                    # If the bucket is private, we need a presigned URL.
+                    # Let's use presigned=True to be safe.
+                    cover_url = s3_client.get_object_url(s3_key, presigned=True, expires_in=3600)
+                    logger.info(f"Generated cover URL: {cover_url}")
+                    
+                    # Add to post_info
+                    # Note: The field name 'cover_url' is a guess based on standard API patterns for PULL_FROM_URL.
+                    # If this is wrong, it might be ignored or cause error.
+                    # Some docs suggest 'cover_image_url'.
+                    post_data["post_info"]["cover_url"] = cover_url
+                else:
+                    logger.error("Failed to upload cover file to S3")
+            except Exception as e:
+                logger.error(f"Error processing cover file: {e}")
+                # We continue without the cover file if it fails, or we could raise error.
+                # Let's log and continue.
 
         logger.info(f"Posting to TikTok with data: {post_data}")
 

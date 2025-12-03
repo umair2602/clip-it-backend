@@ -7,18 +7,22 @@ import googleapiclient.discovery
 import httpx
 import io
 import asyncio
-from fastapi import APIRouter, Request, HTTPException, Depends, status
+from fastapi import APIRouter, Request, HTTPException, Depends, status, File, Form, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import StreamingResponse
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload
 from pydantic import BaseModel, Field
+import tempfile
+import ffmpeg
+import shutil
 
 from config import settings
 from services.auth import auth_service
 from services.youtube_tokens import youtube_token_service
 from database.connection import get_database
 import secrets
+import uuid
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -145,11 +149,17 @@ class YouTubeProfileResponse(BaseModel):
 
 @router.post("/upload", response_model=YouTubeUploadResponse)
 async def upload_to_youtube(
-    upload_request: YouTubeUploadRequest,
+    video_url: str = Form(..., description="S3 URL of the video to upload"),
+    title: str = Form(..., max_length=100, description="Video title"),
+    description: str = Form("", max_length=5000, description="Video description"),
+    privacy_status: str = Form("private", description="one of private, public, or unlisted"),
+    cover_file: Optional[UploadFile] = File(None, description="Custom cover image"),
+    cover_timestamp_ms: Optional[str] = Form(None, description="Timestamp in ms to extract cover from video"),
     current_user: dict = Depends(get_current_user),
 ):
     """
     Uploads a video from an S3 URL to the user's YouTube channel.
+    Supports custom thumbnail via file or timestamp.
     """
     user_id = _extract_user_id(current_user)
     if not user_id:
@@ -162,7 +172,7 @@ async def upload_to_youtube(
     try:
         # 1. Fetch video from S3 URL
         async with httpx.AsyncClient() as client:
-            response = await client.get(upload_request.video_url, follow_redirects=True, timeout=60)
+            response = await client.get(video_url, follow_redirects=True, timeout=60)
             response.raise_for_status()
             video_content = response.content
 
@@ -174,13 +184,13 @@ async def upload_to_youtube(
         # 3. Prepare video metadata
         body = {
             "snippet": {
-                "title": upload_request.title,
-                "description": upload_request.description,
+                "title": title,
+                "description": description,
                 "tags": [],
-                "categoryId": "22"  # Default category, consider making this configurable
+                "categoryId": "22"  # Default category
             },
             "status": {
-                "privacyStatus": upload_request.privacy_status
+                "privacyStatus": privacy_status
             }
         }
 
@@ -196,8 +206,67 @@ async def upload_to_youtube(
         # The googleapiclient is synchronous, so we run it in a thread pool
         loop = asyncio.get_event_loop()
         upload_response = await loop.run_in_executor(None, insert_request.execute)
+        
+        video_id_uploaded = upload_response["id"]
+        logger.info(f"Video uploaded successfully. ID: {video_id_uploaded}")
 
-        return YouTubeUploadResponse(video_id=upload_response["id"])
+        # 5. Handle Custom Thumbnail
+        thumbnail_path = None
+        temp_dir = tempfile.mkdtemp()
+        
+        try:
+            if cover_file:
+                # Use provided cover file
+                thumbnail_path = os.path.join(temp_dir, f"thumb_{uuid.uuid4()}.jpg")
+                with open(thumbnail_path, "wb") as f:
+                    shutil.copyfileobj(cover_file.file, f)
+                logger.info("Using provided custom cover file.")
+                
+            elif cover_timestamp_ms:
+                # Extract frame from video
+                try:
+                    timestamp_sec = float(cover_timestamp_ms) / 1000.0
+                    
+                    # Save video content to temp file for ffmpeg
+                    temp_video_path = os.path.join(temp_dir, f"video_{uuid.uuid4()}.mp4")
+                    with open(temp_video_path, "wb") as f:
+                        f.write(video_content)
+                        
+                    thumbnail_path = os.path.join(temp_dir, f"extracted_{uuid.uuid4()}.jpg")
+                    
+                    logger.info(f"Extracting frame at {timestamp_sec}s from video...")
+                    (
+                        ffmpeg
+                        .input(temp_video_path, ss=timestamp_sec)
+                        .output(thumbnail_path, vframes=1)
+                        .overwrite_output()
+                        .run(capture_stdout=True, capture_stderr=True)
+                    )
+                    logger.info("Frame extraction successful.")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to extract frame with ffmpeg: {e}")
+                    # Don't fail the whole upload if thumbnail fails
+                    thumbnail_path = None
+
+            # Upload thumbnail if we have one
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                logger.info(f"Uploading thumbnail: {thumbnail_path}")
+                try:
+                    request_thumb = youtube.thumbnails().set(
+                        videoId=video_id_uploaded,
+                        media_body=MediaFileUpload(thumbnail_path)
+                    )
+                    await loop.run_in_executor(None, request_thumb.execute)
+                    logger.info("Thumbnail set successfully.")
+                except Exception as e:
+                    logger.error(f"Failed to set thumbnail: {e}")
+                    
+        finally:
+            # Cleanup temp files
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return YouTubeUploadResponse(video_id=video_id_uploaded)
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Failed to download video from S3: {e}")
