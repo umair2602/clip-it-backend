@@ -480,163 +480,183 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info(f"   - Clips created: {len(clips) if clips else 0}")
 
         # ====================================================================
-        # STEP 4: PARALLEL CLIP PROCESSING - S3 upload and thumbnail generation
+        # STEP 4: INCREMENTAL CLIP PROCESSING - Process, upload, and save clips one by one
         # ====================================================================
         
         if clips and s3_client.available:
-            logger.info(f"[PARALLEL] Starting parallel processing of {len(clips)} clips")
+            logger.info(f"[INCREMENTAL] Starting sequential processing of {len(clips)} clips")
+            logger.info(f"[INCREMENTAL] Each clip will be processed, uploaded, and saved to DB before moving to the next")
             
-            parallel_start_time = time.time()
-            
-            # Prepare for parallel processing
-            MAX_CONCURRENT_CLIPS = 3  # Adjust based on system resources
-            semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIPS)
-            
-            async def bounded_process_clip(clip, idx):
-                """Process clip with concurrency limit"""
-                async with semaphore:
-                    return await process_single_clip_async(
-                        clip, idx, file_path, video_id, output_dir
-                    )
-            
-            # Update progress - starting parallel processing
-            job_queue.update_job(
-                job_id,
-                {
-                    "progress": "75",
-                    "message": f"Uploading {len(clips)} clips to S3 in parallel...",
-                },
-            )
-            
-            if original_job_id:
-                job_queue.update_job(
-                    original_job_id,
-                    {
-                        "progress": "75",
-                        "message": f"Uploading {len(clips)} clips to S3 in parallel...",
-                    },
-                )
-            
-            # Create all clip processing tasks
-            clip_tasks = [
-                bounded_process_clip(clip, i)
-                for i, clip in enumerate(clips)
-            ]
-            
-            # Run all tasks in parallel
-            logger.info(f"[PARALLEL] Running {len(clip_tasks)} clips in parallel (max {MAX_CONCURRENT_CLIPS} concurrent)")
-            results = await asyncio.gather(*clip_tasks, return_exceptions=True)
-            
-            # Process results
-            logger.info(f"[PARALLEL] All clips processed, updating results...")
-            for result in results:
-                if result and isinstance(result, tuple) and len(result) == 2:
-                    index, data = result
-                    if data and index < len(clips):
-                        clips[index]['s3_key'] = data.get('clip_s3_key')
-                        clips[index]['s3_url'] = s3_client.get_object_url(data['clip_s3_key']) if data.get('clip_s3_key') else None
-                        clips[index]['thumbnail_s3_key'] = data.get('thumbnail_s3_key')
-                        clips[index]['thumbnail_url'] = s3_client.get_object_url(data['thumbnail_s3_key']) if data.get('thumbnail_s3_key') else "/static/default_thumbnail.jpg"
-                        logger.info(f"[PARALLEL] ✅ Clip {index} complete - S3 URL: {clips[index].get('s3_url')}")
-                    else:
-                        logger.warning(f"[PARALLEL] ❌ Clip {index} returned None results")
-                        if index < len(clips):
-                            clips[index]['thumbnail_url'] = "/static/default_thumbnail.jpg"
-                elif isinstance(result, Exception):
-                    logger.error(f"[PARALLEL] ❌ Clip raised exception: {result}")
-                else:
-                    logger.warning(f"[PARALLEL] ❌ Clip returned invalid result type")
-            
-            parallel_elapsed = time.time() - parallel_start_time
-            logger.info(f"[PARALLEL] ⏱️  Total time: {parallel_elapsed:.1f}s")
-            logger.info(f"[PARALLEL] 📊 Average per clip: {parallel_elapsed/len(clips):.1f}s")
-            if len(clips) > 1:
-                sequential_estimate = parallel_elapsed * len(clips) / MAX_CONCURRENT_CLIPS
-                speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
-                logger.info(f"[PARALLEL] 📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
-            
-            logger.info(f"[PARALLEL] ✅ Parallel processing complete for all {len(clips)} clips")
-        else:
-            if not clips:
-                logger.info("No clips to process")
-            elif not s3_client.available:
-                logger.warning("S3 client not available, skipping clip uploads")
-
-        # ====================================================================
-        # STEP 5: SAVE CLIPS TO DATABASE
-        # ====================================================================
-        
-        if clips and user_id:
-            logger.info(f"💾 STEP 5: Saving {len(clips)} clips to database...")
-            logger.info(f"🔍 CLIP SAVE CONTEXT:")
-            logger.info(f"   User ID: {user_id}")
-            logger.info(f"   Video ID: {video_id}")
-            logger.info(f"   Number of clips: {len(clips)}")
+            sequential_start_time = time.time()
+            total_clips = len(clips)
+            clips_completed = 0
+            clips_saved = 0
             
             # Verify video exists before saving clips
             from services.user_video_service import get_user_video
             verify_video = await get_user_video(user_id, video_id)
             if verify_video:
-                logger.info(f"✅ Video found in DB before saving clips")
+                logger.info(f"✅ Video found in DB before processing clips")
                 logger.info(f"   Video process_task_id: {verify_video.process_task_id}")
                 logger.info(f"   Current clips count: {len(verify_video.clips)}")
             else:
-                logger.error(f"❌ Video {video_id} NOT FOUND in user {user_id}'s videos before saving clips!")
+                logger.error(f"❌ Video {video_id} NOT FOUND in user {user_id}'s videos before processing clips!")
             
-            clips_saved = 0
-            
+            # Process clips sequentially
             for i, clip in enumerate(clips):
-                if clip.get("s3_url"):  # Only save clips with S3 URLs
-                    clip_data = {
-                        "title": clip.get("title", f"Clip {i+1}"),
-                        "start_time": clip.get("start_time", 0),
-                        "end_time": clip.get("end_time", 0),
-                        "s3_key": clip.get("s3_key"),
-                        "s3_url": clip.get("s3_url"),
-                        "thumbnail_url": clip.get("thumbnail_url"),
-                        "transcription": clip.get("transcription", ""),
-                        "summary": clip.get("summary", ""),
-                        "tags": clip.get("tags", []),
-                        "metadata": clip.get("metadata", {})
-                    }
+                try:
+                    clip_num = i + 1
+                    logger.info(f"[INCREMENTAL] ===== Processing Clip {clip_num}/{total_clips} =====")
                     
-                    try:
-                        logger.info(f"📝 Attempting to save clip {i+1}/{len(clips)}...")
-                        clip_id = await add_clip_to_video(user_id, video_id, clip_data)
-                        if clip_id:
-                            logger.info(f"✅ Saved clip {i+1} to database with ID: {clip_id}")
-                            logger.info(f"   Clip title: {clip.get('title')}")
-                            logger.info(f"   S3 URL: {clip.get('s3_url')[:50]}..." if clip.get('s3_url') else "   S3 URL: None")
-                            clips_saved += 1
+                    # Update job status - processing clip
+                    base_progress = 70
+                    clip_progress = int(base_progress + (30 * clips_completed / total_clips))
+                    job_queue.update_job(
+                        job_id,
+                        {
+                            "progress": str(clip_progress),
+                            "message": f"Processing clip {clip_num}/{total_clips}...",
+                            "clips_completed": clips_completed,
+                            "total_clips": total_clips,
+                        },
+                    )
+                    
+                    if original_job_id:
+                        job_queue.update_job(
+                            original_job_id,
+                            {
+                                "progress": str(clip_progress),
+                                "message": f"Processing clip {clip_num}/{total_clips}...",
+                                "clips_completed": clips_completed,
+                                "total_clips": total_clips,
+                            },
+                        )
+                    
+                    # Process this single clip (create, thumbnail, upload)
+                    result = await process_single_clip_async(
+                        clip, i, file_path, video_id, output_dir
+                    )
+                    
+                    # Handle result
+                    if result and isinstance(result, tuple) and len(result) == 2:
+                        index, data = result
+                        if data and index < len(clips):
+                            clips[index]['s3_key'] = data.get('clip_s3_key')
+                            clips[index]['s3_url'] = s3_client.get_object_url(data['clip_s3_key']) if data.get('clip_s3_key') else None
+                            clips[index]['thumbnail_s3_key'] = data.get('thumbnail_s3_key')
+                            clips[index]['thumbnail_url'] = s3_client.get_object_url(data['thumbnail_s3_key']) if data.get('thumbnail_s3_key') else "/static/default_thumbnail.jpg"
+                            
+                            # Immediately save this clip to database if it has an S3 URL
+                            if clips[index].get('s3_url') and user_id:
+                                clip_data = {
+                                    "title": clips[index].get("title", f"Clip {clip_num}"),
+                                    "start_time": clips[index].get("start_time", 0),
+                                    "end_time": clips[index].get("end_time", 0),
+                                    "s3_key": clips[index].get("s3_key"),
+                                    "s3_url": clips[index].get("s3_url"),
+                                    "thumbnail_url": clips[index].get("thumbnail_url"),
+                                    "transcription": clips[index].get("transcription", ""),
+                                    "summary": clips[index].get("summary", ""),
+                                    "tags": clips[index].get("tags", []),
+                                    "metadata": clips[index].get("metadata", {})
+                                }
+                                
+                                try:
+                                    logger.info(f"[INCREMENTAL] 💾 Saving clip {clip_num} to database...")
+                                    clip_id = await add_clip_to_video(user_id, video_id, clip_data)
+                                    if clip_id:
+                                        logger.info(f"[INCREMENTAL] ✅ Clip {clip_num} saved to database with ID: {clip_id}")
+                                        logger.info(f"[INCREMENTAL]    Title: {clip_data.get('title')}")
+                                        logger.info(f"[INCREMENTAL]    S3 URL: {clip_data.get('s3_url')[:50]}...")
+                                        clips_saved += 1
+                                        clips_completed += 1
+                                        
+                                        # Update progress after successful save
+                                        final_progress = int(70 + (30 * clips_completed / total_clips))
+                                        job_queue.update_job(
+                                            job_id,
+                                            {
+                                                "progress": str(final_progress),
+                                                "message": f"Completed clip {clips_completed}/{total_clips}",
+                                                "clips_completed": clips_completed,
+                                                "total_clips": total_clips,
+                                            },
+                                        )
+                                        
+                                        if original_job_id:
+                                            job_queue.update_job(
+                                                original_job_id,
+                                                {
+                                                    "progress": str(final_progress),
+                                                    "message": f"Completed clip {clips_completed}/{total_clips}",
+                                                    "clips_completed": clips_completed,
+                                                    "total_clips": total_clips,
+                                                },
+                                            )
+                                    else:
+                                        logger.error(f"[INCREMENTAL] ❌ Failed to save clip {clip_num} to database")
+                                        clips_completed += 1  # Still count as processed even if save failed
+                                except Exception as save_error:
+                                    logger.error(f"[INCREMENTAL] ❌ Error saving clip {clip_num}: {save_error}")
+                                    import traceback
+                                    logger.error(f"[INCREMENTAL] Traceback:\n{traceback.format_exc()}")
+                                    clips_completed += 1  # Still count as processed
+                            else:
+                                logger.warning(f"[INCREMENTAL] ⚠️ Clip {clip_num} has no S3 URL, skipping database save")
+                                clips_completed += 1
+                                
+                            logger.info(f"[INCREMENTAL] ✅ Clip {clip_num} complete - S3 URL: {clips[index].get('s3_url')}")
                         else:
-                            logger.error(f"❌ Failed to save clip {i+1} to database - add_clip_to_video returned None")
-                            logger.error(f"   User ID: {user_id}")
-                            logger.error(f"   Video ID: {video_id}")
-                    except Exception as clip_save_error:
-                        logger.error(f"❌ Error saving clip {i+1}: {clip_save_error}")
-                        import traceback
-                        logger.error(f"Traceback:\n{traceback.format_exc()}")
-                else:
-                    logger.warning(f"⚠️ Skipping clip {i+1} - no S3 URL")
+                            logger.warning(f"[INCREMENTAL] ❌ Clip {clip_num} processing returned invalid data")
+                            if index < len(clips):
+                                clips[index]['thumbnail_url'] = "/static/default_thumbnail.jpg"
+                            clips_completed += 1
+                    else:
+                        logger.error(f"[INCREMENTAL] ❌ Clip {clip_num} processing failed or returned invalid result")
+                        clips_completed += 1
+                        
+                except Exception as clip_error:
+                    logger.error(f"[INCREMENTAL] ❌ Error processing clip {clip_num}: {clip_error}")
+                    import traceback
+                    logger.error(f"[INCREMENTAL] Traceback:\n{traceback.format_exc()}")
+                    clips_completed += 1  # Continue with next clip even if this one failed
             
-            logger.info(f"✅ Saved {clips_saved}/{len(clips)} clips to database")
+            sequential_elapsed = time.time() - sequential_start_time
+            logger.info(f"[INCREMENTAL] ⏱️  Total time: {sequential_elapsed:.1f}s")
+            logger.info(f"[INCREMENTAL] 📊 Average per clip: {sequential_elapsed/total_clips:.1f}s")
+            logger.info(f"[INCREMENTAL] ✅ Sequential processing complete: {clips_saved}/{total_clips} clips saved")
+            
+        else:
+            if not clips:
+                logger.info("No clips to process")
+            elif not s3_client.available:
+                logger.warning("S3 client not available, skipping clip uploads")
+            
+            # Set clips_saved for consistency with the rest of the code
+            clips_saved = 0
+
+        # ====================================================================
+        # STEP 5: FINAL VERIFICATION
+        # ====================================================================
+        
+        if clips_saved > 0 and user_id:
+            logger.info(f"💾 STEP 5: Verifying {clips_saved} clips saved to database...")
             
             # Final verification - check if clips were actually saved
-            if clips_saved > 0:
-                from services.user_video_service import get_user_video
-                final_video = await get_user_video(user_id, video_id)
-                if final_video:
-                    logger.info(f"🔍 FINAL VERIFICATION:")
-                    logger.info(f"   Video ID: {video_id}")
-                    logger.info(f"   Process Task ID: {final_video.process_task_id}")
-                    logger.info(f"   Clips in DB: {len(final_video.clips)}")
-                    logger.info(f"   Expected clips: {clips_saved}")
-                    if len(final_video.clips) != clips_saved:
-                        logger.error(f"❌ MISMATCH: Expected {clips_saved} clips but found {len(final_video.clips)} in DB!")
-                    else:
-                        logger.info(f"✅ Clip count matches - all clips saved successfully")
+            from services.user_video_service import get_user_video
+            final_video = await get_user_video(user_id, video_id)
+            if final_video:
+                logger.info(f"🔍 FINAL VERIFICATION:")
+                logger.info(f"   Video ID: {video_id}")
+                logger.info(f"   Process Task ID: {final_video.process_task_id}")
+                logger.info(f"   Clips in DB: {len(final_video.clips)}")
+                logger.info(f"   Expected clips: {clips_saved}")
+                if len(final_video.clips) != clips_saved:
+                    logger.error(f"❌ MISMATCH: Expected {clips_saved} clips but found {len(final_video.clips)} in DB!")
                 else:
-                    logger.error(f"❌ Could not verify - video {video_id} not found after saving clips")
+                    logger.info(f"✅ Clip count matches - all clips saved successfully")
+            else:
+                logger.error(f"❌ Could not verify - video {video_id} not found after saving clips")
 
         # Save metadata
         metadata = {"video_id": video_id, "clips": clips}

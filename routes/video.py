@@ -438,6 +438,93 @@ async def get_video(
         )
 
 
+@router.get("/{video_id}/clips/incremental")
+async def get_video_clips_incremental(
+    current_user: Annotated[User, Depends(get_current_user)],
+    video_id: str
+):
+    """
+    Get video with incrementally available clips for real-time updates.
+    
+    This endpoint is designed for frontend polling during video processing.
+    It returns the video with all currently available clips, along with
+    processing status and progress information.
+    
+    - **video_id**: Video ID
+    
+    Returns:
+    - video_id: The video identifier
+    - status: Current processing status (processing, completed, failed)
+    - clips: Array of clips currently available (grows as processing continues)
+    - clips_completed: Number of clips processed so far
+    - total_clips: Total number of clips expected (if known)
+    - progress: Processing progress percentage (0-100)
+    - message: Current processing status message
+    """
+    try:
+        from services.user_video_service import get_user_video
+        
+        logger.info(f"[get_video_clips_incremental] User {current_user.id} polling for video {video_id}")
+        
+        # Get video from database
+        video = await get_user_video(current_user.id, video_id)
+        
+        if not video:
+            logger.warning(f"[get_video_clips_incremental] Video {video_id} not found for user {current_user.id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Video not found or not owned by user"
+            )
+        
+        # Get job status if video is still processing
+        job_status = None
+        clips_completed = 0
+        total_clips = 0
+        progress = 0
+        message = "Ready"
+        
+        if video.process_task_id:
+            try:
+                job_status = job_queue.get_job_status(video.process_task_id)
+                if job_status:
+                    progress = int(job_status.get("progress", 0))
+                    message = job_status.get("message", "Processing...")
+                    clips_completed = job_status.get("clips_completed", 0)
+                    total_clips = job_status.get("total_clips", 0)
+            except Exception as job_err:
+                logger.warning(f"[get_video_clips_incremental] Could not get job status: {job_err}")
+        
+        # Build response
+        response = {
+            "video_id": video.id,
+            "status": video.status,
+            "clips": [clip.dict() if hasattr(clip, 'dict') else clip for clip in video.clips],
+            "clips_completed": clips_completed if clips_completed > 0 else len(video.clips),
+            "total_clips": total_clips if total_clips > 0 else len(video.clips),
+            "progress": progress if video.status == "processing" else 100,
+            "message": message,
+            "title": video.title,
+            "thumbnail_url": video.thumbnail_url,
+            "created_at": video.created_at.isoformat() if hasattr(video.created_at, 'isoformat') else str(video.created_at),
+        }
+        
+        logger.info(f"[get_video_clips_incremental] Returning {len(video.clips)} clips for video {video_id}")
+        logger.info(f"[get_video_clips_incremental] Progress: {progress}%, Clips: {clips_completed}/{total_clips}")
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting incremental clips for video {video_id}: {str(e)}")
+        import traceback
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
+
+
 @router.put("/{video_id}")
 async def update_video(
     current_user: Annotated[User, Depends(get_current_user)],
