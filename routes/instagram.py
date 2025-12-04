@@ -182,8 +182,8 @@ async def get_instagram_auth_url(
         params = {
             "client_id": settings.INSTA_APP_ID,
             "redirect_uri": settings.INSTA_REDIRECT_URI,
-            # "scope": settings.INSTA_APP_SCOPE or "user_profile,user_media",
-            "scope": "instagram_business_basic,instagram_business_content_publish",
+            "scope": settings.INSTA_APP_SCOPE or "public_profile",
+            # "scope": ,
             "response_type": "code",
             "state": state,
         }
