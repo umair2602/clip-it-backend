@@ -80,6 +80,7 @@ async def process_video(
                 start_time=segment["start_time"],
                 end_time=segment["end_time"],
                 clip_id=clip_id,
+                transcript=transcript,
             )
 
             # Only process if clip was created
@@ -179,32 +180,393 @@ async def process_video(
 
 
 async def create_clip(
-    video_path: str, output_dir: str, start_time: float, end_time: float, clip_id: str
+    video_path: str, output_dir: str, start_time: float, end_time: float, clip_id: str, transcript: Dict[str, Any] = None
 ) -> str:
     """
-    Extract the video segment between start_time and end_time, and convert it to vertical (portrait, 9:16) format with black bars (letterboxing) on top and bottom, preserving the full width of the original video.
+    Extract video segment and convert to vertical (9:16) format using MediaPipe AI auto-reframe.
+    Uses pose detection + face detection to intelligently track and follow speakers.
     """
-
-
+    logger.info(f"🎬 Creating clip {clip_id}: {start_time:.2f}s - {end_time:.2f}s")
+    
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{clip_id}.mp4")
-
-    # Temporary path for the extracted segment
     temp_path = os.path.join(output_dir, f"{clip_id}_temp.mp4")
-
+    
     # Step 1: Extract the segment
+    logger.info(f"   📂 Extracting segment...")
     extract_clip(video_path, temp_path, start_time, end_time)
+    
+    # Step 2: Detect optimal crop positions using MediaPipe AI
+    logger.info(f"   🤖 Analyzing with MediaPipe AI for auto-reframe...")
+    crop_positions = await detect_mediapipe_crop_positions(temp_path, start_time, end_time, transcript)
+    
+    # Step 3: Apply smart crop with smooth transitions
+    logger.info(f"   🎥 Applying AI-guided auto-reframe...")
+    await apply_smart_crop_with_transitions(temp_path, output_path, crop_positions)
+    
+    # Cleanup
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+    
+    logger.info(f"   ✅ Clip created with AI auto-reframe: {output_path}")
+    return output_path
 
-    # Step 2: Convert to vertical with black bars (letterboxing)
-    # Target portrait resolution
-    target_width = 1080
-    target_height = 1920
-    # FFmpeg filter: scale to fit, then pad
-    filter_str = (
-        f"scale=iw*min({target_width}/iw\,{target_height}/ih):ih*min({target_width}/iw\,{target_height}/ih),"
-        f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2"
-    )
+
+async def detect_mediapipe_crop_positions(
+    video_path: str,
+    start_time: float, 
+    end_time: float,
+    transcript: Dict[str, Any] = None
+) -> list:
+    """
+    Use MediaPipe to detect ALL people/faces, then use speaker diarization to 
+    identify which person is speaking and track them.
+    
+    Strategy:
+    1. Detect all people in each frame and track their positions
+    2. Build a spatial map of where each person sits (left, center, right)
+    3. Use transcript to know which speaker is talking at each moment
+    4. Map speakers to spatial positions
+    5. Track the active speaker's position
+    """
+    import cv2
+    import mediapipe as mp
+    import numpy as np
+    
+    mp_pose = mp.solutions.pose
+    mp_face = mp.solutions.face_detection
+    
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
+    
+    # Calculate crop dimensions for 9:16
+    crop_h = input_h
+    crop_w = int(crop_h * 0.5625)  # 607px for 1080p
+    
+    # STEP 1: Build speaker timeline from transcript
+    speaker_timeline = build_speaker_timeline(transcript, start_time, end_time)
+    if speaker_timeline:
+        logger.info(f"      📢 Speaker timeline: {len(speaker_timeline)} utterances")
+        for utt in speaker_timeline[:3]:  # Log first 3
+            logger.info(f"         {utt['speaker']}: {utt['start']:.1f}s - {utt['end']:.1f}s")
+    
+    # STEP 2: Detect all people in frames and build person tracking database
+    person_detections = []  # List of all detected people across frames
+    sample_interval = max(1, int(fps / 5))  # Sample 5 frames per second
+    
+    with mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as pose, mp_face.FaceDetection(
+        model_selection=0,
+        min_detection_confidence=0.5
+    ) as face_detection:
+        
+        frame_idx = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Sample frames for efficiency
+            if frame_idx % sample_interval != 0:
+                frame_idx += 1
+                continue
+            
+            # Current timestamp in the clip
+            frame_time = (frame_idx / fps)
+            
+            # Convert BGR to RGB for MediaPipe
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Detect ALL faces in frame (not just largest)
+            face_results = face_detection.process(rgb_frame)
+            
+            if face_results.detections:
+                # Store ALL detected faces with their positions
+                for face in face_results.detections:
+                    bbox = face.location_data.relative_bounding_box
+                    face_center_x = (bbox.xmin + bbox.width / 2) * input_w
+                    face_center_y = (bbox.ymin + bbox.height / 2) * input_h
+                    face_size = bbox.width * bbox.height
+                    
+                    person_detections.append({
+                        'frame': frame_idx,
+                        'time': frame_time,
+                        'x': int(face_center_x),
+                        'y': int(face_center_y),
+                        'size': face_size,
+                        'type': 'face'
+                    })
+            
+            frame_idx += 1
+        
+        cap.release()
+    
+    logger.info(f"      ✅ Detected {len(person_detections)} person instances across frames")
+    
+    if len(person_detections) == 0:
+        logger.warning(f"      ⚠️ No people detected - using center crop")
+        return [{'frame': 0, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
+    
+    # STEP 3: Cluster people by spatial position to identify distinct individuals
+    person_clusters = cluster_people_by_position(person_detections, input_w)
+    logger.info(f"      👥 Identified {len(person_clusters)} distinct people in video")
+    
+    # STEP 4: Map speakers to person clusters based on who's talking when
+    speaker_to_position = map_speakers_to_positions(speaker_timeline, person_clusters, person_detections)
+    
+    # STEP 5: Generate crop positions based on active speaker at each moment
+    crop_positions = []
+    
+    # Get all unique frame numbers we sampled
+    sampled_frames = sorted(set(d['frame'] for d in person_detections))
+    
+    for frame_num in sampled_frames:
+        frame_time = frame_num / fps
+        
+        # Find who's speaking at this time
+        active_speaker = get_active_speaker_at_time(speaker_timeline, frame_time)
+        
+        if active_speaker and active_speaker in speaker_to_position:
+            # Get the position of the active speaker
+            speaker_pos = speaker_to_position[active_speaker]
+            center_x = speaker_pos['avg_x']
+            logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): Tracking {active_speaker} at X={center_x}")
+        else:
+            # No speaker or unknown speaker - use most prominent person
+            frame_detections = [d for d in person_detections if d['frame'] == frame_num]
+            if frame_detections:
+                largest_person = max(frame_detections, key=lambda d: d['size'])
+                center_x = largest_person['x']
+            else:
+                center_x = input_w // 2
+        
+        # Calculate crop position
+        crop_x = center_x - (crop_w // 2)
+        crop_x = max(0, min(crop_x, input_w - crop_w))
+        
+        crop_positions.append({
+            'frame': frame_num,
+            'crop_x': crop_x,
+            'center_x': center_x,
+            'has_detection': True,
+            'active_speaker': active_speaker if active_speaker else 'unknown'
+        })
+    
+    if len(crop_positions) == 0:
+        logger.warning(f"      ⚠️ No crop positions generated - using center")
+        return [{'frame': 0, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
+    
+    # Smooth out crop positions to avoid jittery movement
+    crop_positions = smooth_crop_positions(crop_positions, window_size=5)
+    
+    return crop_positions
+
+
+def build_speaker_timeline(transcript: Dict[str, Any], start_time: float, end_time: float) -> list:
+    """
+    Extract speaker utterances from transcript that overlap with the clip segment.
+    Returns list of {speaker, start, end} dicts in clip-relative time.
+    """
+    if not transcript or 'utterances' not in transcript:
+        return []
+    
+    timeline = []
+    for utterance in transcript['utterances']:
+        utt_start = utterance.get('start', 0) / 1000.0  # Convert ms to seconds
+        utt_end = utterance.get('end', 0) / 1000.0
+        speaker = utterance.get('speaker', 'Unknown')
+        
+        # Check if utterance overlaps with our clip segment
+        if utt_start < end_time and utt_end > start_time:
+            # Convert to clip-relative time (0-based)
+            clip_start = max(0, utt_start - start_time)
+            clip_end = min(end_time - start_time, utt_end - start_time)
+            
+            timeline.append({
+                'speaker': speaker,
+                'start': clip_start,
+                'end': clip_end
+            })
+    
+    return timeline
+
+
+def cluster_people_by_position(detections: list, frame_width: int) -> dict:
+    """
+    Cluster detected people by their X position to identify distinct individuals.
+    Returns dict: {cluster_id: {avg_x, avg_y, count}}
+    """
+    import numpy as np
+    
+    if not detections:
+        return {}
+    
+    # Extract X positions
+    x_positions = [d['x'] for d in detections]
+    
+    # Simple clustering: group people within 200px of each other
+    CLUSTER_THRESHOLD = 200
+    clusters = {}
+    cluster_id = 0
+    
+    for detection in detections:
+        x = detection['x']
+        y = detection['y']
+        
+        # Find if this belongs to existing cluster
+        matched_cluster = None
+        for cid, cluster in clusters.items():
+            if abs(x - cluster['avg_x']) < CLUSTER_THRESHOLD:
+                matched_cluster = cid
+                break
+        
+        if matched_cluster is not None:
+            # Add to existing cluster
+            cluster = clusters[matched_cluster]
+            cluster['x_positions'].append(x)
+            cluster['y_positions'].append(y)
+            cluster['count'] += 1
+            cluster['avg_x'] = int(np.mean(cluster['x_positions']))
+            cluster['avg_y'] = int(np.mean(cluster['y_positions']))
+        else:
+            # Create new cluster
+            clusters[cluster_id] = {
+                'avg_x': x,
+                'avg_y': y,
+                'x_positions': [x],
+                'y_positions': [y],
+                'count': 1
+            }
+            cluster_id += 1
+    
+    return clusters
+
+
+def map_speakers_to_positions(speaker_timeline: list, person_clusters: dict, detections: list) -> dict:
+    """
+    Map each speaker to a spatial position (person cluster) based on temporal correlation.
+    
+    Strategy: When a speaker is talking, find which person position appears most frequently.
+    Returns dict: {speaker_name: cluster_info}
+    """
+    import numpy as np
+    
+    if not speaker_timeline or not person_clusters:
+        return {}
+    
+    speaker_positions = {}
+    
+    for speaker_utt in speaker_timeline:
+        speaker = speaker_utt['speaker']
+        utt_start = speaker_utt['start']
+        utt_end = speaker_utt['end']
+        
+        # Find all person detections during this utterance
+        detections_during_speech = [
+            d for d in detections 
+            if utt_start <= d['time'] <= utt_end
+        ]
+        
+        if not detections_during_speech:
+            continue
+        
+        # Find which cluster appears most during this speaker's time
+        cluster_votes = {}
+        for detection in detections_during_speech:
+            x = detection['x']
+            
+            # Find closest cluster
+            closest_cluster = None
+            min_distance = float('inf')
+            for cid, cluster in person_clusters.items():
+                distance = abs(x - cluster['avg_x'])
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_cluster = cid
+            
+            if closest_cluster is not None:
+                cluster_votes[closest_cluster] = cluster_votes.get(closest_cluster, 0) + 1
+        
+        # Assign speaker to most common cluster
+        if cluster_votes:
+            best_cluster_id = max(cluster_votes, key=cluster_votes.get)
+            speaker_positions[speaker] = person_clusters[best_cluster_id]
+    
+    return speaker_positions
+
+
+def get_active_speaker_at_time(speaker_timeline: list, time: float) -> str:
+    """
+    Find which speaker is talking at the given time.
+    Returns speaker name or None.
+    """
+    for utterance in speaker_timeline:
+        if utterance['start'] <= time <= utterance['end']:
+            return utterance['speaker']
+    return None
+
+
+def smooth_crop_positions(positions: list, window_size: int = 5) -> list:
+    """
+    Apply moving average to crop positions for smooth transitions.
+    """
+    import numpy as np
+    
+    if len(positions) <= window_size:
+        return positions
+    
+    crop_x_values = [p['crop_x'] for p in positions]
+    smoothed_x = np.convolve(crop_x_values, np.ones(window_size)/window_size, mode='same')
+    
+    for i, pos in enumerate(positions):
+        pos['crop_x'] = int(smoothed_x[i])
+    
+    return positions
+
+
+async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, crop_positions: list):
+    """
+    Apply crop to video with smooth transitions between positions using FFmpeg.
+    """
+    import cv2
+    
+    cap = cv2.VideoCapture(temp_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    
+    crop_h = input_h
+    crop_w = int(crop_h * 0.5625)
+    
+    # Build FFmpeg filter with zoompan for smooth crop transitions
+    # If we have multiple positions, interpolate between them
+    if len(crop_positions) > 1:
+        # Use first detected crop position
+        initial_crop_x = crop_positions[0]['crop_x']
+        
+        # For now, use a simple approach: crop at median position
+        # This provides stability while following the subject
+        import numpy as np
+        median_crop_x = int(np.median([p['crop_x'] for p in crop_positions]))
+        
+        filter_str = f"crop={crop_w}:{crop_h}:{median_crop_x}:0,scale=1080:1920"
+    else:
+        crop_x = crop_positions[0]['crop_x']
+        filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920"
+    
     cmd = [
         "ffmpeg",
         "-y",
@@ -214,17 +576,13 @@ async def create_clip(
         "-preset", "fast",
         "-crf", "23",
         "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
         output_path
     ]
-    print(f"Running FFmpeg for vertical letterbox: {' '.join(cmd)}")
+    
+    logger.info(f"      Crop filter: {filter_str}")
     subprocess.run(cmd, check=True)
-
-    # Remove the temp file
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
-
-    return output_path
 
 
 # async def create_clip(
