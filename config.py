@@ -84,7 +84,7 @@ class Settings:
     MIN_CLIP_DURATION = 15 # Minimum clip duration in seconds (15-180 second range for complete context)
     MAX_CLIP_DURATION = 180 # Maximum clip duration in seconds (3 minutes for in-depth conversations)
     PREFERRED_CLIP_DURATION = 45  # Preferred clip duration in seconds (45 sec for complete thoughts)
-    MAX_CLIPS_PER_EPISODE = 40  # Limit to 40 clips per episode to manage processing load
+    MAX_CLIPS_PER_EPISODE = 10  # Limit to 10 clips per episode for quality over quantity
     
     # Video settings
     OUTPUT_WIDTH = 1080  # Width for vertical video (9:16 aspect ratio)
@@ -128,9 +128,9 @@ class Settings:
     PROXY_BASE_URL = clean_env_value(os.getenv("PROXY_BASE_URL", "https://895a753eda46.ngrok-free.app"))
 
     #youtube
-    YOUTUBE_CLIENT_ID = clean_env_value(get_secret("/clip-it/youtube-client-id", "YOUTUBE_CLIENT_ID", "your_youtube_client_id"))
-    YOUTUBE_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/youtube-client-secret", "YOUTUBE_CLIENT_SECRET", "your_youtube_client_secret"))
-    YOUTUBE_REDIRECT_URI = clean_env_value(get_secret("/clip-it/youtube-redirect-uri", "YOUTUBE_REDIRECT_URI", "http://localhost:8000/youtube/callback"))
+    YOUTUBE_CLIENT_ID = clean_env_value(get_secret("/clip-it/youtube-client-id", "YOUTUBE_CLIENT_ID", "784400682902-masbc207h16jkjf6hhlbdap8pkcn5p2i.apps.googleusercontent.com"))
+    YOUTUBE_CLIENT_SECRET = clean_env_value(get_secret("/clip-it/youtube-client-secret", "YOUTUBE_CLIENT_SECRET", "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"))
+    YOUTUBE_REDIRECT_URI = clean_env_value(get_secret("/clip-it/youtube-redirect-uri", "YOUTUBE_REDIRECT_URI", "https://api.klipz.ai/youtube/callback"))
     YOUTUBE_SCOPES = [
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/userinfo.profile",

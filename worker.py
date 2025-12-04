@@ -360,7 +360,21 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info("📝 STEP 1: Starting transcription (AssemblyAI + Speaker Diarization)...")
         
         # AssemblyAI handles transcription in the cloud - no local model needed
-        transcript = await transcribe_audio(file_path)
+        try:
+            file_size = None
+            try:
+                file_size = os.path.getsize(file_path)
+                logger.info(f"   Transcription input size: {file_size / (1024*1024):.2f} MB")
+            except Exception:
+                logger.info("   Transcription input size: unknown")
+
+            t_trans_start = time.time()
+            transcript = await transcribe_audio(file_path)
+            t_trans_end = time.time()
+            logger.info(f"   transcribe_audio() total time: {t_trans_end - t_trans_start:.2f}s")
+        except Exception as e:
+            logger.error(f"Transcription error: {str(e)}", exc_info=True)
+            raise
         
         if not transcript:
             raise ValueError("Transcription returned None")
