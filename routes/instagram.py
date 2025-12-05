@@ -6,6 +6,8 @@ Handles authentication, video posting, and status checking.
 import logging
 import secrets
 import time
+import tempfile
+import shutil
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Annotated, List
 from urllib.parse import urlencode, quote
@@ -395,6 +397,9 @@ async def disconnect_instagram(
 
 
 # Content Posting Routes (Placeholder for now, will implement next)
+import asyncio
+
+
 @router.post("/creator-info", response_model=InstagramCreatorInfoResponse)
 async def get_creator_info(
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -413,40 +418,192 @@ async def get_creator_info(
     )
 
 
-# @router.post("/post/video", response_model=InstagramPostResponse)
-# async def post_video_to_instagram(
-#     caption: str = Form(...),
-#     video_url: str = Form(...),
-#     cover_file: Optional[UploadFile] = File(None),
-#     # To check status, we usually check the Container ID, but here we might only have Media ID.
-#     # Actually, for Reels, the media_publish returns the Media ID.
-#     # If we want to check status of the *upload*, we should probably check the Container ID.
-#     # But the user flow usually returns the publish_id (Media ID) after publish.
-#     # Let's assume we can query the Media ID for status.
+@router.post("/post/video", response_model=InstagramPostResponse)
+async def post_video_to_instagram(
+    video_url: str = Form(...),
+    caption: str = Form(...),
+    title: str = Form(None),
+    hashtags: str = Form(None),
+    privacy_level: str = Form(None),
+    disable_comments: bool = Form(False),
+    schedule_date: str = Form(None),
+    schedule_time: str = Form(None),
+    cover_file: Optional[UploadFile] = File(None),
+    video_cover_timestamp_ms: Optional[float] = Form(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Publishes a video to Instagram.
+    Handles video URL, caption, hashtags, and optional cover image.
+    """
+    user_id = _extract_user_id(current_user)
+    tokens = await _require_tokens(user_id)
 
-#     async with httpx.AsyncClient() as client:
-#         resp = await client.get(
-#             f"https://graph.instagram.com/{publish_id}",
-#             params={
-#                 "fields": "status_code,status",  # These fields might be for Container, not Media.
-#                 "access_token": access_token,
-#             },
-#         )
+    access_token = tokens.get("access_token")
+    user_profile = tokens.get("user_profile", {})
+    ig_user_id = user_profile.get("id")
 
-#         # If it's a Media ID, it might not have 'status_code'. It might just exist.
-#         # If the ID is valid and returns data, it's likely published.
+    if not access_token or not ig_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Instagram credentials not found. Please reconnect.",
+        )
 
-#         if resp.status_code == 200:
-#             data = resp.json()
-#             # If we get data back for a Media ID, it means it's published/created.
-#             # Instagram Graph API doesn't have a granular "processing" status for Media ID
-#             # the same way Container ID does.
-#             # But if we want to be safe, we might need to store the Container ID.
-#             # For now, let's assume if we can fetch it, it's FINISHED.
+    # 1. Prepare Caption
+    full_caption = caption
+    if title:
+        full_caption = f"{title}\n\n{full_caption}"
+    if hashtags:
+        full_caption = f"{full_caption}\n\n{hashtags}"
 
-#             return InstagramPostStatusResponse(publish_id=publish_id, status="FINISHED")
-#         else:
-#             return InstagramPostStatusResponse(
-#                 publish_id=publish_id, status="ERROR", error_message=resp.text
-#             )
-#         )
+    # 2. Handle Cover Image
+    cover_url = None
+    if cover_file:
+        # Upload cover to S3
+        file_ext = os.path.splitext(cover_file.filename)[1] or ".jpg"
+        filename = f"ig_cover_{uuid.uuid4()}{file_ext}"
+
+        # Save to temp file first
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            shutil.copyfileobj(cover_file.file, temp_file)
+            temp_path = temp_file.name
+
+        try:
+            success, s3_key = s3_client.upload_file_to_s3(
+                temp_path,
+                user_id,
+                filename,
+                content_type=cover_file.content_type or "image/jpeg",
+            )
+            if success:
+                # Get a presigned URL or public URL that Instagram can access
+                # Instagram needs a public URL. If S3 is private, we need a presigned URL.
+                cover_url = s3_client.get_object_url(
+                    s3_key, presigned=True, expires_in=3600
+                )
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    # 3. Create Media Container
+    # POST https://graph.instagram.com/v21.0/{ig-user-id}/media
+    container_url = f"https://graph.instagram.com/v21.0/{ig_user_id}/media"
+
+    data = {
+        "media_type": "REELS",  # Or VIDEO, but REELS is often preferred for short form
+        "video_url": video_url,
+        "caption": full_caption,
+        "access_token": access_token,
+    }
+
+    # Add optional fields
+    if cover_url:
+        data["cover_url"] = cover_url
+    elif video_cover_timestamp_ms is not None:
+        data["thumb_offset"] = int(video_cover_timestamp_ms)
+
+    # Note: privacy_level is not directly supported for standard API posting (it defaults to account setting)
+    # disable_comments might be supported via 'comment_enabled' = !disable_comments if the API allows it for this endpoint.
+    # Checking docs: 'comment_enabled' is not always available on creation for all endpoints, but we can try.
+    # For now, we'll omit it to avoid errors unless we are sure.
+
+    async with httpx.AsyncClient() as client:
+        # Step A: Create Container
+        logger.info(f"Creating IG media container for user {ig_user_id}")
+        resp = await client.post(container_url, data=data)
+
+        if resp.status_code != 200:
+            logger.error(f"IG Create Container Failed: {resp.text}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to create Instagram media container: {resp.text}",
+            )
+
+        container_id = resp.json().get("id")
+        logger.info(f"Container created: {container_id}")
+
+        # Step B: Poll container processing status
+
+        status_url = f"https://graph.instagram.com/v21.0/{container_id}"
+        params = {"fields": "status_code", "access_token": access_token}
+
+        max_attempts = 20
+        poll_interval = 10  # Increase to 10 seconds
+        backoff_time = 60  # Start backoff at 60 seconds
+
+        for attempt in range(max_attempts):
+            status_resp = await client.get(status_url, params=params)
+
+            if status_resp.status_code != 200:
+                # Check for rate limit
+                if status_resp.status_code == 403:
+                    error_data = status_resp.json()
+                    error_code = error_data.get("error", {}).get("code")
+                    # Code 4 is "Application request limit reached"
+                    if error_code == 4:
+                        logger.warning(
+                            f"Rate limit hit. Waiting {backoff_time}s before retry. Attempt {attempt + 1}/{max_attempts}"
+                        )
+                        await asyncio.sleep(backoff_time)
+                        backoff_time *= 2  # Exponential backoff
+                        continue
+
+                logger.error(
+                    f"Container status check failed: {status_resp.status_code} - {status_resp.text}"
+                )
+                # Don't break immediately, maybe it's a transient issue?
+                # But 403 usually means permission denied.
+                if status_resp.status_code == 403:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Permission denied checking container status: {status_resp.text}",
+                    )
+                await asyncio.sleep(poll_interval)
+                continue
+
+            status_json = status_resp.json()
+            status_code_val = status_json.get("status_code")
+
+            logger.info(f"Container {container_id} status: {status_code_val}")
+
+            if status_code_val == "FINISHED":
+                break
+
+            if status_code_val == "ERROR":
+                logger.error(
+                    f"Container {container_id} failed. Full response: {status_json}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Instagram reported an error processing the video: {status_json}",
+                )
+
+            await asyncio.sleep(poll_interval)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                detail="Instagram video processing timed out. Try again later.",
+            )
+
+        # Step C: Publish Container
+        # POST https://graph.instagram.com/v21.0/{ig-user-id}/media_publish
+        publish_url = f"https://graph.instagram.com/v21.0/{ig_user_id}/media_publish"
+        publish_data = {"creation_id": container_id, "access_token": access_token}
+
+        logger.info(f"Publishing IG media container {container_id}")
+        # Publishing can take time, so we increase the timeout
+        publish_resp = await client.post(publish_url, data=publish_data, timeout=60.0)
+
+        if publish_resp.status_code != 200:
+            logger.error(f"IG Publish Failed: {publish_resp.text}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to publish Instagram media: {publish_resp.text}",
+            )
+
+        publish_id = publish_resp.json().get("id")
+
+        return InstagramPostResponse(
+            publish_id=publish_id,
+            status="PUBLISHED",
+        )
