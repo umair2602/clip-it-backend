@@ -275,7 +275,7 @@ async def instagram_callback(
             # ?grant_type=ig_exchange_token&client_secret={client-secret}&access_token={short-lived-token}
 
             long_lived_resp = await client.get(
-                "https://api.instagram.com/oauth/access_token",
+                "https://graph.instagram.com/access_token",
                 params={
                     "grant_type": "ig_exchange_token",
                     "client_secret": settings.INSTA_APP_SECRET,
@@ -301,7 +301,7 @@ async def instagram_callback(
             # Fetch User Profile
             # GET https://graph.instagram.com/me?fields=id,username,account_type,media_count&access_token={access-token}
             profile_resp = await client.get(
-                "https://api.instagram.com/me",
+                "https://graph.instagram.com/me",
                 params={
                     "fields": "id,username,account_type,media_count",
                     "access_token": access_token,
@@ -369,7 +369,7 @@ async def instagram_callback(
         return HTMLResponse(f"<h1>Error</h1><p>{str(e)}</p>", status_code=500)
 
 
-@router.get("/me", response_model=InstagramProfileResponse)
+@router.get("/me")
 async def get_instagram_me(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -380,15 +380,8 @@ async def get_instagram_me(
     if not tokens:
         raise HTTPException(status_code=404, detail="Instagram not connected")
 
-    profile = tokens.get("user_profile", {})
-
-    return InstagramProfileResponse(
-        id=profile.get("id", ""),
-        username=profile.get("username", ""),
-        account_type=profile.get("account_type"),
-        media_count=profile.get("media_count"),
-        instagram_connected_at=tokens.get("created_at"),
-    )
+    # Debug: Return raw tokens to see what's going on
+    return tokens
 
 
 @router.post("/disconnect")
