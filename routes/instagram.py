@@ -522,71 +522,116 @@ async def post_video_to_instagram(
         container_id = resp.json().get("id")
         logger.info(f"Container created: {container_id}")
 
-        # Step B: Poll container processing status
+        # Return the container ID immediately so frontend can poll
+        return InstagramPostResponse(
+            publish_id=container_id,
+            status="CREATED",
+        )
 
-        status_url = f"https://graph.instagram.com/v21.0/{container_id}"
-        params = {"fields": "status_code", "access_token": access_token}
 
-        max_attempts = 20
-        poll_interval = 10  # Increase to 10 seconds
-        backoff_time = 60  # Start backoff at 60 seconds
-
-        for attempt in range(max_attempts):
-            status_resp = await client.get(status_url, params=params)
-
-            if status_resp.status_code != 200:
-                # Check for rate limit
-                if status_resp.status_code == 403:
-                    error_data = status_resp.json()
-                    error_code = error_data.get("error", {}).get("code")
-                    # Code 4 is "Application request limit reached"
-                    if error_code == 4:
-                        logger.warning(
-                            f"Rate limit hit. Waiting {backoff_time}s before retry. Attempt {attempt + 1}/{max_attempts}"
-                        )
-                        await asyncio.sleep(backoff_time)
-                        backoff_time *= 2  # Exponential backoff
-                        continue
-
-                logger.error(
-                    f"Container status check failed: {status_resp.status_code} - {status_resp.text}"
-                )
-                # Don't break immediately, maybe it's a transient issue?
-                # But 403 usually means permission denied.
-                if status_resp.status_code == 403:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Permission denied checking container status: {status_resp.text}",
-                    )
-                await asyncio.sleep(poll_interval)
-                continue
-
-            status_json = status_resp.json()
-            status_code_val = status_json.get("status_code")
-
-            logger.info(f"Container {container_id} status: {status_code_val}")
-
-            if status_code_val == "FINISHED":
-                break
-
-            if status_code_val == "ERROR":
-                logger.error(
-                    f"Container {container_id} failed. Full response: {status_json}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Instagram reported an error processing the video: {status_json}",
-                )
-
-            await asyncio.sleep(poll_interval)
-        else:
+@router.get("/container/{container_id}", response_model=InstagramPostStatusResponse)
+async def get_container_status(
+    container_id: str,
+    access_token: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Check the status of an Instagram media container.
+    """
+    if not access_token:
+        # Try to get from user tokens
+        user_id = _extract_user_id(current_user)
+        tokens = await instagram_token_service.get_tokens(user_id)
+        if not tokens or not tokens.get("access_token"):
             raise HTTPException(
-                status_code=status.HTTP_408_REQUEST_TIMEOUT,
-                detail="Instagram video processing timed out. Try again later.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Instagram not connected",
+            )
+        access_token = tokens["access_token"]
+
+    status_url = f"https://graph.instagram.com/v21.0/{container_id}"
+    params = {"fields": "status_code", "access_token": access_token}
+
+    async with httpx.AsyncClient() as client:
+        status_resp = await client.get(status_url, params=params)
+
+        if status_resp.status_code != 200:
+            logger.error(
+                f"Container status check failed: {status_resp.status_code} - {status_resp.text}"
+            )
+            if status_resp.status_code == 403:
+                # Check for rate limit error code
+                error_data = status_resp.json()
+                error_code = error_data.get("error", {}).get("code")
+                if error_code == 4:
+                    return InstagramPostStatusResponse(
+                        publish_id=container_id,
+                        status="RATE_LIMIT",
+                        error_message="Instagram rate limit reached. Please wait.",
+                    )
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to check container status: {status_resp.text}",
             )
 
-        # Step C: Publish Container
-        # POST https://graph.instagram.com/v21.0/{ig-user-id}/media_publish
+        status_json = status_resp.json()
+        status_code_val = status_json.get("status_code")
+
+        logger.info(f"Container {container_id} status: {status_code_val}")
+
+        return InstagramPostStatusResponse(
+            publish_id=container_id,
+            status=status_code_val,  # IN_PROGRESS, FINISHED, ERROR
+        )
+
+
+@router.post("/publish/{container_id}", response_model=InstagramPostResponse)
+async def publish_media(
+    container_id: str,
+    access_token: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Publish an Instagram media container after it has finished processing.
+    """
+    if not access_token:
+        # Try to get from user tokens
+        user_id = _extract_user_id(current_user)
+        tokens = await instagram_token_service.get_tokens(user_id)
+        if not tokens or not tokens.get("access_token"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Instagram not connected",
+            )
+        access_token = tokens["access_token"]
+        ig_user_id = tokens.get("user_profile", {}).get("id")
+        if not ig_user_id:
+            # Try to fetch profile if ID missing (shouldn't happen if auth flow worked)
+            # Or we can decode token but that's complex.
+            # Let's assume we have it or fetch it.
+            pass  # For now assume we have it or can get it from /me
+
+    # We need the user ID to publish. If it wasn't in tokens, we need to fetch it.
+    # But wait, the publish endpoint is /{ig-user-id}/media_publish
+    # So we definitely need it.
+
+    if not access_token:  # Double check
+        raise HTTPException(status_code=401, detail="No access token")
+
+    async with httpx.AsyncClient() as client:
+        # If we don't have ig_user_id, fetch it
+        if not locals().get("ig_user_id"):
+            me_resp = await client.get(
+                f"https://graph.instagram.com/me?access_token={access_token}"
+            )
+            if me_resp.status_code == 200:
+                ig_user_id = me_resp.json().get("id")
+            else:
+                raise HTTPException(
+                    status_code=400, detail="Could not fetch Instagram User ID"
+                )
+
         publish_url = f"https://graph.instagram.com/v21.0/{ig_user_id}/media_publish"
         publish_data = {"creation_id": container_id, "access_token": access_token}
 
