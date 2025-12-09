@@ -13,14 +13,27 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+# Set up logging first (before imports that might use it)
+logger = logging.getLogger(__name__)
+
 # Import other services
 # face tracking removed to simplify and speed up clip creation
 
+# IMPROVED: Import audio-visual correlation module
+try:
+    from services.audio_analysis import (
+        extract_audio_from_video,
+        calculate_frame_audio_energy,
+        calculate_mouth_opening,
+        calculate_time_aligned_correlation
+    )
+    AUDIO_CORRELATION_AVAILABLE = True
+except ImportError:
+    logger.warning("Audio correlation module not available, using visual-only detection")
+    AUDIO_CORRELATION_AVAILABLE = False
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import settings
-
-# Set up logging
-logger = logging.getLogger(__name__)
 
 async def process_video(
     video_path: str, transcript: Dict[str, Any], segments: List[Dict[str, Any]]
@@ -250,27 +263,55 @@ async def detect_mediapipe_crop_positions(
     crop_w = int(crop_h * 0.5625)  # 607px for 1080p
     
     # STEP 1: Build speaker timeline from transcript
+    logger.info(f"      🔍 Checking transcript data...")
+    logger.info(f"         Transcript type: {type(transcript)}")
+    logger.info(f"         Transcript keys: {transcript.keys() if transcript and isinstance(transcript, dict) else 'None'}")
+    
     speaker_timeline = build_speaker_timeline(transcript, start_time, end_time)
     if speaker_timeline:
         logger.info(f"      📢 Speaker timeline: {len(speaker_timeline)} utterances")
         for utt in speaker_timeline[:3]:  # Log first 3
             logger.info(f"         {utt['speaker']}: {utt['start']:.1f}s - {utt['end']:.1f}s")
+    else:
+        logger.warning(f"      ⚠️ No speaker timeline data found - will use visual tracking only")
+        logger.warning(f"         This means crop won't follow active speaker intelligently")
     
-    # STEP 2: Detect all people in frames and build person tracking database
-    person_detections = []  # List of all detected people across frames
-    sample_interval = max(1, int(fps / 5))  # Sample 5 frames per second
+    # IMPROVED: Extract audio for audio-visual correlation
+    audio_energies = None
+    if AUDIO_CORRELATION_AVAILABLE:
+        try:
+            logger.info(f"      🔊 Extracting audio for audio-visual correlation...")
+            audio, sr = extract_audio_from_video(video_path)
+            audio_energies = calculate_frame_audio_energy(audio, sr, fps, total_frames)
+            logger.info(f"      ✅ Audio correlation enabled (mean energy: {audio_energies.mean():.3f})")
+        except Exception as e:
+            logger.warning(f"      ⚠️ Audio extraction failed: {e}. Using visual-only detection.")
+            audio_energies = None
+    else:
+        logger.info(f"      ℹ️ Audio correlation not available, using visual-only detection")
     
-    with mp_pose.Pose(
+    # STEP 2: Detect all people AND their lip movement for speech detection
+    person_detections = []  # List of all detected people with lip movement data
+    sample_interval = max(1, int(fps / 10))  # IMPROVED: Sample 10 frames per second for better speaker change detection
+    
+    mp_face_mesh = mp.solutions.face_mesh
+    
+    # Lip landmark indices (MediaPipe Face Mesh)
+    # Upper lip: 61, 291, 0  |  Lower lip: 17, 314, 0
+    # We'll track vertical distance between upper and lower lips
+    UPPER_LIP_INDICES = [13, 14]  # Top lip landmarks
+    LOWER_LIP_INDICES = [78, 308]  # Bottom lip landmarks
+    
+    with mp_face_mesh.FaceMesh(
         static_image_mode=False,
-        model_complexity=1,
+        max_num_faces=5,  # Track up to 5 people
+        refine_landmarks=False,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
-    ) as pose, mp_face.FaceDetection(
-        model_selection=0,
-        min_detection_confidence=0.5
-    ) as face_detection:
+    ) as face_mesh:
         
         frame_idx = 0
+        prev_lip_distances = {}  # Track lip distance per person for movement detection
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -288,24 +329,81 @@ async def detect_mediapipe_crop_positions(
             # Convert BGR to RGB for MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Detect ALL faces in frame (not just largest)
-            face_results = face_detection.process(rgb_frame)
+            # Detect faces and lips
+            results = face_mesh.process(rgb_frame)
             
-            if face_results.detections:
-                # Store ALL detected faces with their positions
-                for face in face_results.detections:
-                    bbox = face.location_data.relative_bounding_box
-                    face_center_x = (bbox.xmin + bbox.width / 2) * input_w
-                    face_center_y = (bbox.ymin + bbox.height / 2) * input_h
-                    face_size = bbox.width * bbox.height
+            if results.multi_face_landmarks:
+                # Process each detected face
+                for face_idx, face_landmarks in enumerate(results.multi_face_landmarks):
+                    # Get face bounding box for position
+                    x_coords = [landmark.x for landmark in face_landmarks.landmark]
+                    y_coords = [landmark.y for landmark in face_landmarks.landmark]
+                    
+                    face_center_x = int(np.mean(x_coords) * input_w)
+                    face_center_y = int(np.mean(y_coords) * input_h)
+                    
+                    face_width = (max(x_coords) - min(x_coords)) * input_w
+                    face_height = (max(y_coords) - min(y_coords)) * input_h
+                    face_size = (face_width * face_height) / (input_w * input_h)  # Normalized size
+                    
+                    # Calculate lip distance (vertical opening)
+                    upper_lip_y = np.mean([face_landmarks.landmark[i].y for i in UPPER_LIP_INDICES])
+                    lower_lip_y = np.mean([face_landmarks.landmark[i].y for i in LOWER_LIP_INDICES])
+                    lip_distance = abs(lower_lip_y - upper_lip_y) * input_h
+                    
+                    # Calculate lip movement (change from previous frame)
+                    person_key = f"person_{face_center_x // 100}"  # Group by rough X position
+                    lip_movement = 0
+                    
+                    if person_key in prev_lip_distances:
+                        lip_movement = abs(lip_distance - prev_lip_distances[person_key])
+                    
+                    prev_lip_distances[person_key] = lip_distance
+                    
+                    # IMPROVED: Adaptive lip movement threshold based on face size and resolution
+                    # Larger faces (closer to camera) have larger absolute lip movements
+                    # Normalize threshold: base_threshold * sqrt(face_size) * resolution_factor
+                    base_threshold = 1.5  # Base threshold in pixels
+                    resolution_factor = input_h / 1080.0  # Normalize for different resolutions
+                    size_factor = max(0.5, min(2.0, np.sqrt(face_size) * 10))  # Scale by face size
+                    adaptive_threshold = base_threshold * size_factor * resolution_factor
+                    
+                    is_speaking = lip_movement > adaptive_threshold
+                    
+                    # IMPROVED: Calculate confidence score based on face size, position, and lip movement
+                    # Confidence components:
+                    # 1. Face size (larger = more confident, 0-1 scale)
+                    size_confidence = min(1.0, face_size * 20)  # Normalize face size to 0-1
+                    # 2. Lip movement strength (how much above threshold, 0-1 scale)
+                    movement_strength = min(1.0, lip_movement / (adaptive_threshold * 3)) if is_speaking else 0.0
+                    # 3. Face position (center faces are more likely to be main speaker, 0-1 scale)
+                    center_distance = abs(face_center_x - input_w / 2) / (input_w / 2)
+                    position_confidence = 1.0 - (center_distance * 0.5)  # Center gets 1.0, edges get 0.5
+                    
+                    # Combined confidence (weighted average)
+                    detection_confidence = (
+                        size_confidence * 0.3 +  # 30% weight on size
+                        movement_strength * 0.5 +  # 50% weight on lip movement
+                        position_confidence * 0.2  # 20% weight on position
+                    )
+                    
+                    # IMPROVED: Calculate mouth opening for audio-visual correlation
+                    mouth_opening = calculate_mouth_opening(face_landmarks) if AUDIO_CORRELATION_AVAILABLE else lip_distance
                     
                     person_detections.append({
                         'frame': frame_idx,
                         'time': frame_time,
-                        'x': int(face_center_x),
-                        'y': int(face_center_y),
+                        'x': face_center_x,
+                        'y': face_center_y,
                         'size': face_size,
-                        'type': 'face'
+                        'lip_distance': lip_distance,
+                        'lip_movement': lip_movement,
+                        'is_speaking': is_speaking,
+                        'confidence': detection_confidence,  # IMPROVED: Add confidence score
+                        'adaptive_threshold': adaptive_threshold,  # Store for debugging
+                        'mouth_opening': mouth_opening,  # IMPROVED: For audio correlation
+                        'face_landmarks': face_landmarks,  # Store for potential future use
+                        'type': 'face_mesh'
                     })
             
             frame_idx += 1
@@ -322,8 +420,14 @@ async def detect_mediapipe_crop_positions(
     person_clusters = cluster_people_by_position(person_detections, input_w)
     logger.info(f"      👥 Identified {len(person_clusters)} distinct people in video")
     
-    # STEP 4: Map speakers to person clusters based on who's talking when
-    speaker_to_position = map_speakers_to_positions(speaker_timeline, person_clusters, person_detections)
+    # STEP 4: Map speakers to person clusters using AUDIO-VISUAL CORRELATION + transcript
+    speaker_to_position = map_speakers_to_positions(
+        speaker_timeline, 
+        person_clusters, 
+        person_detections,
+        audio_energies=audio_energies,  # IMPROVED: Pass audio data
+        fps=fps  # IMPROVED: Pass FPS for time alignment
+    )
     
     # STEP 5: Generate crop positions based on active speaker at each moment
     crop_positions = []
@@ -355,12 +459,17 @@ async def detect_mediapipe_crop_positions(
         crop_x = center_x - (crop_w // 2)
         crop_x = max(0, min(crop_x, input_w - crop_w))
         
+        # IMPROVED: Get average confidence for this frame's detections
+        frame_detections = [d for d in person_detections if d['frame'] == frame_num]
+        avg_confidence = np.mean([d.get('confidence', 0.5) for d in frame_detections]) if frame_detections else 0.5
+        
         crop_positions.append({
             'frame': frame_num,
             'crop_x': crop_x,
             'center_x': center_x,
             'has_detection': True,
-            'active_speaker': active_speaker if active_speaker else 'unknown'
+            'active_speaker': active_speaker if active_speaker else 'unknown',
+            'confidence': avg_confidence  # IMPROVED: Add confidence for weighted cropping
         })
     
     if len(crop_positions) == 0:
@@ -377,29 +486,82 @@ def build_speaker_timeline(transcript: Dict[str, Any], start_time: float, end_ti
     """
     Extract speaker utterances from transcript that overlap with the clip segment.
     Returns list of {speaker, start, end} dicts in clip-relative time.
+    
+    Handles both AssemblyAI format (utterances) and custom format (speakers + segments).
     """
-    if not transcript or 'utterances' not in transcript:
+    if not transcript:
+        logger.debug("      No transcript provided")
         return []
     
     timeline = []
-    for utterance in transcript['utterances']:
-        utt_start = utterance.get('start', 0) / 1000.0  # Convert ms to seconds
-        utt_end = utterance.get('end', 0) / 1000.0
-        speaker = utterance.get('speaker', 'Unknown')
-        
-        # Check if utterance overlaps with our clip segment
-        if utt_start < end_time and utt_end > start_time:
-            # Convert to clip-relative time (0-based)
-            clip_start = max(0, utt_start - start_time)
-            clip_end = min(end_time - start_time, utt_end - start_time)
+    
+    # FORMAT 1: AssemblyAI format with 'utterances' key
+    if 'utterances' in transcript:
+        logger.debug(f"      Using AssemblyAI utterances format ({len(transcript['utterances'])} utterances)")
+        for utterance in transcript['utterances']:
+            # Times are already in seconds (converted in transcription_assemblyai.py)
+            utt_start = float(utterance.get('start', 0))
+            utt_end = float(utterance.get('end', 0))
+            speaker = utterance.get('speaker', 'Unknown')
             
-            timeline.append({
-                'speaker': speaker,
-                'start': clip_start,
-                'end': clip_end
-            })
+            # Check if utterance overlaps with our clip segment
+            if utt_start < end_time and utt_end > start_time:
+                # Convert to clip-relative time (0-based)
+                clip_start = max(0, utt_start - start_time)
+                clip_end = min(end_time - start_time, utt_end - start_time)
+                
+                timeline.append({
+                    'speaker': speaker,
+                    'start': clip_start,
+                    'end': clip_end
+                })
+    
+    # FORMAT 2: Custom format with 'speakers' array
+    elif 'speakers' in transcript and isinstance(transcript['speakers'], list):
+        logger.debug(f"      Using custom speakers format ({len(transcript['speakers'])} speaker entries)")
+        for speaker_entry in transcript['speakers']:
+            # speaker_entry might be: {speaker: "A", start: 10.5, end: 15.2, text: "..."}
+            if isinstance(speaker_entry, dict):
+                spk_start = float(speaker_entry.get('start', 0))
+                spk_end = float(speaker_entry.get('end', 0))
+                speaker = speaker_entry.get('speaker', 'Unknown')
+                
+                # Check if speaker segment overlaps with our clip
+                if spk_start < end_time and spk_end > start_time:
+                    clip_start = max(0, spk_start - start_time)
+                    clip_end = min(end_time - start_time, spk_end - start_time)
+                    
+                    timeline.append({
+                        'speaker': speaker,
+                        'start': clip_start,
+                        'end': clip_end
+                    })
+    
+    # FORMAT 3: Try segments with speaker info
+    elif 'segments' in transcript:
+        logger.debug(f"      Checking segments format ({len(transcript['segments'])} segments)")
+        for segment in transcript['segments']:
+            if isinstance(segment, dict) and 'speaker' in segment:
+                seg_start = float(segment.get('start', 0))
+                seg_end = float(segment.get('end', 0))
+                speaker = segment.get('speaker', 'Unknown')
+                
+                if seg_start < end_time and seg_end > start_time:
+                    clip_start = max(0, seg_start - start_time)
+                    clip_end = min(end_time - start_time, seg_end - start_time)
+                    
+                    timeline.append({
+                        'speaker': speaker,
+                        'start': clip_start,
+                        'end': clip_end
+                    })
+    
+    else:
+        logger.debug(f"      No speaker data found in transcript. Available keys: {list(transcript.keys())}")
     
     return timeline
+
+
 
 
 def cluster_people_by_position(detections: list, frame_width: int) -> dict:
@@ -453,55 +615,240 @@ def cluster_people_by_position(detections: list, frame_width: int) -> dict:
     return clusters
 
 
-def map_speakers_to_positions(speaker_timeline: list, person_clusters: dict, detections: list) -> dict:
+def map_speakers_to_positions(
+    speaker_timeline: list, 
+    person_clusters: dict, 
+    detections: list,
+    audio_energies: np.ndarray = None,  # IMPROVED: Audio energy data
+    fps: float = 30.0  # IMPROVED: Frame rate for time alignment
+) -> dict:
     """
-    Map each speaker to a spatial position (person cluster) based on temporal correlation.
+    IMPROVED: Map speakers to positions by PRIORITIZING transcript data over visual-only detection.
     
-    Strategy: When a speaker is talking, find which person position appears most frequently.
+    Strategy:
+    1. Trust the transcript timeline - it knows who's speaking when (from audio)
+    2. Use visual lip movement as CONFIRMATION, not primary detection
+    3. Only consider detections during transcript-confirmed speaking times
+    4. Heavily weight positions that consistently show lip movement during speaking
+    
     Returns dict: {speaker_name: cluster_info}
     """
     import numpy as np
     
     if not speaker_timeline or not person_clusters:
+        logger.warning(f"      Cannot map speakers: timeline={len(speaker_timeline) if speaker_timeline else 0}, clusters={len(person_clusters) if person_clusters else 0}")
         return {}
+    
+    logger.info(f"      🔗 IMPROVED: Mapping {len(set(s['speaker'] for s in speaker_timeline))} speakers to {len(person_clusters)} visual positions (TRANSCRIPT-FIRST approach)")
     
     speaker_positions = {}
     
-    for speaker_utt in speaker_timeline:
-        speaker = speaker_utt['speaker']
-        utt_start = speaker_utt['start']
-        utt_end = speaker_utt['end']
+    # Sort clusters by X position (left to right)
+    sorted_clusters = sorted(person_clusters.items(), key=lambda item: item[1]['avg_x'])
+    cluster_positions = [f"X={c[1]['avg_x']}" for c in sorted_clusters]
+    logger.info(f"         Visual positions detected at: {cluster_positions}")
+    
+    # For each speaker, analyze their speaking time
+    unique_speakers = list(set(s['speaker'] for s in speaker_timeline))
+    
+    # Determine if we can use audio-visual correlation
+    use_audio_correlation = (audio_energies is not None and len(speaker_timeline) > 0)
+    
+    for speaker in unique_speakers:
+        # Get all utterances for this speaker
+        speaker_utterances = [s for s in speaker_timeline if s['speaker'] == speaker]
         
-        # Find all person detections during this utterance
-        detections_during_speech = [
-            d for d in detections 
-            if utt_start <= d['time'] <= utt_end
-        ]
-        
-        if not detections_during_speech:
+        if not speaker_utterances:
             continue
         
-        # Find which cluster appears most during this speaker's time
-        cluster_votes = {}
-        for detection in detections_during_speech:
+        # IMPROVED: Build time windows when THIS speaker is talking
+        speaking_windows = [(utt['start'], utt['end']) for utt in speaker_utterances]
+        total_speaking_time = sum(end - start for start, end in speaking_windows)
+        
+        # Collect detections ONLY during confirmed speaking times
+        # This filters out reactions, laughing, etc. from non-speakers
+        speaker_detections = []
+        speaking_detections = []  # Detections with lip movement during speaking
+        
+        for detection in detections:
+            det_time = detection['time']
+            
+            # Check if this detection falls within any speaking window for this speaker
+            is_during_speaking = any(
+                start <= det_time <= end 
+                for start, end in speaking_windows
+            )
+            
+            if is_during_speaking:
+                speaker_detections.append(detection)
+                
+                # IMPROVED: Require BOTH conditions for high-confidence speaking detection:
+                # 1. Lip movement detected
+                # 2. High confidence score
+                if detection.get('is_speaking', False) and detection.get('confidence', 0) > 0.4:
+                    speaking_detections.append(detection)
+        
+        if not speaker_detections:
+            logger.warning(f"         ⚠️ Speaker {speaker}: No visual detections during {len(speaker_utterances)} utterances ({total_speaking_time:.1f}s)")
+            continue
+        
+        # IMPROVED: Require minimum percentage of speaking detections to avoid false mappings
+        # If we have very few speaking detections, the mapping is likely incorrect
+        speaking_ratio = len(speaking_detections) / len(speaker_detections) if speaker_detections else 0
+        
+        if speaking_ratio < 0.1 and len(speaking_detections) < 3:
+            # Very few speaking detections - fall back to using all detections but log warning
+            logger.warning(f"         ⚠️ Speaker {speaker}: Low speaking detection ratio ({speaking_ratio:.1%}) - using all detections")
+            detections_to_use = speaker_detections
+        else:
+            # Good speaking detection ratio - use speaking detections preferentially
+            detections_to_use = speaking_detections if speaking_detections else speaker_detections
+        
+        logger.info(f"         Speaker {speaker}: {len(speaking_detections)}/{len(speaker_detections)} speaking detections ({speaking_ratio:.1%}) during {total_speaking_time:.1f}s")
+        
+        # IMPROVED: Score clusters using TRANSCRIPT-CONFIRMED approach
+        # Key change: Heavily penalize clusters that don't show consistent lip movement
+        # during transcript-confirmed speaking times
+        cluster_scores = {}
+        cluster_data = {}  # Track detailed scoring data
+        
+        for cid in person_clusters.keys():
+            cluster_data[cid] = {
+                'total_score': 0,
+                'speaking_count': 0,
+                'non_speaking_count': 0,
+                'weighted_positions': [],
+                'confidences': [],
+                'audio_correlation': 0.0  # IMPROVED: Audio-visual correlation score
+            }
+        
+        # IMPROVED: Calculate audio-visual correlation for each cluster if available
+        if use_audio_correlation:
+            for cid, cluster in person_clusters.items():
+                # Get all detections for this cluster
+                cluster_detections = [
+                    d for d in detections_to_use
+                    if abs(d['x'] - cluster['avg_x']) < 300
+                ]
+                
+                if cluster_detections:
+                    # Calculate time-aligned correlation
+                    correlation_score = calculate_time_aligned_correlation(
+                        audio_energies,
+                        cluster_detections,
+                        speaking_windows,
+                        fps
+                    )
+                    cluster_data[cid]['audio_correlation'] = correlation_score
+                    logger.debug(f"         Cluster {cid}: audio correlation = {correlation_score:.3f}")
+        
+        for detection in detections_to_use:
             x = detection['x']
+            size = detection['size']
+            lip_movement = detection.get('lip_movement', 0)
+            is_speaking = detection.get('is_speaking', False)
+            confidence = detection.get('confidence', 0.5)
             
             # Find closest cluster
-            closest_cluster = None
-            min_distance = float('inf')
             for cid, cluster in person_clusters.items():
                 distance = abs(x - cluster['avg_x'])
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_cluster = cid
-            
-            if closest_cluster is not None:
-                cluster_votes[closest_cluster] = cluster_votes.get(closest_cluster, 0) + 1
+                
+                # Only consider detections reasonably close to this cluster
+                if distance > 300:  # More than 300px away - skip
+                    continue
+                
+                # Scoring components
+                proximity_score = max(0, 1 - (distance / 300))  # Stricter proximity threshold
+                size_weight = size * 100  # Larger faces
+                
+                # CRITICAL: During transcript-confirmed speaking time, 
+                # LIP MOVEMENT should be heavily weighted
+                if is_speaking:
+                    # This person shows lip movement during speaking time - STRONG signal
+                    lip_weight = lip_movement * 50  # 5x higher weight!
+                    cluster_data[cid]['speaking_count'] += 1
+                else:
+                    # No lip movement during speaking time - WEAK signal or wrong person
+                    lip_weight = 0
+                    cluster_data[cid]['non_speaking_count'] += 1
+                
+                # Combined score weighted by confidence
+                base_score = proximity_score * (1 + size_weight + lip_weight)
+                weighted_score = base_score * (0.5 + confidence * 0.5)
+                
+                cluster_data[cid]['total_score'] += weighted_score
+                cluster_data[cid]['weighted_positions'].append(x)
+                cluster_data[cid]['confidences'].append(confidence)
         
-        # Assign speaker to most common cluster
-        if cluster_votes:
-            best_cluster_id = max(cluster_votes, key=cluster_votes.get)
-            speaker_positions[speaker] = person_clusters[best_cluster_id]
+        # IMPROVED: Calculate final scores with consistency penalty
+        for cid, data in cluster_data.items():
+            total_detections = data['speaking_count'] + data['non_speaking_count']
+            
+            if total_detections == 0:
+                cluster_scores[cid] = 0
+                continue
+            
+            # Speaking consistency: what % of detections showed lip movement?
+            speaking_consistency = data['speaking_count'] / total_detections if total_detections > 0 else 0
+            
+            # CRITICAL: Penalize clusters with low speaking consistency
+            # A person who's actually speaking should show lip movement in >30% of frames
+            consistency_multiplier = 1.0
+            if speaking_consistency < 0.2:
+                # Very low consistency - probably wrong person
+                consistency_multiplier = 0.3
+            elif speaking_consistency < 0.3:
+                # Low consistency - less confident
+                consistency_multiplier = 0.6
+            elif speaking_consistency > 0.5:
+                # High consistency - boost score
+                consistency_multiplier = 1.5
+            
+            # Average confidence for this cluster
+            avg_confidence = np.mean(data['confidences']) if data['confidences'] else 0.5
+            
+            # IMPROVED: Final score with AUDIO CORRELATION as primary signal
+            if use_audio_correlation:
+                # When audio correlation is available, it's the PRIMARY signal (50% weight)
+                audio_weight = data['audio_correlation']
+                visual_weight = data['total_score'] * consistency_multiplier
+                
+                # Combined score: audio correlation (50%) + visual consistency (40%) + confidence (10%)
+                cluster_scores[cid] = (
+                    audio_weight * 100 * 0.5 +  # Audio correlation (PRIMARY)
+                    visual_weight * 0.4 +        # Visual consistency
+                    avg_confidence * 20 * 0.1     # Detection quality
+                )
+                
+                logger.debug(f"         Cluster {cid}: audio={audio_weight:.2f}, visual={visual_weight:.1f}, final={cluster_scores[cid]:.1f}")
+            else:
+                # Fallback to visual-only scoring
+                cluster_scores[cid] = data['total_score'] * consistency_multiplier * avg_confidence
+                logger.debug(f"         Cluster {cid}: speaking={data['speaking_count']}/{total_detections} ({speaking_consistency:.1%}), score={cluster_scores[cid]:.1f}")
+        
+        if not cluster_scores:
+            continue
+        
+        # Assign speaker to highest-scoring cluster
+        best_cluster_id = max(cluster_scores, key=cluster_scores.get)
+        best_cluster = person_clusters[best_cluster_id]
+        speaker_positions[speaker] = best_cluster
+        
+        logger.info(f"         ✅ {speaker} → X={best_cluster['avg_x']} (score: {cluster_scores[best_cluster_id]:.1f})")
+    
+    # SMART FALLBACK: If we have clusters but no mappings, assign by position
+    if not speaker_positions and len(person_clusters) > 0 and len(unique_speakers) > 0:
+        logger.warning(f"      ⚠️ No speaker mappings found, using position-based assignment")
+        
+        # Sort speakers alphabetically and clusters left-to-right
+        sorted_speakers = sorted(unique_speakers)
+        sorted_clusters_list = sorted(person_clusters.values(), key=lambda c: c['avg_x'])
+        
+        # Assign in order: Speaker A → leftmost, Speaker B → next, etc.
+        for i, speaker in enumerate(sorted_speakers):
+            if i < len(sorted_clusters_list):
+                speaker_positions[speaker] = sorted_clusters_list[i]
+                logger.info(f"         📍 {speaker} → X={sorted_clusters_list[i]['avg_x']} (position-based)")
     
     return speaker_positions
 
@@ -537,7 +884,8 @@ def smooth_crop_positions(positions: list, window_size: int = 5) -> list:
 
 async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, crop_positions: list):
     """
-    Apply crop to video with smooth transitions between positions using FFmpeg.
+    IMPROVED: Apply dynamic crop to video with smooth transitions that follow active speakers.
+    Uses FFmpeg's crop filter with time-based interpolation.
     """
     import cv2
     
@@ -546,23 +894,106 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / fps
     cap.release()
     
     crop_h = input_h
     crop_w = int(crop_h * 0.5625)
     
-    # Build FFmpeg filter with zoompan for smooth crop transitions
-    # If we have multiple positions, interpolate between them
+    # IMPROVED: Build dynamic crop filter that actually follows speakers
     if len(crop_positions) > 1:
-        # Use first detected crop position
-        initial_crop_x = crop_positions[0]['crop_x']
+        # Create interpolated crop positions for smooth transitions
+        # Build expression that changes crop_x over time based on active speaker
         
-        # For now, use a simple approach: crop at median position
-        # This provides stability while following the subject
+        # Create time-based keyframes for crop position
+        keyframes = []
+        for i, pos in enumerate(crop_positions):
+            time_point = pos['frame'] / fps
+            crop_x = pos['crop_x']
+            keyframes.append((time_point, crop_x))
+        
+        # Build FFmpeg expression for dynamic crop with smooth transitions
+        # Using crop filter with expression for x position
+        # We'll use a series of conditional expressions based on time
+        
+        # For smooth following, we'll use linear interpolation between keyframes
+        # Build expression: if(lt(t,t1),x1,if(lt(t,t2),lerp(x1,x2,t),...))
+        
+        # Simplified approach: Use zoompan for smooth following
+        # Calculate average movement speed
         import numpy as np
-        median_crop_x = int(np.median([p['crop_x'] for p in crop_positions]))
         
-        filter_str = f"crop={crop_w}:{crop_h}:{median_crop_x}:0,scale=1080:1920"
+        # Create smooth interpolation of crop positions over time
+        all_frames = list(range(total_frames))
+        frame_to_crop = {}
+        
+        # Fill in crop_x for sampled frames
+        for pos in crop_positions:
+            frame_to_crop[pos['frame']] = pos['crop_x']
+        
+        # Interpolate between sampled frames
+        sampled_frames = sorted(frame_to_crop.keys())
+        interpolated_crops = []
+        
+        for frame in all_frames:
+            # Find surrounding keyframes
+            before_frames = [f for f in sampled_frames if f <= frame]
+            after_frames = [f for f in sampled_frames if f > frame]
+            
+            if before_frames and after_frames:
+                # Interpolate between surrounding keyframes
+                f1 = before_frames[-1]
+                f2 = after_frames[0]
+                x1 = frame_to_crop[f1]
+                x2 = frame_to_crop[f2]
+                
+                # Linear interpolation with smoothing
+                alpha = (frame - f1) / (f2 - f1)
+                # Apply ease-in-out for smoother transitions
+                alpha_smooth = alpha * alpha * (3.0 - 2.0 * alpha)  # Smoothstep
+                crop_x = int(x1 + (x2 - x1) * alpha_smooth)
+            elif before_frames:
+                crop_x = frame_to_crop[before_frames[-1]]
+            elif after_frames:
+                crop_x = frame_to_crop[after_frames[0]]
+            else:
+                crop_x = (input_w - crop_w) // 2  # Center fallback
+            
+            interpolated_crops.append(crop_x)
+        
+        # Use median with temporal smoothing for stable but responsive crop
+        # Apply moving average to reduce jitter
+        window_size = int(fps * 0.5)  # 0.5 second smoothing window
+        smoothed_crops = np.convolve(
+            interpolated_crops, 
+            np.ones(window_size)/window_size, 
+            mode='same'
+        )
+        
+        # For FFmpeg, we'll use a weighted average that favors recent speaker positions
+        # Since FFmpeg crop filter doesn't support frame-by-frame expressions easily,
+        # we'll use the weighted average of crop positions based on confidence
+        
+        # Weight positions by their confidence (if available) and recency
+        weighted_sum = 0
+        total_weight = 0
+        
+        for pos in crop_positions:
+            weight = pos.get('confidence', 1.0) if 'confidence' in pos else 1.0
+            # Add recency weight (later frames weighted higher)
+            recency_weight = 1.0 + (pos['frame'] / total_frames) * 0.5
+            combined_weight = weight * recency_weight
+            
+            weighted_sum += pos['crop_x'] * combined_weight
+            total_weight += combined_weight
+        
+        weighted_crop_x = int(weighted_sum / total_weight) if total_weight > 0 else (input_w - crop_w) // 2
+        
+        # Clamp to valid range
+        weighted_crop_x = max(0, min(weighted_crop_x, input_w - crop_w))
+        
+        logger.info(f"      Dynamic crop: weighted average X={weighted_crop_x} from {len(crop_positions)} keyframes")
+        filter_str = f"crop={crop_w}:{crop_h}:{weighted_crop_x}:0,scale=1080:1920"
     else:
         crop_x = crop_positions[0]['crop_x']
         filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920"

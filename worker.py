@@ -496,7 +496,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 """Process clip with concurrency limit"""
                 async with semaphore:
                     return await process_single_clip_async(
-                        clip, idx, file_path, video_id, output_dir
+                        clip, idx, file_path, video_id, output_dir, transcript
                     )
             
             # Update progress - starting parallel processing
@@ -964,58 +964,37 @@ async def process_single_clip_async(
     index: int,
     file_path: str,
     video_id: str,
-    output_dir_path: Path
+    output_dir_path: Path,
+    transcript: dict = None
 ) -> tuple:
-    """Process a single clip: create, generate thumbnail, upload to S3"""
+    """Upload existing clip and thumbnail to S3 (clips already created in process_video)"""
     try:
-        logger.info(f"[PARALLEL] Starting clip {index}: {clip.get('id')}")
+        logger.info(f"[PARALLEL] Starting S3 upload for clip {index}: {clip.get('id')}")
         
-        # Step 1: Create the clip file
-        clips_dir = output_dir_path / video_id
-        clips_dir.mkdir(exist_ok=True, parents=True)
+        # Use the already-created clip from process_video() - NO RE-PROCESSING
+        created_clip_path = clip.get('path')
+        thumbnail_path = clip.get('thumbnail_path')
         
-        clip_filename = f"{clip.get('id')}.mp4"
-        clip_path = str(clips_dir / clip_filename)
-        
-        # Use create_clip from video_processing service
-        created_clip_path = await create_clip(
-            video_path=file_path,
-            output_dir=str(clips_dir),
-            start_time=clip["start_time"],
-            end_time=clip["end_time"],
-            clip_id=clip.get("id"),
-        )
-        
-        if not created_clip_path:
-            logger.warning(f"[PARALLEL] Failed to create clip {index}")
+        if not created_clip_path or not os.path.exists(created_clip_path):
+            logger.warning(f"[PARALLEL] Clip {index} path not found: {created_clip_path}")
             return index, None
         
-        logger.info(f"[PARALLEL] Clip {index} created at {created_clip_path}")
+        logger.info(f"[PARALLEL] Using existing clip at {created_clip_path}")
         
-        # Step 2: Generate thumbnail
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_thumb:
-            thumbnail_path = temp_thumb.name
+        # Verify thumbnail exists
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            logger.info(f"[PARALLEL] Using existing thumbnail at {thumbnail_path}")
+        else:
+            logger.warning(f"[PARALLEL] Thumbnail not found at {thumbnail_path}")
+            thumbnail_path = None
         
-        clip_duration = clip.get("end_time", 0) - clip.get("start_time", 0)
-        thumbnail_timestamp = (
-            min(clip_duration / 3, clip_duration - 0.5)
-            if clip_duration > 1.5
-            else 0
-        )
-        
-        generated_path = await generate_thumbnail(
-            created_clip_path, thumbnail_path, thumbnail_timestamp
-        )
-        
-        logger.info(f"[PARALLEL] Clip {index} thumbnail generated")
-        
-        # Step 3: Upload to S3 (clip and thumbnail in parallel)
+        # Upload to S3 (clip and thumbnail in parallel)
         clip_upload = asyncio.create_task(
             _upload_clip_to_s3_async(created_clip_path, video_id, clip.get("id"))
         )
         
         thumbnail_upload = None
-        if generated_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+        if thumbnail_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
             thumbnail_upload = asyncio.create_task(
                 _upload_thumbnail_to_s3_async(thumbnail_path, video_id, clip.get("id"))
             )
@@ -1026,7 +1005,7 @@ async def process_single_clip_async(
         
         logger.info(f"[PARALLEL] Clip {index} S3 upload: clip={clip_result[0]}, thumb={thumb_result[0]}")
         
-        # Step 4: Cleanup local files
+        # Cleanup local files (they're in temp directory from process_video)
         try:
             if os.path.exists(created_clip_path):
                 os.unlink(created_clip_path)
