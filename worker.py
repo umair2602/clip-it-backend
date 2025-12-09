@@ -496,7 +496,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 """Process clip with concurrency limit"""
                 async with semaphore:
                     return await process_single_clip_async(
-                        clip, idx, file_path, video_id, output_dir
+                        clip, idx, file_path, video_id, output_dir, transcript
                     )
             
             # Update progress - starting parallel processing
@@ -964,7 +964,8 @@ async def process_single_clip_async(
     index: int,
     file_path: str,
     video_id: str,
-    output_dir_path: Path
+    output_dir_path: Path,
+    transcript: dict = None
 ) -> tuple:
     """Process a single clip: create, generate thumbnail, upload to S3"""
     try:
@@ -984,6 +985,7 @@ async def process_single_clip_async(
             start_time=clip["start_time"],
             end_time=clip["end_time"],
             clip_id=clip.get("id"),
+            transcript=transcript,
         )
         
         if not created_clip_path:

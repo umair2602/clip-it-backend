@@ -141,6 +141,7 @@ async def transcribe_audio_assemblyai(
             'text': full_text,
             'segments': segments,
             'sentences': sentences,  #  NEW! Complete sentences with boundaries
+            'utterances': sentences,  # CRITICAL: Add 'utterances' key for speaker timeline compatibility
             'speakers': list(speakers),
             'transcript_for_ai': transcript_for_ai
         }
