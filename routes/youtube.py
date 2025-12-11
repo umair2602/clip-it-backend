@@ -1,4 +1,3 @@
-
 import logging
 import os
 from typing import Dict, Any, Annotated
@@ -7,18 +6,31 @@ import googleapiclient.discovery
 import httpx
 import io
 import asyncio
-from fastapi import APIRouter, Request, HTTPException, Depends, status
+from fastapi import (
+    APIRouter,
+    Request,
+    HTTPException,
+    Depends,
+    status,
+    File,
+    Form,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import StreamingResponse
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload
 from pydantic import BaseModel, Field
+import tempfile
+import ffmpeg
+import shutil
 
 from config import settings
 from services.auth import auth_service
 from services.youtube_tokens import youtube_token_service
 from database.connection import get_database
 import secrets
+import uuid
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -30,10 +42,14 @@ class YouTubeUploadRequest(BaseModel):
     video_url: str = Field(..., description="S3 URL of the video to upload")
     title: str = Field(..., max_length=100, description="Video title")
     description: str = Field("", max_length=5000, description="Video description")
-    privacy_status: str = Field("private", description="one of private, public, or unlisted")
+    privacy_status: str = Field(
+        "private", description="one of private, public, or unlisted"
+    )
+
 
 class YouTubeUploadResponse(BaseModel):
     video_id: str
+
 
 security = HTTPBearer()
 
@@ -78,10 +94,16 @@ async def get_current_user(
             "updated_at": getattr(normalized, "updated_at", None),
         }
 
+
 def _extract_user_id(user_like):
     if isinstance(user_like, dict):
         return user_like.get("id") or user_like.get("_id") or user_like.get("user_id")
-    return getattr(user_like, "id", None) or getattr(user_like, "_id", None) or getattr(user_like, "user_id", None)
+    return (
+        getattr(user_like, "id", None)
+        or getattr(user_like, "_id", None)
+        or getattr(user_like, "user_id", None)
+    )
+
 
 @router.get("/auth-url")
 async def youtube_auth_url(current_user: dict = Depends(get_current_user)):
@@ -89,7 +111,9 @@ async def youtube_auth_url(current_user: dict = Depends(get_current_user)):
     Redirects the user to Google's OAuth 2.0 consent screen for YouTube.
     """
     try:
-        logger.info(f"Using YouTube Redirect URI for auth flow: {settings.YOUTUBE_REDIRECT_URI}")
+        logger.info(
+            f"Using YouTube Redirect URI for auth flow: {settings.YOUTUBE_REDIRECT_URI}"
+        )
         flow = google_auth_oauthlib.flow.Flow.from_client_config(
             client_config={
                 "web": {
@@ -106,23 +130,25 @@ async def youtube_auth_url(current_user: dict = Depends(get_current_user)):
         flow.redirect_uri = settings.YOUTUBE_REDIRECT_URI
 
         authorization_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent"
+            access_type="offline", include_granted_scopes="true", prompt="consent"
         )
 
         db = get_database()
         user_id = _extract_user_id(current_user)
         if not user_id:
-            raise HTTPException(status_code=400, detail="Could not determine user from token")
+            raise HTTPException(
+                status_code=400, detail="Could not determine user from token"
+            )
 
-        db["oauth_states"].insert_one({
-            "state": state,
-            "user_id": user_id,
-            "provider": "youtube",
-            "created_at": datetime.now(timezone.utc),
-            "expires_at": datetime.now(timezone.utc).timestamp() + 600,
-        })
+        db["oauth_states"].insert_one(
+            {
+                "state": state,
+                "user_id": user_id,
+                "provider": "youtube",
+                "created_at": datetime.now(timezone.utc),
+                "expires_at": datetime.now(timezone.utc).timestamp() + 600,
+            }
+        )
 
         return JSONResponse({"auth_url": authorization_url})
 
@@ -133,78 +159,181 @@ async def youtube_auth_url(current_user: dict = Depends(get_current_user)):
             detail="Failed to generate YouTube authorization URL",
         )
 
+
 from pydantic import BaseModel, Field
 from typing import Optional
 
 
 class YouTubeProfileResponse(BaseModel):
     """Response model for YouTube profile"""
+
     email: Optional[str] = None
     name: str
     picture: Optional[str] = None
 
+
 @router.post("/upload", response_model=YouTubeUploadResponse)
 async def upload_to_youtube(
-    upload_request: YouTubeUploadRequest,
+    video_url: str = Form(..., description="S3 URL of the video to upload"),
+    title: str = Form(..., max_length=100, description="Video title"),
+    description: str = Form("", max_length=5000, description="Video description"),
+    privacy_status: str = Form(
+        "private", description="one of private, public, or unlisted"
+    ),
+    cover_file: Optional[UploadFile] = File(None, description="Custom cover image"),
+    cover_timestamp_ms: Optional[str] = Form(
+        None, description="Timestamp in ms to extract cover from video"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """
     Uploads a video from an S3 URL to the user's YouTube channel.
+    Supports custom thumbnail via file or timestamp.
     """
     user_id = _extract_user_id(current_user)
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context"
+        )
 
     credentials = await youtube_token_service.refresh_tokens_if_needed(user_id)
     if not credentials:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube account not connected.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="YouTube account not connected.",
+        )
 
     try:
         # 1. Fetch video from S3 URL
         async with httpx.AsyncClient() as client:
-            response = await client.get(upload_request.video_url, follow_redirects=True, timeout=60)
+            response = await client.get(video_url, follow_redirects=True, timeout=60)
             response.raise_for_status()
             video_content = response.content
 
         video_file = io.BytesIO(video_content)
 
         # 2. Build YouTube service
-        youtube = googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
+        youtube = googleapiclient.discovery.build(
+            "youtube", "v3", credentials=credentials
+        )
 
         # 3. Prepare video metadata
         body = {
             "snippet": {
-                "title": upload_request.title,
-                "description": upload_request.description,
+                "title": title,
+                "description": description,
                 "tags": [],
-                "categoryId": "22"  # Default category, consider making this configurable
+                "categoryId": "22",  # Default category
             },
-            "status": {
-                "privacyStatus": upload_request.privacy_status
-            }
+            "status": {"privacyStatus": privacy_status},
         }
 
         # 4. Perform the upload
-        media = MediaIoBaseUpload(video_file, mimetype='video/*', chunksize=1024*1024, resumable=True)
-        
+        media = MediaIoBaseUpload(
+            video_file, mimetype="video/*", chunksize=1024 * 1024, resumable=True
+        )
+
         insert_request = youtube.videos().insert(
-            part=",".join(body.keys()),
-            body=body,
-            media_body=media
+            part=",".join(body.keys()), body=body, media_body=media
         )
 
         # The googleapiclient is synchronous, so we run it in a thread pool
         loop = asyncio.get_event_loop()
         upload_response = await loop.run_in_executor(None, insert_request.execute)
 
-        return YouTubeUploadResponse(video_id=upload_response["id"])
+        video_id_uploaded = upload_response["id"]
+        logger.info(f"Video uploaded successfully. ID: {video_id_uploaded}")
+
+        # 5. Handle Custom Thumbnail
+        thumbnail_path = None
+        temp_dir = tempfile.mkdtemp()
+
+        try:
+            if cover_file:
+                # Validate extension
+                ext = os.path.splitext(cover_file.filename)[1].lower()
+                if ext not in [".jpg", ".jpeg", ".png"]:
+                    raise HTTPException(400, detail="Thumbnail must be JPG or PNG")
+
+                # Ensure file pointer at start
+                cover_file.file.seek(0)
+
+                # Save locally
+                thumbnail_path = os.path.join(temp_dir, f"thumb_{uuid.uuid4()}{ext}")
+                with open(thumbnail_path, "wb") as f:
+                    shutil.copyfileobj(cover_file.file, f)
+
+                logger.info(f"Custom cover saved at {thumbnail_path}")
+                logger.info(f"Thumbnail size: {os.path.getsize(thumbnail_path)} bytes")
+
+            elif cover_timestamp_ms:
+                try:
+                    timestamp_sec = float(cover_timestamp_ms) / 1000.0
+
+                    # Save video content to temp file for ffmpeg
+                    temp_video_path = os.path.join(
+                        temp_dir, f"video_{uuid.uuid4()}.mp4"
+                    )
+                    with open(temp_video_path, "wb") as f:
+                        f.write(video_content)
+
+                    # Set output path for thumbnail
+                    thumbnail_path = os.path.join(temp_dir, f"thumb_{uuid.uuid4()}.jpg")
+
+                    logger.info(f"Extracting frame at {timestamp_sec}s from video...")
+
+                    # Extract frame
+                    (
+                        ffmpeg.input(temp_video_path, ss=timestamp_sec)
+                        .output(thumbnail_path, vframes=1)
+                        .overwrite_output()
+                        .run(capture_stdout=True, capture_stderr=True)
+                    )
+
+                    # Ensure RGB JPEG (YouTube-safe)
+                    from PIL import Image
+
+                    img = Image.open(thumbnail_path).convert("RGB")
+                    img.save(thumbnail_path, "JPEG", quality=95)
+
+                    logger.info(
+                        f"Frame extraction successful. Saved at {thumbnail_path}, size={os.path.getsize(thumbnail_path)} bytes"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to extract frame with ffmpeg: {e}")
+                    thumbnail_path = None
+
+            # Upload thumbnail if present
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                mime_type = "image/jpeg"  # always JPEG after conversion
+                logger.info(f"Uploading thumbnail: {thumbnail_path}")
+
+                request_thumb = youtube.thumbnails().set(
+                    videoId=video_id_uploaded,
+                    media_body=MediaFileUpload(thumbnail_path, mimetype=mime_type),
+                )
+
+                await loop.run_in_executor(None, request_thumb.execute)
+                logger.info("Thumbnail set successfully.")
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return YouTubeUploadResponse(video_id=video_id_uploaded)
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Failed to download video from S3: {e}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to download video from the provided URL.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to download video from the provided URL.",
+        )
     except Exception as e:
         logger.error(f"Failed to upload video to YouTube: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to upload video to YouTube: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload video to YouTube: {str(e)}",
+        )
 
 
 @router.get("/me", response_model=YouTubeProfileResponse)
@@ -214,17 +343,24 @@ async def get_youtube_profile(current_user: dict = Depends(get_current_user)):
     """
     user_id = _extract_user_id(current_user)
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context"
+        )
 
     credentials = await youtube_token_service.refresh_tokens_if_needed(user_id)
 
     if not credentials:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube account not connected.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="YouTube account not connected.",
+        )
 
     try:
-        service = googleapiclient.discovery.build('oauth2', 'v2', credentials=credentials)
+        service = googleapiclient.discovery.build(
+            "oauth2", "v2", credentials=credentials
+        )
         user_info = service.userinfo().get().execute()
-        
+
         return YouTubeProfileResponse(
             email=user_info.get("email"),
             name=user_info.get("name"),
@@ -232,7 +368,10 @@ async def get_youtube_profile(current_user: dict = Depends(get_current_user)):
         )
     except Exception as e:
         logger.error(f"Failed to get YouTube profile info: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve YouTube profile.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve YouTube profile.",
+        )
 
 
 @router.post("/disconnect")
@@ -242,14 +381,22 @@ async def disconnect_youtube(current_user: dict = Depends(get_current_user)):
     """
     user_id = _extract_user_id(current_user)
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user context"
+        )
 
     try:
         await youtube_token_service.delete_tokens(user_id)
-        return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "YouTube account disconnected successfully."})
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"message": "YouTube account disconnected successfully."},
+        )
     except Exception as e:
         logger.error(f"Failed to disconnect YouTube account for user {user_id}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to disconnect YouTube account.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to disconnect YouTube account.",
+        )
 
 
 @router.get("/callback")
@@ -259,19 +406,27 @@ async def youtube_callback(request: Request):
     """
     state = request.query_params.get("state")
     code = request.query_params.get("code")
-    
+
     if not state or not code:
-        raise HTTPException(status_code=400, detail="Missing state or code from Google OAuth callback")
+        raise HTTPException(
+            status_code=400, detail="Missing state or code from Google OAuth callback"
+        )
 
     db = get_database()
-    state_doc = db["oauth_states"].find_one_and_delete({"state": state, "provider": "youtube"})
+    state_doc = db["oauth_states"].find_one_and_delete(
+        {"state": state, "provider": "youtube"}
+    )
 
     if not state_doc:
-        raise HTTPException(status_code=400, detail="Invalid or expired state parameter.")
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired state parameter."
+        )
 
     user_id = state_doc.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=400, detail="Could not associate callback with a user.")
+        raise HTTPException(
+            status_code=400, detail="Could not associate callback with a user."
+        )
 
     try:
         flow = google_auth_oauthlib.flow.Flow.from_client_config(
@@ -293,17 +448,18 @@ async def youtube_callback(request: Request):
         flow.fetch_token(code=code)
 
         credentials = flow.credentials
-        
+
         await youtube_token_service.save_tokens(user_id, credentials)
-        
+
         youtube_user_email = "Your"
         try:
-            service = googleapiclient.discovery.build('oauth2', 'v2', credentials=credentials)
+            service = googleapiclient.discovery.build(
+                "oauth2", "v2", credentials=credentials
+            )
             user_info = service.userinfo().get().execute()
-            youtube_user_email = user_info.get('email', 'Your')
+            youtube_user_email = user_info.get("email", "Your")
         except Exception as e:
             logger.error(f"Could not fetch user info from google: {e}")
-
 
         return HTMLResponse(f"""
 <!DOCTYPE html>
