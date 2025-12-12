@@ -589,4 +589,52 @@ async def get_clip_history(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
+        )
+
+
+@router.post("/{video_id}/cancel")
+async def cancel_video_processing(
+    video_id: str,
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """
+    Cancel video processing and mark as failed.
+    
+    - **video_id**: ID of the video to cancel
+    
+    Updates the video status to 'failed' with error message indicating user cancellation.
+    """
+    try:
+        logger.info(f"🛑 Cancel request received for video {video_id} by user {current_user.id}")
+        
+        # Update video status to failed
+        update_data = {
+            "status": VideoStatus.FAILED,
+            "error_message": "Processing cancelled by user",
+            "updated_at": utc_now()
+        }
+        
+        success = await update_user_video(current_user.id, video_id, update_data)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Video not found or you don't have permission to cancel it"
+            )
+        
+        logger.info(f"✅ Video {video_id} marked as failed (cancelled by user)")
+        
+        return {
+            "message": "Video processing cancelled successfully",
+            "video_id": video_id,
+            "status": "failed"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling video {video_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
         ) 

@@ -83,6 +83,49 @@ async def cleanup_old_files(max_age_hours: int = 24):
         logger.error(f"Error in cleanup_old_files: {str(e)}", exc_info=True)
 
 
+class ProcessingCancelledException(Exception):
+    """Exception raised when processing is cancelled by user"""
+    pass
+
+
+async def check_if_cancelled(user_id: str, video_id: str) -> bool:
+    """Check if video processing has been cancelled by checking database status.
+    
+    Args:
+        user_id: User ID
+        video_id: Video ID
+        
+    Returns:
+        bool: True if cancelled (status is 'failed'), False otherwise
+        
+    Raises:
+        ProcessingCancelledException: If processing has been cancelled
+    """
+    try:
+        from services.user_video_service import get_user_video
+        video = await get_user_video(user_id, video_id)
+        
+        if video:
+            logger.debug(f"🔍 Cancellation check for video {video_id}: status={video.status}, error={video.error_message}")
+            if video.status == "failed":
+                error_msg = video.error_message or "Unknown reason"
+                logger.info(f"🔍 Video {video_id} has failed status, error_message: '{error_msg}'")
+                if "cancelled" in error_msg.lower():
+                    logger.warning(f"🛑 Video {video_id} processing cancelled by user")
+                    raise ProcessingCancelledException(f"Processing cancelled: {error_msg}")
+                else:
+                    logger.warning(f"⚠️ Video {video_id} failed but not due to cancellation: {error_msg}")
+        else:
+            logger.warning(f"⚠️ Video {video_id} not found in database during cancellation check")
+        
+        return False
+    except ProcessingCancelledException:
+        raise
+    except Exception as e:
+        logger.warning(f"Error checking cancellation status: {e}")
+        return False
+
+
 async def initialize_worker():
     """Initialize the worker - verify AssemblyAI API key is configured"""
     try:
@@ -110,8 +153,12 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
 
-        # Update MongoDB video status
+        # Check if cancelled before starting
         user_id = job_data.get("user_id")
+        if user_id and video_id:
+            await check_if_cancelled(user_id, video_id)
+
+        # Update MongoDB video status
         if user_id:
             await update_user_video(user_id, video_id, {
                 "status": "downloading",
@@ -132,44 +179,121 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
         video_dir = upload_dir / video_id
         video_dir.mkdir(exist_ok=True)
 
+        # Import cancellation helpers for download
+        from utils.sieve_downloader import (
+            set_download_cancellation_context,
+            clear_download_cancellation_context,
+            mark_download_cancelled
+        )
+        
+        # Create a background task to periodically check for cancellation during download
+        download_cancelled = False
+        async def cancellation_monitor():
+            """Background task to monitor for cancellation during download"""
+            nonlocal download_cancelled
+            while not download_cancelled:
+                await asyncio.sleep(2)  # Check every 2 seconds
+                try:
+                    from services.user_video_service import get_user_video
+                    video = await get_user_video(user_id, video_id)
+                    if video and video.status == "failed":
+                        error_msg = video.error_message or ""
+                        if "cancelled" in error_msg.lower():
+                            logger.warning(f"🛑 Cancellation detected during download for video {video_id}")
+                            mark_download_cancelled()
+                            download_cancelled = True
+                            return
+                except Exception as e:
+                    logger.debug(f"Cancellation check error: {e}")
+        
+        # Set cancellation context
+        if user_id and video_id:
+            set_download_cancellation_context(user_id, video_id)
+
         # Download the video with retry mechanism
         file_path, title, video_info = None, None, None
         max_retries = 15
-        for attempt in range(1, max_retries + 1):
-            try:
-                logger.info(f"Job {job_id}: Attempt {attempt} to download with Sieve service")
-                file_path, title, video_info = await download_youtube_video_sieve(
-                    url, video_dir
-                )
-                if file_path and title:
-                    break  # Success
-            except Exception as sieve_error:
-                logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
-                if attempt == max_retries:
-                    logger.error(f"Job {job_id}: All {max_retries} attempts failed.")
-                    break
-                await asyncio.sleep(5)  # Wait before retrying
-        # If still not successful, try direct downloader as fallback (with retries)
-        if not file_path or not title:
+        
+        # Start cancellation monitor
+        monitor_task = asyncio.create_task(cancellation_monitor()) if user_id and video_id else None
+        
+        try:
             for attempt in range(1, max_retries + 1):
+                # Check for cancellation before each attempt
+                if user_id and video_id:
+                    await check_if_cancelled(user_id, video_id)
+                
                 try:
-                    logger.info(f"Job {job_id}: Attempt {attempt} to download with direct downloader as fallback")
-                    file_path, title, video_info = await download_youtube_video(
+                    logger.info(f"Job {job_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
+                    file_path, title, video_info = await download_youtube_video_sieve(
                         url, video_dir
                     )
                     if file_path and title:
+                        logger.info(f"Job {job_id}: ✅ Sieve download successful")
                         break  # Success
-                except Exception as fallback_error:
-                    logger.warning(f"Job {job_id}: Direct download failed (attempt {attempt}): {str(fallback_error)}")
+                except Exception as sieve_error:
+                    error_msg = str(sieve_error)
+                    if "cancelled" in error_msg.lower():
+                        logger.warning(f"Job {job_id}: Download cancelled by user")
+                        raise ProcessingCancelledException("Download cancelled by user")
+                    logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {error_msg}")
                     if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All {max_retries} fallback attempts failed.")
+                        logger.error(f"Job {job_id}: All {max_retries} attempts failed.")
                         break
                     await asyncio.sleep(5)  # Wait before retrying
+                    
+                # Check for cancellation after each attempt
+                if user_id and video_id:
+                    await check_if_cancelled(user_id, video_id)
+                    
+            # If still not successful, try direct downloader as fallback (with retries)
+            if not file_path or not title:
+                for attempt in range(1, max_retries + 1):
+                    # Check for cancellation before each attempt
+                    if user_id and video_id:
+                        await check_if_cancelled(user_id, video_id)
+                        
+                    try:
+                        logger.info(f"Job {job_id}: Attempt {attempt} to download with direct downloader as fallback")
+                        file_path, title, video_info = await download_youtube_video(
+                            url, video_dir
+                        )
+                        if file_path and title:
+                            break  # Success
+                    except Exception as fallback_error:
+                        error_msg = str(fallback_error)
+                        if "cancelled" in error_msg.lower():
+                            raise ProcessingCancelledException("Download cancelled by user")
+                        logger.warning(f"Job {job_id}: Direct download failed (attempt {attempt}): {error_msg}")
+                        if attempt == max_retries:
+                            logger.error(f"Job {job_id}: All {max_retries} fallback attempts failed.")
+                            break
+                        await asyncio.sleep(5)  # Wait before retrying
+                        
+                    # Check for cancellation after each attempt
+                    if user_id and video_id:
+                        await check_if_cancelled(user_id, video_id)
+        finally:
+            # Stop the cancellation monitor and clear context
+            download_cancelled = True
+            if monitor_task:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
+            clear_download_cancellation_context()
 
         if not file_path or not title:
             raise Exception(
                 f"Failed to download YouTube video after {max_retries} attempts with both Sieve and direct methods"
             )
+
+        # Check if cancelled immediately after download
+        logger.info(f"Job {job_id}: 🔍 Checking for cancellation after download...")
+        if user_id and video_id:
+            await check_if_cancelled(user_id, video_id)
+        logger.info(f"Job {job_id}: ✅ No cancellation detected, continuing...")
 
         # Update MongoDB with video info
         if user_id:
@@ -207,6 +331,10 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
 
         # Start processing if requested
         if auto_process:
+            # Check if cancelled before starting processing
+            if user_id and video_id:
+                await check_if_cancelled(user_id, video_id)
+            
             await asyncio.sleep(2)  # Small delay
 
             # Create a new processing job
@@ -262,6 +390,14 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
         # Release lock on successful completion
         job_queue.release_job_lock(job_id)
 
+    except ProcessingCancelledException as e:
+        logger.warning(f"YouTube download cancelled for job {job_id}: {str(e)}")
+        job_queue.update_job(
+            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        )
+        # Status already set to failed in DB by cancel endpoint
+        logger.info(f"✅ Gracefully stopped YouTube download for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
+        
     except Exception as e:
         logger.error(f"Error in YouTube download job {job_id}: {str(e)}", exc_info=True)
         
@@ -323,6 +459,10 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info("🚀 STARTING VIDEO PROCESSING PIPELINE")
         logger.info("="*70)
 
+        # Check if cancelled before starting
+        if user_id:
+            await check_if_cancelled(user_id, video_id)
+
         # Update MongoDB video status
         if user_id:
             await update_user_video(user_id, video_id, {
@@ -372,6 +512,11 @@ async def process_video_job(job_id: str, job_data: dict):
             transcript = await transcribe_audio(file_path)
             t_trans_end = time.time()
             logger.info(f"   transcribe_audio() total time: {t_trans_end - t_trans_start:.2f}s")
+            
+            # Check if cancelled immediately after transcription
+            if user_id:
+                await check_if_cancelled(user_id, video_id)
+                
         except Exception as e:
             logger.error(f"Transcription error: {str(e)}", exc_info=True)
             raise
@@ -393,6 +538,10 @@ async def process_video_job(job_id: str, job_data: dict):
         if segments_count == 0:
             logger.warning("Video appears to be silent or have no speech content")
             # Continue processing with empty transcript - don't fail
+
+        # Check if cancelled before analysis
+        if user_id:
+            await check_if_cancelled(user_id, video_id)
 
         # Update MongoDB video status
         if user_id:
@@ -421,6 +570,11 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
         
         segments = await analyze_content(transcript)
+        
+        # Check if cancelled immediately after analysis
+        if user_id:
+            await check_if_cancelled(user_id, video_id)
+        
         if not segments:
             logger.warning(
                 "Content analysis found no interesting segments, using default"
@@ -437,6 +591,10 @@ async def process_video_job(job_id: str, job_data: dict):
         step_elapsed = time.time() - step_start
         logger.info(f"✅ STEP 2 COMPLETE: AI analysis finished in {step_elapsed:.2f} seconds")
         logger.info(f"   - Clips identified: {len(segments)}")
+
+        # Check if cancelled before video processing
+        if user_id:
+            await check_if_cancelled(user_id, video_id)
 
         # Update MongoDB video status
         if user_id:
@@ -473,7 +631,20 @@ async def process_video_job(job_id: str, job_data: dict):
         step_start = time.time()
         logger.info("🎬 STEP 3: Starting video clip creation (FFmpeg processing)...")
         
-        clips = await process_video(file_path, transcript, segments)
+        # Set cancellation context for nested processing functions
+        from services.video_processing import set_cancellation_context, clear_cancellation_context
+        if user_id:
+            set_cancellation_context(user_id, video_id)
+        
+        try:
+            clips = await process_video(file_path, transcript, segments)
+        finally:
+            # Always clear the cancellation context
+            clear_cancellation_context()
+        
+        # Check if cancelled immediately after video processing
+        if user_id:
+            await check_if_cancelled(user_id, video_id)
         
         step_elapsed = time.time() - step_start
         logger.info(f"✅ STEP 3 COMPLETE: Video processing finished in {step_elapsed:.2f} seconds")
@@ -727,7 +898,60 @@ async def process_video_job(job_id: str, job_data: dict):
         if original_job_id:
             job_queue.release_job_lock(original_job_id)
 
+    except ProcessingCancelledException as e:
+        logger.warning(f"Processing cancelled for job {job_id}: {str(e)}")
+        job_queue.update_job(
+            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        )
+        if original_job_id:
+            job_queue.update_job(
+                original_job_id,
+                {"status": "cancelled", "progress": "0", "message": str(e)},
+            )
+        # Status already set to failed in DB by cancel endpoint
+        logger.info(f"✅ Gracefully stopped processing for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
+        # Clean up any partial files
+        if 'video_id' in locals():
+            try:
+                video_upload_dir = upload_dir / video_id
+                if video_upload_dir.exists():
+                    shutil.rmtree(video_upload_dir)
+                    logger.info(f"🗑️ Cleaned up cancelled upload directory: {video_upload_dir}")
+                video_output_dir = output_dir / video_id
+                if video_output_dir.exists():
+                    shutil.rmtree(video_output_dir)
+                    logger.info(f"🗑️ Cleaned up cancelled output directory: {video_output_dir}")
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️ Failed to clean up cancelled files: {cleanup_error}")
+    
+    # Also catch ProcessingCancelledException from video_processing module
     except Exception as e:
+        # Check if it's a cancellation exception from video_processing module
+        from services.video_processing import ProcessingCancelledException as VPCancelledException
+        if isinstance(e, VPCancelledException):
+            logger.warning(f"Processing cancelled (from video_processing) for job {job_id}: {str(e)}")
+            job_queue.update_job(
+                job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+            )
+            if original_job_id:
+                job_queue.update_job(
+                    original_job_id,
+                    {"status": "cancelled", "progress": "0", "message": str(e)},
+                )
+            logger.info(f"✅ Gracefully stopped processing for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
+            # Clean up any partial files
+            if 'video_id' in locals():
+                try:
+                    video_upload_dir = upload_dir / video_id
+                    if video_upload_dir.exists():
+                        shutil.rmtree(video_upload_dir)
+                    video_output_dir = output_dir / video_id
+                    if video_output_dir.exists():
+                        shutil.rmtree(video_output_dir)
+                except Exception:
+                    pass
+            return
+        
         logger.error(f"Error in video processing job {job_id}: {str(e)}", exc_info=True)
         job_queue.update_job(
             job_id, {"status": "error", "progress": "0", "message": f"Error: {str(e)}"}
@@ -1045,6 +1269,10 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   S3 Key: {s3_key}")
 
+        # Check if cancelled before starting
+        if user_id and video_id:
+            await check_if_cancelled(user_id, video_id)
+
         # Update job status
         job_queue.update_job(
             job_id,
@@ -1066,6 +1294,10 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         if not success:
             raise Exception("Failed to download file from S3")
 
+        # Check if cancelled immediately after S3 download
+        if user_id and video_id:
+            await check_if_cancelled(user_id, video_id)
+
         # Update job status
         job_queue.update_job(
             job_id,
@@ -1085,6 +1317,14 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         
         # Release lock on successful completion (already handled in process_video_job)
 
+    except ProcessingCancelledException as e:
+        logger.warning(f"Uploaded video processing cancelled for job {job_id}: {str(e)}")
+        job_queue.update_job(
+            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        )
+        # Status already set to failed in DB by cancel endpoint
+        logger.info(f"✅ Gracefully stopped uploaded video processing for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
+        
     except Exception as e:
         logger.error(f"Error in uploaded video job {job_id}: {str(e)}", exc_info=True)
         job_queue.update_job(
@@ -1191,6 +1431,14 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
 
         logger.info(f"Job {job_id}: Download completed successfully: {file_path}")
 
+        # ⚠️ CHECK FOR CANCELLATION BEFORE updating status (critical!)
+        # If user cancelled during download, the video status is already "failed"
+        # We must check this BEFORE overwriting with "downloaded"
+        logger.info(f"Job {job_id}: 🔍 Checking for cancellation after download...")
+        if user_id and video_id:
+            await check_if_cancelled(user_id, video_id)
+        logger.info(f"Job {job_id}: ✅ No cancellation detected, continuing...")
+
         # Update video in database
         if user_id:
             await update_user_video(user_id, video_id, {
@@ -1241,6 +1489,27 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
             )
             
             # Lock already released in process_video_job
+
+    except ProcessingCancelledException as e:
+        logger.warning(f"YouTube download cancelled for job {job_id}: {str(e)}")
+        job_queue.update_job(
+            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        )
+        # Status already set to failed in DB by cancel endpoint
+        logger.info(f"✅ Gracefully stopped YouTube download for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
+        
+        # Clean up partial download files
+        if 'video_id' in locals():
+            try:
+                video_upload_dir = upload_dir / video_id
+                if video_upload_dir.exists():
+                    shutil.rmtree(video_upload_dir)
+                    logger.info(f"🗑️ Cleaned up cancelled download directory: {video_upload_dir}")
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️ Failed to clean up cancelled files: {cleanup_error}")
+        
+        # Release lock
+        job_queue.release_job_lock(job_id)
 
     except Exception as e:
         logger.error(f"Error in YouTube download job {job_id}: {str(e)}", exc_info=True)
