@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import asyncio
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +17,100 @@ from PIL import Image, ImageDraw, ImageFont
 
 # Set up logging first (before imports that might use it)
 logger = logging.getLogger(__name__)
+
+# ===== CANCELLATION CONTEXT SYSTEM =====
+# Context variables to pass user_id and video_id to nested functions for cancellation checks
+_cancellation_user_id: ContextVar[Optional[str]] = ContextVar('cancellation_user_id', default=None)
+_cancellation_video_id: ContextVar[Optional[str]] = ContextVar('cancellation_video_id', default=None)
+
+class ProcessingCancelledException(Exception):
+    """Exception raised when processing is cancelled by user"""
+    pass
+
+def set_cancellation_context(user_id: str, video_id: str):
+    """Set the cancellation context for nested function calls"""
+    _cancellation_user_id.set(user_id)
+    _cancellation_video_id.set(video_id)
+    logger.info(f"🔒 Cancellation context set: user={user_id}, video={video_id}")
+
+def clear_cancellation_context():
+    """Clear the cancellation context"""
+    _cancellation_user_id.set(None)
+    _cancellation_video_id.set(None)
+
+async def check_cancellation():
+    """Check if processing has been cancelled. Call this periodically in long-running operations.
+    
+    Raises:
+        ProcessingCancelledException: If the video processing has been cancelled
+    """
+    user_id = _cancellation_user_id.get()
+    video_id = _cancellation_video_id.get()
+    
+    if not user_id or not video_id:
+        return  # No context set, can't check
+    
+    try:
+        from services.user_video_service import get_user_video
+        video = await get_user_video(user_id, video_id)
+        
+        if video and video.status == "failed":
+            error_msg = video.error_message or "Unknown reason"
+            if "cancelled" in error_msg.lower():
+                logger.warning(f"🛑 Processing cancelled by user for video {video_id}")
+                raise ProcessingCancelledException(f"Processing cancelled: {error_msg}")
+    except ProcessingCancelledException:
+        raise
+    except Exception as e:
+        # Don't fail the entire process if we can't check cancellation
+        logger.debug(f"Could not check cancellation status: {e}")
+
+def check_cancellation_sync():
+    """Synchronous version of check_cancellation for use in sync code.
+    Creates a new event loop if needed.
+    
+    Raises:
+        ProcessingCancelledException: If the video processing has been cancelled
+    """
+    user_id = _cancellation_user_id.get()
+    video_id = _cancellation_video_id.get()
+    
+    if not user_id or not video_id:
+        return  # No context set, can't check
+    
+    try:
+        # Try to get the running loop
+        try:
+            loop = asyncio.get_running_loop()
+            # If we're in an async context, we can't run another coroutine synchronously
+            # Schedule it as a task instead - but this won't block
+            # For sync code in async context, we just skip the check
+            return
+        except RuntimeError:
+            # No running loop, create one
+            pass
+        
+        # Run the async check in a new loop
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_check_cancellation_async(user_id, video_id))
+        finally:
+            loop.close()
+    except ProcessingCancelledException:
+        raise
+    except Exception as e:
+        logger.debug(f"Could not check cancellation status (sync): {e}")
+
+async def _check_cancellation_async(user_id: str, video_id: str):
+    """Internal async cancellation check"""
+    from services.user_video_service import get_user_video
+    video = await get_user_video(user_id, video_id)
+    
+    if video and video.status == "failed":
+        error_msg = video.error_message or "Unknown reason"
+        if "cancelled" in error_msg.lower():
+            raise ProcessingCancelledException(f"Processing cancelled: {error_msg}")
+# ===== END CANCELLATION CONTEXT SYSTEM =====
 
 # Import other services
 # face tracking removed to simplify and speed up clip creation
@@ -77,6 +173,9 @@ async def process_video(
         
         async def process_single_clip(i: int, segment: Dict[str, Any]) -> Dict[str, Any]:
             """Process a single clip (used for parallel execution)"""
+            # Check for cancellation before starting each clip
+            await check_cancellation()
+            
             segment_start_time = time.time()
             clip_id = f"clip_{i}"
             
@@ -201,6 +300,9 @@ async def create_clip(
     """
     logger.info(f"🎬 Creating clip {clip_id}: {start_time:.2f}s - {end_time:.2f}s")
     
+    # Check for cancellation at start
+    await check_cancellation()
+    
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{clip_id}.mp4")
@@ -210,9 +312,15 @@ async def create_clip(
     logger.info(f"   📂 Extracting segment...")
     extract_clip(video_path, temp_path, start_time, end_time)
     
+    # Check for cancellation after extraction
+    await check_cancellation()
+    
     # Step 2: Detect optimal crop positions using MediaPipe AI
     logger.info(f"   🤖 Analyzing with MediaPipe AI for auto-reframe...")
     crop_positions = await detect_mediapipe_crop_positions(temp_path, start_time, end_time, transcript)
+    
+    # Check for cancellation after MediaPipe analysis
+    await check_cancellation()
     
     # Step 3: Apply smart crop with smooth transitions
     logger.info(f"   🎥 Applying AI-guided auto-reframe...")
@@ -312,11 +420,18 @@ async def detect_mediapipe_crop_positions(
         
         frame_idx = 0
         prev_lip_distances = {}  # Track lip distance per person for movement detection
+        cancellation_check_counter = 0  # Counter for periodic cancellation checks
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            # Periodic cancellation check (every 30 sampled frames, roughly every 3 seconds)
+            cancellation_check_counter += 1
+            if cancellation_check_counter >= 30:
+                cancellation_check_counter = 0
+                await check_cancellation()
             
             # Sample frames for efficiency
             if frame_idx % sample_interval != 0:

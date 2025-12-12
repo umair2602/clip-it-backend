@@ -290,7 +290,7 @@ REMEMBER:
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {
                 "role": "system",
@@ -298,8 +298,8 @@ REMEMBER:
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.7,
-        max_tokens=4000,
+        temperature=0.8,
+        max_tokens=8000,
         n=1,
         stop=None,
     )
@@ -484,7 +484,7 @@ async def identify_engaging_segments(
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {
                 "role": "system",
@@ -492,8 +492,8 @@ async def identify_engaging_segments(
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.7,  # Increased for more creative clip detection
-        max_tokens=4000,  # Increased to handle more clips
+        temperature=0.8,  # Increased for more creative clip detection
+        max_tokens=8000,  # Increased to handle more clips
         n=1,
         stop=None,
     )
