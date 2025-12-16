@@ -366,12 +366,16 @@ async def detect_mediapipe_crop_positions(
     
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
-    # Calculate crop dimensions - balanced approach: moderate crop + small padding
-    # Use 85% of height as width for a good balance (was 56% before, too restrictive)
+    # Calculate crop dimensions - WIDER to capture multiple speakers
+    # Use 95% of height as width to avoid getting stuck between speakers
     crop_h = input_h
-    crop_w = int(crop_h * 0.85)  # 918px for 1080p - shows ~85% of content width
+    crop_w = int(crop_h * 0.95)  # 1026px for 1080p - wide enough to show both speakers
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (balanced: 85% width with minimal padding)")
+    # Ensure crop width doesn't exceed video width
+    if crop_w > input_w:
+        crop_w = input_w
+    
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (wide crop to capture multiple speakers)")
     
     # STEP 1: Build speaker timeline from transcript
     logger.info(f"      🔍 Checking transcript data...")
@@ -553,6 +557,9 @@ async def detect_mediapipe_crop_positions(
     # Get all unique frame numbers we sampled
     sampled_frames = sorted(set(d['frame'] for d in person_detections))
     
+    # IMPROVED: Get speaker positions for intelligent cropping
+    all_speaker_positions = list(speaker_to_position.values()) if speaker_to_position else []
+    
     for frame_num in sampled_frames:
         frame_time = frame_num / fps
         
@@ -572,6 +579,27 @@ async def detect_mediapipe_crop_positions(
                 center_x = largest_person['x']
             else:
                 center_x = input_w // 2
+        
+        # IMPROVED: If we have multiple speakers detected, adjust crop to show both when possible
+        if len(all_speaker_positions) >= 2:
+            # Get all speaker X positions
+            speaker_x_positions = [sp['avg_x'] for sp in all_speaker_positions]
+            min_x = min(speaker_x_positions)
+            max_x = max(speaker_x_positions)
+            speakers_width = max_x - min_x
+            
+            # If speakers are close enough to fit in crop, center between them
+            if speakers_width < crop_w * 0.8:  # If they fit within 80% of crop width
+                # Center between all speakers
+                center_x = (min_x + max_x) // 2
+                logger.debug(f"      Frame {frame_num}: Centering between speakers (width={speakers_width}px)")
+            # Otherwise, focus on active speaker but lean towards showing others
+            elif active_speaker and active_speaker in speaker_to_position:
+                active_pos = speaker_to_position[active_speaker]['avg_x']
+                # Bias crop towards showing other speakers (30% bias)
+                other_speakers_avg = sum(sp['avg_x'] for sp in all_speaker_positions if sp['avg_x'] != active_pos) / max(1, len(all_speaker_positions) - 1)
+                center_x = int(active_pos * 0.7 + other_speakers_avg * 0.3)
+                logger.debug(f"      Frame {frame_num}: Active speaker with bias towards others (center={center_x})")
         
         # Calculate crop position
         crop_x = center_x - (crop_w // 2)
@@ -1014,12 +1042,16 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
     
-    # Balanced crop: use 85% of height as width (not too restrictive, not too much padding)
+    # WIDER crop to avoid getting stuck between speakers - use 95% of height
     crop_h = input_h
-    crop_w = int(crop_h * 0.85)  # 918px for 1080p video
+    crop_w = int(crop_h * 0.95)  # 1026px for 1080p video
+    
+    # Ensure crop width doesn't exceed video width
+    if crop_w > input_w:
+        crop_w = input_w
     
     logger.info(f"      📐 Video: {input_w}x{input_h}, {total_frames} frames @ {fps:.1f}fps")
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (balanced 85% width)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (95% width - captures both speakers)")
     
     # IMPROVED: Build frame-by-frame crop positions with smooth interpolation
     if len(crop_positions) > 1 and crop_w < input_w:
