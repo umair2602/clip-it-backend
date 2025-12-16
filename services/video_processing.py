@@ -366,9 +366,16 @@ async def detect_mediapipe_crop_positions(
     
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
-    # Calculate crop dimensions for 9:16
+    # Calculate crop dimensions - WIDER to capture multiple speakers
+    # Use 95% of height as width to avoid getting stuck between speakers
     crop_h = input_h
-    crop_w = int(crop_h * 0.5625)  # 607px for 1080p
+    crop_w = int(crop_h * 0.95)  # 1026px for 1080p - wide enough to show both speakers
+    
+    # Ensure crop width doesn't exceed video width
+    if crop_w > input_w:
+        crop_w = input_w
+    
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (wide crop to capture multiple speakers)")
     
     # STEP 1: Build speaker timeline from transcript
     logger.info(f"      🔍 Checking transcript data...")
@@ -550,6 +557,9 @@ async def detect_mediapipe_crop_positions(
     # Get all unique frame numbers we sampled
     sampled_frames = sorted(set(d['frame'] for d in person_detections))
     
+    # IMPROVED: Get speaker positions for intelligent cropping
+    all_speaker_positions = list(speaker_to_position.values()) if speaker_to_position else []
+    
     for frame_num in sampled_frames:
         frame_time = frame_num / fps
         
@@ -569,6 +579,27 @@ async def detect_mediapipe_crop_positions(
                 center_x = largest_person['x']
             else:
                 center_x = input_w // 2
+        
+        # IMPROVED: If we have multiple speakers detected, adjust crop to show both when possible
+        if len(all_speaker_positions) >= 2:
+            # Get all speaker X positions
+            speaker_x_positions = [sp['avg_x'] for sp in all_speaker_positions]
+            min_x = min(speaker_x_positions)
+            max_x = max(speaker_x_positions)
+            speakers_width = max_x - min_x
+            
+            # If speakers are close enough to fit in crop, center between them
+            if speakers_width < crop_w * 0.8:  # If they fit within 80% of crop width
+                # Center between all speakers
+                center_x = (min_x + max_x) // 2
+                logger.debug(f"      Frame {frame_num}: Centering between speakers (width={speakers_width}px)")
+            # Otherwise, focus on active speaker but lean towards showing others
+            elif active_speaker and active_speaker in speaker_to_position:
+                active_pos = speaker_to_position[active_speaker]['avg_x']
+                # Bias crop towards showing other speakers (30% bias)
+                other_speakers_avg = sum(sp['avg_x'] for sp in all_speaker_positions if sp['avg_x'] != active_pos) / max(1, len(all_speaker_positions) - 1)
+                center_x = int(active_pos * 0.7 + other_speakers_avg * 0.3)
+                logger.debug(f"      Frame {frame_num}: Active speaker with bias towards others (center={center_x})")
         
         # Calculate crop position
         crop_x = center_x - (crop_w // 2)
@@ -1000,7 +1031,7 @@ def smooth_crop_positions(positions: list, window_size: int = 5) -> list:
 async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, crop_positions: list):
     """
     IMPROVED: Apply dynamic crop to video with smooth transitions that follow active speakers.
-    Uses FFmpeg's crop filter with time-based interpolation.
+    Uses Python/OpenCV for frame-by-frame processing to achieve true dynamic cropping.
     """
     import cv2
     
@@ -1010,32 +1041,21 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
-    cap.release()
     
+    # WIDER crop to avoid getting stuck between speakers - use 95% of height
     crop_h = input_h
-    crop_w = int(crop_h * 0.5625)
+    crop_w = int(crop_h * 0.95)  # 1026px for 1080p video
     
-    # IMPROVED: Build dynamic crop filter that actually follows speakers
-    if len(crop_positions) > 1:
-        # Create interpolated crop positions for smooth transitions
-        # Build expression that changes crop_x over time based on active speaker
-        
-        # Create time-based keyframes for crop position
-        keyframes = []
-        for i, pos in enumerate(crop_positions):
-            time_point = pos['frame'] / fps
-            crop_x = pos['crop_x']
-            keyframes.append((time_point, crop_x))
-        
-        # Build FFmpeg expression for dynamic crop with smooth transitions
-        # Using crop filter with expression for x position
-        # We'll use a series of conditional expressions based on time
-        
-        # For smooth following, we'll use linear interpolation between keyframes
-        # Build expression: if(lt(t,t1),x1,if(lt(t,t2),lerp(x1,x2,t),...))
-        
-        # Simplified approach: Use zoompan for smooth following
-        # Calculate average movement speed
+    # Ensure crop width doesn't exceed video width
+    if crop_w > input_w:
+        crop_w = input_w
+    
+    logger.info(f"      📐 Video: {input_w}x{input_h}, {total_frames} frames @ {fps:.1f}fps")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (95% width - captures both speakers)")
+    
+    # IMPROVED: Build frame-by-frame crop positions with smooth interpolation
+    if len(crop_positions) > 1 and crop_w < input_w:
+        # Only do dynamic cropping if we're actually cropping (not using full width)
         import numpy as np
         
         # Create smooth interpolation of crop positions over time
@@ -1045,6 +1065,15 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         # Fill in crop_x for sampled frames
         for pos in crop_positions:
             frame_to_crop[pos['frame']] = pos['crop_x']
+        
+        # Log keyframe positions
+        logger.info(f"      🎯 Crop keyframes ({len(crop_positions)} positions):")
+        for i, pos in enumerate(crop_positions[:5]):  # Log first 5
+            time_point = pos['frame'] / fps
+            speaker = pos.get('active_speaker', 'unknown')
+            logger.info(f"         Frame {pos['frame']} ({time_point:.1f}s): X={pos['crop_x']}, Speaker={speaker}")
+        if len(crop_positions) > 5:
+            logger.info(f"         ... and {len(crop_positions) - 5} more keyframes")
         
         # Interpolate between sampled frames
         sampled_frames = sorted(frame_to_crop.keys())
@@ -1062,10 +1091,10 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
                 x1 = frame_to_crop[f1]
                 x2 = frame_to_crop[f2]
                 
-                # Linear interpolation with smoothing
+                # Linear interpolation with ease-in-out smoothing
                 alpha = (frame - f1) / (f2 - f1)
-                # Apply ease-in-out for smoother transitions
-                alpha_smooth = alpha * alpha * (3.0 - 2.0 * alpha)  # Smoothstep
+                # Apply smoothstep for smoother transitions (ease-in-out)
+                alpha_smooth = alpha * alpha * (3.0 - 2.0 * alpha)
                 crop_x = int(x1 + (x2 - x1) * alpha_smooth)
             elif before_frames:
                 crop_x = frame_to_crop[before_frames[-1]]
@@ -1074,63 +1103,147 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
             else:
                 crop_x = (input_w - crop_w) // 2  # Center fallback
             
+            # Clamp to valid range
+            crop_x = max(0, min(crop_x, input_w - crop_w))
             interpolated_crops.append(crop_x)
         
-        # Use median with temporal smoothing for stable but responsive crop
-        # Apply moving average to reduce jitter
-        window_size = int(fps * 0.5)  # 0.5 second smoothing window
+        # Apply moving average for additional smoothing (0.3 second window)
+        window_size = max(3, int(fps * 0.3))
         smoothed_crops = np.convolve(
             interpolated_crops, 
             np.ones(window_size)/window_size, 
             mode='same'
         )
         
-        # For FFmpeg, we'll use a weighted average that favors recent speaker positions
-        # Since FFmpeg crop filter doesn't support frame-by-frame expressions easily,
-        # we'll use the weighted average of crop positions based on confidence
+        # Log crop movement statistics
+        crop_range = max(smoothed_crops) - min(smoothed_crops)
+        logger.info(f"      📊 Crop movement: min={min(smoothed_crops):.0f}, max={max(smoothed_crops):.0f}, range={crop_range:.0f}px")
         
-        # Weight positions by their confidence (if available) and recency
-        weighted_sum = 0
-        total_weight = 0
+        # Now apply dynamic crop frame-by-frame using OpenCV
+        logger.info(f"      🎬 Applying dynamic crop with frame-by-frame processing...")
         
-        for pos in crop_positions:
-            weight = pos.get('confidence', 1.0) if 'confidence' in pos else 1.0
-            # Add recency weight (later frames weighted higher)
-            recency_weight = 1.0 + (pos['frame'] / total_frames) * 0.5
-            combined_weight = weight * recency_weight
+        # Reset video capture
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        # Get video codec info
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        temp_output = output_path + '.temp.mp4'
+        
+        # Create video writer for cropped frames
+        out = cv2.VideoWriter(temp_output, fourcc, fps, (crop_w, crop_h))
+        
+        frame_idx = 0
+        last_log_time = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
             
-            weighted_sum += pos['crop_x'] * combined_weight
-            total_weight += combined_weight
+            # Get crop position for this frame
+            crop_x = int(smoothed_crops[frame_idx])
+            
+            # Crop the frame
+            cropped_frame = frame[0:crop_h, crop_x:crop_x+crop_w]
+            
+            # Write cropped frame
+            out.write(cropped_frame)
+            
+            # Log progress every 2 seconds
+            current_time = frame_idx / fps
+            if current_time - last_log_time >= 2.0:
+                progress = (frame_idx / total_frames) * 100
+                logger.info(f"         Progress: {progress:.1f}% (frame {frame_idx}/{total_frames}, crop_x={crop_x})")
+                last_log_time = current_time
+            
+            frame_idx += 1
         
-        weighted_crop_x = int(weighted_sum / total_weight) if total_weight > 0 else (input_w - crop_w) // 2
+        cap.release()
+        out.release()
         
-        # Clamp to valid range
-        weighted_crop_x = max(0, min(weighted_crop_x, input_w - crop_w))
+        logger.info(f"      ✅ Dynamic cropping complete, re-encoding with h264...")
         
-        logger.info(f"      Dynamic crop: weighted average X={weighted_crop_x} from {len(crop_positions)} keyframes")
-        filter_str = f"crop={crop_w}:{crop_h}:{weighted_crop_x}:0,scale=1080:1920"
+        # Re-encode with h264 and audio using ffmpeg
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", temp_output,
+            "-i", temp_path,  # Original for audio
+            "-map", "0:v",  # Video from temp_output
+            "-map", "1:a?",  # Audio from original (if exists)
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",  # Scale with padding
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            output_path
+        ]
+        
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        # Clean up temp file
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+            
     else:
+        # Single position - use static crop with ffmpeg (faster)
         crop_x = crop_positions[0]['crop_x']
-        filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920"
+        logger.info(f"      📍 Using static crop at X={crop_x}")
+        filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+        
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", temp_path,
+            "-vf", filter_str,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            output_path
+        ]
+        
+        logger.info(f"      Crop filter: {filter_str}")
+        subprocess.run(cmd, check=True)
+        logger.info(f"      ✅ Crop applied successfully")
     
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", temp_path,
-        "-vf", filter_str,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        output_path
-    ]
-    
-    logger.info(f"      Crop filter: {filter_str}")
-    subprocess.run(cmd, check=True)
-
-
+    # Check if we're using full width (no cropping needed)
+    if crop_w >= input_w:
+        # Full width mode - no cropping, just scale and pad to 9:16
+        logger.info(f"      📍 Using full frame (no crop) with padding to 9:16")
+        
+        # Calculate padding needed for 9:16 aspect ratio (1080:1920 = 0.5625)
+        target_aspect = 9 / 16  # 0.5625
+        current_aspect = input_w / input_h
+        
+        if current_aspect > target_aspect:
+            # Video is wider than 9:16 - add vertical padding (top/bottom black bars)
+            scale_filter = f"scale=1080:-1,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+        else:
+            # Video is taller than 9:16 - add horizontal padding (left/right black bars)
+            scale_filter = f"scale=-1:1920,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+        
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", temp_path,
+            "-vf", scale_filter,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            output_path
+        ]
+        
+        logger.info(f"      Scale + pad filter: {scale_filter}")
+        subprocess.run(cmd, check=True)
+        logger.info(f"      ✅ Full frame processed with padding")
 # async def create_clip(
 #     video_path: str, output_dir: str, start_time: float, end_time: float, clip_id: str
 # ) -> str:
