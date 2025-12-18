@@ -39,6 +39,7 @@ python-multipart>=0.0.6
 openai>=1.0.0
 torch>=2.0.0
 opencv-python>=4.8.0
+protobuf<5.0.0  # Pin for MediaPipe compatibility
 mediapipe>=0.10.7
 numpy>=1.24.0
 pydantic>=2.0.0
