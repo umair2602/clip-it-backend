@@ -177,6 +177,14 @@ class TalkNetASD:
         """
         import python_speech_features
         
+        # Ensure audio is a valid numpy array
+        if not isinstance(audio, np.ndarray):
+            audio = np.array(audio)
+        
+        # Ensure audio is 1D
+        if audio.ndim > 1:
+            audio = audio.flatten()
+        
         mfcc = python_speech_features.mfcc(
             audio, 
             sample_rate, 
@@ -184,6 +192,17 @@ class TalkNetASD:
             winlen=0.025, 
             winstep=0.010
         )
+        
+        # Ensure MFCC is a proper 2D array
+        if not isinstance(mfcc, np.ndarray):
+            mfcc = np.array(mfcc)
+        
+        if mfcc.ndim == 1:
+            mfcc = mfcc.reshape(-1, 1)
+        elif mfcc.ndim == 0:
+            # Scalar - this shouldn't happen but handle it
+            mfcc = np.array([[mfcc]])
+        
         return mfcc
     
     def detect_active_speaker(
@@ -256,17 +275,41 @@ class TalkNetASD:
             audio_start = int(track_frames[0] / fps * 100)
             audio_end = int((track_frames[-1] + 1) / fps * 100)
             
+            # Ensure valid audio indices
+            if audio_start < 0:
+                audio_start = 0
+            if audio_end > len(audio_features):
+                audio_end = len(audio_features)
+            if audio_start >= audio_end:
+                logger.warning(f"Invalid audio segment indices for track {track_idx} (start={audio_start}, end={audio_end}), skipping")
+                continue
+            
             audio_segment = audio_features[audio_start:audio_end]
             
             # Ensure we have matching lengths
             video_length = len(video_features)
             
-            # Validate audio_segment is a valid array with correct shape
-            if audio_segment is None or not hasattr(audio_segment, 'ndim'):
-                logger.warning(f"Invalid audio segment for track {track_idx}, skipping")
+            # Validate audio_segment is a valid numpy array with correct shape
+            if audio_segment is None:
+                logger.warning(f"None audio segment for track {track_idx}, skipping")
                 continue
+                
+            # Convert to numpy array if it isn't already
+            if not isinstance(audio_segment, np.ndarray):
+                logger.warning(f"Audio segment is not a numpy array (type={type(audio_segment)}) for track {track_idx}, converting...")
+                try:
+                    audio_segment = np.array(audio_segment)
+                except Exception as conv_error:
+                    logger.warning(f"Failed to convert audio segment to array for track {track_idx}: {conv_error}, skipping")
+                    continue
             
-            if audio_segment.ndim == 0 or audio_segment.size == 0:
+            # Check if it's a 0-dimensional array (scalar)
+            if audio_segment.ndim == 0:
+                logger.warning(f"Audio segment is a scalar for track {track_idx}, skipping")
+                continue
+                
+            # Check if empty
+            if audio_segment.size == 0:
                 logger.warning(f"Empty audio segment for track {track_idx}, skipping")
                 continue
             
@@ -285,10 +328,25 @@ class TalkNetASD:
                 # Pad audio - use correct padding for 2D array (T, F)
                 pad_length = expected_audio - audio_length
                 try:
+                    # Ensure audio_segment is 2D before padding
+                    if audio_segment.ndim != 2:
+                        logger.warning(f"Audio segment for track {track_idx} is not 2D (ndim={audio_segment.ndim}), reshaping...")
+                        if audio_segment.ndim == 1:
+                            audio_segment = audio_segment.reshape(-1, 1)
+                        else:
+                            raise ValueError(f"Cannot handle audio_segment with ndim={audio_segment.ndim}")
+                    
+                    # Verify it's a numpy array (not int or other type)
+                    if not isinstance(audio_segment, np.ndarray):
+                        raise TypeError(f"audio_segment is {type(audio_segment)}, not numpy array")
+                    
+                    # Log debug info
+                    logger.debug(f"Padding audio for track {track_idx}: shape={audio_segment.shape}, pad_length={pad_length}")
+                    
                     # ((before_T, after_T), (before_F, after_F))
                     audio_segment = np.pad(audio_segment, ((0, pad_length), (0, 0)), mode='edge')
                 except Exception as pad_error:
-                    logger.warning(f"Failed to pad audio for track {track_idx}: {pad_error}, shape={audio_segment.shape}")
+                    logger.warning(f"Failed to pad audio for track {track_idx}: {pad_error}, type={type(audio_segment)}, shape={getattr(audio_segment, 'shape', 'N/A')}")
                     continue
             elif audio_length > expected_audio:
                 audio_segment = audio_segment[:expected_audio]
