@@ -327,26 +327,36 @@ class TalkNetASD:
             if audio_length < expected_audio:
                 # Pad audio - use correct padding for 2D array (T, F)
                 pad_length = expected_audio - audio_length
+                
+                # CRITICAL FIX: Ensure pad_length is a Python int, not numpy scalar
+                if isinstance(pad_length, np.ndarray):
+                    pad_length = int(pad_length.item())
+                elif not isinstance(pad_length, int):
+                    pad_length = int(pad_length)
+                
                 try:
                     # Ensure audio_segment is 2D before padding
+                    if not isinstance(audio_segment, np.ndarray):
+                        logger.warning(f"Audio segment for track {track_idx} is {type(audio_segment)}, not numpy array. Converting...")
+                        audio_segment = np.array(audio_segment)
+                    
                     if audio_segment.ndim != 2:
                         logger.warning(f"Audio segment for track {track_idx} is not 2D (ndim={audio_segment.ndim}), reshaping...")
                         if audio_segment.ndim == 1:
                             audio_segment = audio_segment.reshape(-1, 1)
+                        elif audio_segment.ndim == 0:
+                            logger.warning(f"Audio segment is scalar for track {track_idx}, skipping")
+                            continue
                         else:
                             raise ValueError(f"Cannot handle audio_segment with ndim={audio_segment.ndim}")
                     
-                    # Verify it's a numpy array (not int or other type)
-                    if not isinstance(audio_segment, np.ndarray):
-                        raise TypeError(f"audio_segment is {type(audio_segment)}, not numpy array")
-                    
                     # Log debug info
-                    logger.debug(f"Padding audio for track {track_idx}: shape={audio_segment.shape}, pad_length={pad_length}")
+                    logger.debug(f"Padding audio for track {track_idx}: shape={audio_segment.shape}, pad_length={pad_length} (type={type(pad_length)})")
                     
                     # ((before_T, after_T), (before_F, after_F))
                     audio_segment = np.pad(audio_segment, ((0, pad_length), (0, 0)), mode='edge')
                 except Exception as pad_error:
-                    logger.warning(f"Failed to pad audio for track {track_idx}: {pad_error}, type={type(audio_segment)}, shape={getattr(audio_segment, 'shape', 'N/A')}")
+                    logger.warning(f"Failed to pad audio for track {track_idx}: {pad_error}, type(audio_segment)={type(audio_segment)}, type(pad_length)={type(pad_length)}, shape={getattr(audio_segment, 'shape', 'N/A')}")
                     continue
             elif audio_length > expected_audio:
                 audio_segment = audio_segment[:expected_audio]

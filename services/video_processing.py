@@ -133,7 +133,7 @@ try:
     else:
         logger.info("ℹ️ TalkNet ASD not yet initialized - will download model on first use")
 except ImportError as e:
-    logger.warning(f"TalkNet ASD not available, falling back to lip movement detection: {e}")
+    logger.warning(f"TalkNet ASD not available, will use basic visual lip movement detection: {e}")
     TALKNET_AVAILABLE = False
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -303,8 +303,8 @@ async def create_clip(
     video_path: str, output_dir: str, start_time: float, end_time: float, clip_id: str, transcript: Dict[str, Any] = None
 ) -> str:
     """
-    Extract video segment and convert to vertical (9:16) format using MediaPipe AI auto-reframe.
-    Uses pose detection + face detection to intelligently track and follow speakers.
+    Extract video segment and convert to vertical (9:16) format using TalkNet ASD for speaker tracking.
+    Uses TalkNet's audio-visual cross-attention to identify and follow the active speaker.
     """
     logger.info(f"🎬 Creating clip {clip_id}: {start_time:.2f}s - {end_time:.2f}s")
     
@@ -323,41 +323,41 @@ async def create_clip(
     # Check for cancellation after extraction
     await check_cancellation()
     
-    # Step 2: Detect optimal crop positions using MediaPipe AI
-    logger.info(f"   🤖 Analyzing with MediaPipe AI for auto-reframe...")
-    crop_positions = await detect_mediapipe_crop_positions(temp_path, start_time, end_time, transcript)
+    # Step 2: Detect optimal crop positions using TalkNet ASD
+    logger.info(f"   🎙️ Analyzing with TalkNet ASD for speaker-guided reframe...")
+    crop_positions = await detect_talknet_crop_positions(temp_path, start_time, end_time, transcript)
     
-    # Check for cancellation after MediaPipe analysis
+    # Check for cancellation after TalkNet analysis
     await check_cancellation()
     
     # Step 3: Apply smart crop with smooth transitions
-    logger.info(f"   🎥 Applying AI-guided auto-reframe...")
+    logger.info(f"   🎥 Applying TalkNet-guided speaker tracking...")
     await apply_smart_crop_with_transitions(temp_path, output_path, crop_positions)
     
     # Cleanup
     if os.path.exists(temp_path):
         os.remove(temp_path)
     
-    logger.info(f"   ✅ Clip created with AI auto-reframe: {output_path}")
+    logger.info(f"   ✅ Clip created with TalkNet speaker tracking: {output_path}")
     return output_path
 
 
-async def detect_mediapipe_crop_positions(
+async def detect_talknet_crop_positions(
     video_path: str,
     start_time: float, 
     end_time: float,
     transcript: Dict[str, Any] = None
 ) -> list:
     """
-    Use MediaPipe to detect ALL people/faces, then use speaker diarization to 
-    identify which person is speaking and track them.
+    Use TalkNet ASD (Active Speaker Detection) to detect faces and identify who is speaking.
+    TalkNet uses audio-visual cross-attention for accurate speaker detection.
     
     Strategy:
-    1. Detect all people in each frame and track their positions
-    2. Build a spatial map of where each person sits (left, center, right)
-    3. Use transcript to know which speaker is talking at each moment
-    4. Map speakers to spatial positions
-    5. Track the active speaker's position
+    1. Detect all faces in each frame using basic face detection
+    2. Use TalkNet to determine which face is actively speaking
+    3. Track the active speaker's position across frames
+    4. Generate smooth crop positions that follow the speaker
+    5. Fallback to visual cues (lip movement) only if TalkNet fails
     """
     import cv2
     import mediapipe as mp
@@ -399,14 +399,15 @@ async def detect_mediapipe_crop_positions(
         logger.warning(f"      ⚠️ No speaker timeline data found - will use visual tracking only")
         logger.warning(f"         This means crop won't follow active speaker intelligently")
     
-    
-    # STEP 2: Detect all people AND their lip movement for speech detection
+    # STEP 2: Detect all faces and track basic lip movement
+    # NOTE: MediaPipe Face Mesh is used ONLY for face detection and basic lip movement tracking
+    # TalkNet ASD (below) handles the actual speaker detection using audio-visual cross-attention
     person_detections = []  # List of all detected people with lip movement data
     sample_interval = max(1, int(fps / 10))  # IMPROVED: Sample 10 frames per second for better speaker change detection
     
     mp_face_mesh = mp.solutions.face_mesh
     
-    # Lip landmark indices (MediaPipe Face Mesh)
+    # Lip landmark indices for basic visual tracking (fallback only)
     # Upper lip: 61, 291, 0  |  Lower lip: 17, 314, 0
     # We'll track vertical distance between upper and lower lips
     UPPER_LIP_INDICES = [13, 14]  # Top lip landmarks
@@ -560,11 +561,11 @@ async def detect_mediapipe_crop_positions(
                 
                 logger.info(f"      ✅ TalkNet updated {talknet_updates} detections with high-accuracy speaking scores")
             else:
-                logger.info(f"      ℹ️ TalkNet returned no scores, using MediaPipe lip detection")
+                logger.info(f"      ℹ️ TalkNet returned no scores, using basic visual lip movement detection")
         else:
-            logger.info(f"      ℹ️ TalkNet not available, using MediaPipe lip detection")
+            logger.info(f"      ℹ️ TalkNet not available, using basic visual lip movement detection")
     except Exception as e:
-        logger.warning(f"      ⚠️ TalkNet failed, falling back to MediaPipe: {e}")
+        logger.warning(f"      ⚠️ TalkNet failed, using basic visual lip movement detection: {e}")
     
     # STEP 3: Cluster people by spatial position to identify distinct individuals
     person_clusters = cluster_people_by_position(person_detections, input_w)
