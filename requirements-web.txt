@@ -12,7 +12,7 @@ assemblyai>=0.17.0
 openai-whisper>=20231117
 torch>=2.0.0
 protobuf<5.0.0  # Pin for MediaPipe compatibility
-mediapipe>=0.10.7
+mediapipe>=0.10.7,<0.10.22  # Pin to legacy solutions API (0.10.22+ changed API)
 numpy>=1.24.0
 redis>=5.0.0
 celery[redis]>=5.3.0
