@@ -589,7 +589,7 @@ async def generate_clip_title(segment_text: str) -> str:
 
     try:
         response = await aclient.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {
                     "role": "system",

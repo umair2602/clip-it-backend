@@ -39,7 +39,8 @@ python-multipart>=0.0.6
 openai>=1.0.0
 torch>=2.0.0
 opencv-python>=4.8.0
-mediapipe>=0.10.7
+protobuf<5.0.0  # Pin for MediaPipe compatibility
+mediapipe>=0.10.7,<0.10.22  # Pin to legacy solutions API (0.10.22+ changed API)
 numpy>=1.24.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
@@ -72,3 +73,7 @@ assemblyai>=0.17.0
 google-auth
 google-auth-oauthlib
 google-api-python-client
+
+# TalkNet ASD (Active Speaker Detection)
+gdown>=4.7.0
+python_speech_features>=0.6.0
