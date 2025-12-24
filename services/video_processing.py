@@ -375,15 +375,15 @@ async def detect_talknet_crop_positions(
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
     # Calculate crop dimensions - tighter crop for better zoom on speaker
-    # Use 0.9x height as width - closer to 9:16 for less padding in final output
+    # Use 1.0x height as width - less zoom, shows more of the scene
     crop_h = input_h
-    crop_w = int(crop_h * 0.9)  # ~972px for 1080p - tighter zoom on speaker
+    crop_w = int(crop_h * 1.0)  # Full height ratio - less zoom on speaker
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (0.9x aspect ratio - tighter zoom)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (1.0x aspect ratio - less zoom)")
     
     # STEP 1: Build speaker timeline from transcript
     logger.info(f"      🔍 Checking transcript data...")
@@ -839,16 +839,16 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
     
-    # Tighter crop for better zoom on speaker - use 0.9x height as width
+    # Less zoom for wider view - use 1.0x height as width
     crop_h = input_h
-    crop_w = int(crop_h * 0.9)  # ~972px for 1080p video - tighter zoom on speaker
+    crop_w = int(crop_h * 1.0)  # Full height ratio - less zoom on speaker
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
     
     logger.info(f"      📐 Video: {input_w}x{input_h}, {total_frames} frames @ {fps:.1f}fps")
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (0.9x aspect ratio - tighter zoom)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (1.0x aspect ratio - less zoom)")
     
     # IMPROVED: Build frame-by-frame crop positions with smooth interpolation
     if len(crop_positions) > 1 and crop_w < input_w:

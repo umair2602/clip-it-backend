@@ -440,6 +440,7 @@ async def process_video_job(job_id: str, job_data: dict):
         file_path = job_data.get("file_path")
         original_job_id = job_data.get("original_job_id")
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration")  # From frontend
 
         # If user_id is not provided, fetch it from DB
         if not user_id:
@@ -451,6 +452,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 user_id = None
 
         logger.info(f"Processing video job {job_id} for video {video_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
         
         # ⏱️ START PIPELINE TIMING
         import time
@@ -568,8 +570,9 @@ async def process_video_job(job_id: str, job_data: dict):
         # ⏱️ STEP 2: AI CONTENT ANALYSIS
         step_start = time.time()
         logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
+        logger.info(f"   Target clip duration: {target_clip_duration}s")
         
-        segments = await analyze_content(transcript)
+        segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
         
         # Check if cancelled immediately after analysis
         if user_id:
@@ -1353,11 +1356,13 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         url = job_data.get("url")
         auto_process = job_data.get("auto_process", True)
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration")  # From frontend
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
         logger.info(f"   Job ID (task_id): {job_id}")
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   User ID: {user_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
 
         # Update MongoDB video status
         if user_id:
@@ -1399,11 +1404,28 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                     break
                 await asyncio.sleep(5)
 
-        # Tier 2: Fallback to pytubefix if Sieve failed
+        # Tier 2: Fallback to yt-dlp if Sieve failed (more robust on cloud servers)
         if not file_path or not title:
             for attempt in range(1, max_retries + 1):
                 try:
-                    logger.info(f"Job {job_id}: [Tier 2] Attempt {attempt} to download with pytubefix")
+                    from utils.ytdlp_downloader import download_youtube_video_ytdlp
+                    logger.info(f"Job {job_id}: [Tier 2] Attempt {attempt} to download with yt-dlp")
+                    file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
+                    if file_path and title:
+                        logger.info(f"Job {job_id}: ✅ yt-dlp download successful")
+                        break
+                except Exception as ytdlp_error:
+                    logger.warning(f"Job {job_id}: yt-dlp download failed (attempt {attempt}): {str(ytdlp_error)}")
+                    if attempt == max_retries:
+                        logger.error(f"Job {job_id}: All {max_retries} yt-dlp attempts failed. Falling back to pytubefix.")
+                        break
+                    await asyncio.sleep(5)
+
+        # Tier 3: Final fallback to pytubefix (often blocked on cloud servers)
+        if not file_path or not title:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.info(f"Job {job_id}: [Tier 3] Attempt {attempt} to download with pytubefix")
                     file_path, title, video_info = await download_youtube_video(url, video_dir)
                     if file_path and title:
                         logger.info(f"Job {job_id}: ✅ pytubefix download successful")
@@ -1411,20 +1433,9 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                 except Exception as pytubefix_error:
                     logger.warning(f"Job {job_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
                     if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp.")
+                        logger.error(f"Job {job_id}: All download methods failed.")
                         break
                     await asyncio.sleep(5)
-
-        # Tier 3: Final fallback to yt-dlp
-        if not file_path or not title:
-            try:
-                from utils.ytdlp_downloader import download_youtube_video_ytdlp
-                logger.info(f"Job {job_id}: [Tier 3] Attempting download with yt-dlp (final fallback)")
-                file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
-                if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ yt-dlp download successful")
-            except Exception as ytdlp_error:
-                logger.error(f"Job {job_id}: yt-dlp download failed: {str(ytdlp_error)}")
 
         if not file_path or not title:
             raise Exception("Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)")
@@ -1485,6 +1496,7 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "user_id": user_id,
+                    "target_clip_duration": target_clip_duration,
                 },
             )
             
