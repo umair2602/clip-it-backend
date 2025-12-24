@@ -120,21 +120,20 @@ MIN_SPEAKER_DURATION = 1.0  # Minimum seconds a speaker must talk before camera 
 SPEAKER_HYSTERESIS = 150  # Pixels of "stickiness" - how much to favor current speaker position
 
 
-# TalkNet Active Speaker Detection - high accuracy audio-visual model
+# Sieve Active Speaker Detection - cloud-based high-speed ASD (~90% faster than local TalkNet)
 try:
-    from services.talknet_asd import (
-        TalkNetASD,
-        detect_active_speaker_simple,
-        check_talknet_installation,
-        TALKNET_AVAILABLE
+    from services.sieve_asd import (
+        detect_active_speaker_sieve,
+        check_sieve_availability,
+        SIEVE_ASD_AVAILABLE
     )
-    if TALKNET_AVAILABLE:
-        logger.info("✅ TalkNet ASD is available - using high-accuracy speaker detection")
+    if SIEVE_ASD_AVAILABLE:
+        logger.info("✅ Sieve ASD is available - using cloud-based speaker detection (~90% faster)")
     else:
-        logger.info("ℹ️ TalkNet ASD not yet initialized - will download model on first use")
+        logger.info("ℹ️ Sieve ASD not available - will use MediaPipe lip detection")
 except ImportError as e:
-    logger.warning(f"TalkNet ASD not available, falling back to lip movement detection: {e}")
-    TALKNET_AVAILABLE = False
+    logger.warning(f"Sieve ASD not available, falling back to lip movement detection: {e}")
+    SIEVE_ASD_AVAILABLE = False
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import settings
@@ -142,7 +141,12 @@ from config import settings
 async def process_video(
     video_path: str, transcript: Dict[str, Any], segments: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Process video to create clips for each engaging segment (IN PARALLEL).
+    """Process video to create clips for each engaging segment.
+    
+    Uses a 3-PHASE PIPELINE for optimal performance:
+    1. Extract all raw clips from source video
+    2. Submit ALL clips to Sieve ASD in parallel (batch upload)
+    3. Apply crop positions with Sieve results
 
     Args:
         video_path: Path to the video file
@@ -154,7 +158,7 @@ async def process_video(
     """
     try:
         logger.info("="*70)
-        logger.info(f"📹 STARTING VIDEO CLIP CREATION (PARALLEL MODE)")
+        logger.info(f"📹 STARTING VIDEO CLIP CREATION (3-PHASE PIPELINE)")
         logger.info(f"Video path: {video_path}")
         logger.info(f"Number of segments to process: {len(segments)}")
         logger.info("="*70)
@@ -173,123 +177,157 @@ async def process_video(
             logger.info(f"  Segment {i+1}: {seg.get('title', 'Untitled')} ({seg.get('start_time', 0):.1f}s - {seg.get('end_time', 0):.1f}s, duration: {duration:.1f}s)")
         logger.info("="*70 + "\n")
 
-        # Process clips in PARALLEL
         total_segments = len(segments)
-        MAX_CONCURRENT_CLIPS = 3  # Process 3 clips at once
         
-        logger.info(f"🚀 Processing {total_segments} clips with {MAX_CONCURRENT_CLIPS} concurrent workers")
+        # ============================================================
+        # PHASE 1: EXTRACT ALL CLIPS (no cropping yet)
+        # ============================================================
+        logger.info(f"🔷 PHASE 1: Extracting {total_segments} raw clips...")
+        phase1_start = time.time()
         
-        async def process_single_clip(i: int, segment: Dict[str, Any]) -> Dict[str, Any]:
-            """Process a single clip (used for parallel execution)"""
-            # Check for cancellation before starting each clip
+        extracted_clips = []
+        for i, segment in enumerate(segments):
             await check_cancellation()
             
-            segment_start_time = time.time()
             clip_id = f"clip_{i}"
+            temp_path = os.path.join(output_dir, f"{clip_id}_temp.mp4")
             
-            logger.info(f"\n{'='*70}")
-            logger.info(f"🎬 Processing Clip {i+1}/{total_segments}: {segment.get('title', 'Untitled')}")
-            logger.info(f"   Timestamp: {segment['start_time']:.1f}s - {segment['end_time']:.1f}s")
-            logger.info(f"{'='*70}")
-
-            # Create the clip
-            logger.info(f"   ⏳ Step 1/3: Creating video clip...")
-            clip_path = await create_clip(
-                video_path=video_path,
-                output_dir=str(output_dir),
-                start_time=segment["start_time"],
-                end_time=segment["end_time"],
-                clip_id=clip_id,
-                transcript=transcript,
-            )
-
-            # Only process if clip was created
-            if clip_path is not None:
-                logger.info(f"   ✅ Clip created successfully: {clip_path}")
-                
-                # Generate thumbnail for this clip
-                logger.info(f"   ⏳ Step 2/3: Generating thumbnail...")
-                thumbnail_filename = f"{clip_id}_thumbnail.jpg"
-                thumbnail_path = str(output_dir / thumbnail_filename)
-
-                try:
-                    # Generate the thumbnail
-                    await generate_thumbnail(
-                        video_path=clip_path, output_path=thumbnail_path
-                    )
-                    logger.info(f"   ✅ Thumbnail generated: {thumbnail_path}")
-
-                    # Verify the thumbnail exists
-                    if not os.path.exists(thumbnail_path):
-                        logger.warning(
-                            f"   ⚠️  Thumbnail file does not exist at {thumbnail_path} despite successful generation"
-                        )
-                        thumbnail_path = None
-                except Exception as thumb_error:
-                    logger.error(f"   ❌ Failed to generate thumbnail: {str(thumb_error)}")
-                    thumbnail_path = None
-
-                # Construct the thumbnail URL properly (will be set to S3 URL later)
-                thumbnail_url = None
-                if thumbnail_path and os.path.exists(thumbnail_path):
-                    logger.info(f"   ✅ Thumbnail ready at: {thumbnail_path}")
-                else:
-                    logger.warning(
-                        f"   ⚠️  Thumbnail doesn't exist at {thumbnail_path}, not setting URL"
-                    )
-
-                segment_elapsed = time.time() - segment_start_time
-                logger.info(f"   ⏱️  Clip {i+1}/{total_segments} completed in {segment_elapsed:.2f}s")
-                logger.info(f"   ✅ Successfully processed: {segment.get('title', 'Untitled')}")
-                
-                return {
-                    "id": clip_id,
-                    "start_time": segment["start_time"],
-                    "end_time": segment["end_time"],
-                    "title": segment.get("title", f"Clip {i + 1}"),
-                    "description": segment.get("description", ""),
-                    "path": clip_path,
-                    "url": None,  # Will be set to S3 URL later
-                    "thumbnail_path": thumbnail_path,
-                    "thumbnail_url": thumbnail_url,
-                }
-            else:
-                logger.warning(f"   ❌ Clip {i+1}/{total_segments} SKIPPED - No faces detected or creation failed")
-                logger.warning(f"   Segment: {segment.get('title', 'Untitled')}")
-                return None
+            logger.info(f"   📂 [{i+1}/{total_segments}] Extracting: {segment.get('title', 'Untitled')}")
+            extract_clip(video_path, temp_path, segment["start_time"], segment["end_time"])
+            
+            extracted_clips.append({
+                'index': i,
+                'clip_id': clip_id,
+                'segment': segment,
+                'temp_path': temp_path,
+                'output_path': os.path.join(output_dir, f"{clip_id}.mp4"),
+            })
         
-        # Create semaphore to limit concurrent processing
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIPS)
+        phase1_elapsed = time.time() - phase1_start
+        logger.info(f"   ✅ Phase 1 complete: {len(extracted_clips)} clips extracted in {phase1_elapsed:.2f}s")
         
-        async def process_with_limit(i: int, segment: Dict[str, Any]) -> Dict[str, Any]:
-            """Process clip with concurrency limit"""
-            async with semaphore:
-                return await process_single_clip(i, segment)
+        # ============================================================
+        # PHASE 2: SUBMIT ALL TO SIEVE IN PARALLEL
+        # ============================================================
+        logger.info(f"\n🔷 PHASE 2: Submitting {len(extracted_clips)} clips to Sieve ASD (PARALLEL)...")
+        phase2_start = time.time()
         
-        # Create tasks for all clips
-        tasks = [process_with_limit(i, segment) for i, segment in enumerate(segments)]
+        # Import batch function
+        from services.sieve_asd import batch_push_asd, SIEVE_ASD_AVAILABLE
         
-        # Run all tasks in parallel
-        parallel_start = time.time()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        parallel_elapsed = time.time() - parallel_start
+        sieve_results = {}
+        if SIEVE_ASD_AVAILABLE:
+            # Get all temp paths
+            temp_paths = [clip['temp_path'] for clip in extracted_clips]
+            
+            # Submit ALL to Sieve at once
+            sieve_results = await batch_push_asd(temp_paths)
+            
+            phase2_elapsed = time.time() - phase2_start
+            logger.info(f"   ✅ Phase 2 complete: Sieve processed {len(sieve_results)} clips in {phase2_elapsed:.2f}s")
+        else:
+            logger.info(f"   ℹ️ Sieve not available - will use MediaPipe only")
+            phase2_elapsed = 0
         
-        # Filter out None results and exceptions
+        # ============================================================
+        # PHASE 3: APPLY CROPS WITH SIEVE RESULTS
+        # ============================================================
+        logger.info(f"\n🔷 PHASE 3: Applying crops to {len(extracted_clips)} clips...")
+        phase3_start = time.time()
+        
         processed_clips = []
+        MAX_CONCURRENT_CROPS = 3  # Limit concurrent FFmpeg processes
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CROPS)
+        
+        async def apply_crop_to_clip(clip_info: Dict) -> Optional[Dict[str, Any]]:
+            """Apply crop to a single extracted clip"""
+            async with semaphore:
+                await check_cancellation()
+                
+                i = clip_info['index']
+                clip_id = clip_info['clip_id']
+                segment = clip_info['segment']
+                temp_path = clip_info['temp_path']
+                output_path = clip_info['output_path']
+                
+                segment_start_time = time.time()
+                
+                try:
+                    # Get Sieve results for this clip (if available)
+                    sieve_scores = sieve_results.get(temp_path, {})
+                    
+                    # Detect crop positions (MediaPipe + Sieve scores)
+                    logger.info(f"   🤖 [{i+1}/{total_segments}] Analyzing: {segment.get('title', 'Untitled')}")
+                    crop_positions = await detect_mediapipe_crop_positions_with_sieve(
+                        temp_path, 
+                        segment["start_time"], 
+                        segment["end_time"], 
+                        transcript,
+                        sieve_scores
+                    )
+                    
+                    # Apply smart crop
+                    await apply_smart_crop_with_transitions(temp_path, output_path, crop_positions)
+                    
+                    # Cleanup temp file
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    # Generate thumbnail
+                    thumbnail_path = os.path.join(output_dir, f"{clip_id}_thumbnail.jpg")
+                    try:
+                        await generate_thumbnail(video_path=output_path, output_path=thumbnail_path)
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Thumbnail failed: {e}")
+                        thumbnail_path = None
+                    
+                    segment_elapsed = time.time() - segment_start_time
+                    logger.info(f"   ✅ [{i+1}/{total_segments}] Complete in {segment_elapsed:.2f}s")
+                    
+                    return {
+                        "id": clip_id,
+                        "start_time": segment["start_time"],
+                        "end_time": segment["end_time"],
+                        "title": segment.get("title", f"Clip {i + 1}"),
+                        "description": segment.get("description", ""),
+                        "path": output_path,
+                        "url": None,
+                        "thumbnail_path": thumbnail_path,
+                        "thumbnail_url": None,
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"   ❌ [{i+1}/{total_segments}] Failed: {e}")
+                    # Cleanup temp on error
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    return None
+        
+        # Run all crop operations in parallel
+        tasks = [apply_crop_to_clip(clip) for clip in extracted_clips]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Collect successful results
         for result in results:
             if result and not isinstance(result, Exception):
                 processed_clips.append(result)
             elif isinstance(result, Exception):
-                logger.error(f"❌ Clip processing raised exception: {result}")
+                logger.error(f"❌ Crop task raised exception: {result}")
         
+        phase3_elapsed = time.time() - phase3_start
+        logger.info(f"   ✅ Phase 3 complete: {len(processed_clips)} clips cropped in {phase3_elapsed:.2f}s")
+        
+        # ============================================================
+        # SUMMARY
+        # ============================================================
+        total_elapsed = phase1_elapsed + phase2_elapsed + phase3_elapsed
         logger.info("\n" + "="*70)
-        logger.info(f"✅ VIDEO PROCESSING COMPLETE (PARALLEL)")
+        logger.info(f"✅ VIDEO PROCESSING COMPLETE (3-PHASE PIPELINE)")
         logger.info(f"Total clips created: {len(processed_clips)} out of {total_segments} segments")
-        logger.info(f"⏱️  Parallel processing time: {parallel_elapsed:.2f}s")
-        if len(segments) > 1:
-            sequential_estimate = parallel_elapsed * len(segments) / MAX_CONCURRENT_CLIPS
-            speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
-            logger.info(f"📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
+        logger.info(f"⏱️  Phase 1 (Extract): {phase1_elapsed:.2f}s")
+        logger.info(f"⏱️  Phase 2 (Sieve):   {phase2_elapsed:.2f}s")
+        logger.info(f"⏱️  Phase 3 (Crop):    {phase3_elapsed:.2f}s")
+        logger.info(f"⏱️  Total time:        {total_elapsed:.2f}s")
         logger.info("="*70 + "\n")
 
         return processed_clips
@@ -297,6 +335,7 @@ async def process_video(
     except Exception as e:
         logger.error(f"Error in video processing: {str(e)}", exc_info=True)
         raise
+
 
 
 async def create_clip(
@@ -529,42 +568,42 @@ async def detect_mediapipe_crop_positions(
         logger.warning(f"      ⚠️ No people detected - using center crop")
         return [{'frame': 0, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
     
-    # STEP 2.5: TALKNET ENHANCEMENT - Use TalkNet for accurate speaking detection
-    # TalkNet uses audio-visual cross-attention to determine who is ACTUALLY speaking
+    # STEP 2.5: SIEVE ENHANCEMENT - Use Sieve's cloud ASD for accurate speaking detection
+    # Sieve uses parallelized YOLO + TalkNet for ~90% faster processing
     try:
-        if TALKNET_AVAILABLE:
-            logger.info(f"      🎙️ Running TalkNet ASD for accurate speaker detection...")
-            talknet_scores = await detect_active_speaker_simple(video_path, person_detections, fps)
+        if SIEVE_ASD_AVAILABLE:
+            logger.info(f"      🎙️ Running Sieve ASD for accurate speaker detection (cloud-based)...")
+            sieve_scores = await detect_active_speaker_sieve(video_path, person_detections, fps)
             
-            if talknet_scores:
-                # Update detections with TalkNet scores
-                talknet_updates = 0
+            if sieve_scores:
+                # Update detections with Sieve scores
+                sieve_updates = 0
                 for det in person_detections:
                     frame = det['frame']
                     x = det['x']
                     
-                    if frame in talknet_scores:
+                    if frame in sieve_scores:
                         # Find the closest match by X position
-                        frame_scores = talknet_scores[frame]
+                        frame_scores = sieve_scores[frame]
                         best_score = 0.0
                         for face_x, score in frame_scores.items():
                             if abs(face_x - x) < 150:  # Within 150 pixels
                                 best_score = max(best_score, score)
                         
                         if best_score > 0:
-                            # Override the is_speaking flag with TalkNet's score
+                            # Override the is_speaking flag with Sieve's score
                             det['is_speaking'] = best_score > 0.5
-                            det['talknet_score'] = best_score
+                            det['sieve_score'] = best_score
                             det['confidence'] = (det['confidence'] + best_score) / 2  # Blend confidence
-                            talknet_updates += 1
+                            sieve_updates += 1
                 
-                logger.info(f"      ✅ TalkNet updated {talknet_updates} detections with high-accuracy speaking scores")
+                logger.info(f"      ✅ Sieve updated {sieve_updates} detections with high-accuracy speaking scores")
             else:
-                logger.info(f"      ℹ️ TalkNet returned no scores, using MediaPipe lip detection")
+                logger.info(f"      ℹ️ Sieve returned no scores, using MediaPipe lip detection")
         else:
-            logger.info(f"      ℹ️ TalkNet not available, using MediaPipe lip detection")
+            logger.info(f"      ℹ️ Sieve ASD not available, using MediaPipe lip detection")
     except Exception as e:
-        logger.warning(f"      ⚠️ TalkNet failed, falling back to MediaPipe: {e}")
+        logger.warning(f"      ⚠️ Sieve ASD failed, falling back to MediaPipe: {e}")
     
     # STEP 3: Cluster people by spatial position to identify distinct individuals
     person_clusters = cluster_people_by_position(person_detections, input_w)
@@ -611,21 +650,21 @@ async def detect_mediapipe_crop_positions(
             
             if audio_active:
                 # AUDIO IS PLAYING - find the person with most visual activity (lip movement)
-                # If TalkNet is available, use talknet_score; otherwise use is_speaking flag
+                # If Sieve is available, use sieve_score; otherwise use is_speaking flag
                 speaking_detections = [d for d in frame_detections if d.get('is_speaking', False)]
                 
                 if speaking_detections:
                     # Someone is visually speaking - follow them
-                    # Prioritize TalkNet score if available (more accurate), then lip movement
+                    # Prioritize Sieve score if available (more accurate), then lip movement
                     best_speaker = max(speaking_detections, key=lambda d: (
-                        d.get('talknet_score', 0) * 100 +  # HIGHEST priority: TalkNet score (0-100 scale)
+                        d.get('sieve_score', 0) * 100 +  # HIGHEST priority: Sieve score (0-100 scale)
                         d.get('lip_movement', 0) * 10 +    # Then lip movement
                         d.get('confidence', 0.5) * 5 +     # Then confidence
                         d.get('size', 0) * 100             # Then size (closer = more important)
                     ))
                     target_x = best_speaker['x']
-                    talknet_info = f", talknet={best_speaker.get('talknet_score', 'N/A'):.2f}" if 'talknet_score' in best_speaker else ""
-                    logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): Following speaking person at X={target_x} (lip_movement={best_speaker.get('lip_movement', 0):.2f}{talknet_info})")
+                    sieve_info = f", sieve={best_speaker.get('sieve_score', 'N/A'):.2f}" if 'sieve_score' in best_speaker else ""
+                    logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): Following speaking person at X={target_x} (lip_movement={best_speaker.get('lip_movement', 0):.2f}{sieve_info})")
                 else:
                     # No one visually speaking but audio is active
                     # Fall back to largest/most prominent person (likely the speaker)
@@ -687,6 +726,237 @@ async def detect_mediapipe_crop_positions(
     unique_positions = len(set(p['crop_x'] for p in crop_positions))
     logger.info(f"      ✅ Generated {len(crop_positions)} crop positions ({unique_positions} unique X positions)")
     
+    return crop_positions
+
+
+async def detect_mediapipe_crop_positions_with_sieve(
+    video_path: str,
+    start_time: float, 
+    end_time: float,
+    transcript: Dict[str, Any] = None,
+    sieve_scores: Dict[int, Dict[int, float]] = None
+) -> list:
+    """
+    Use MediaPipe to detect people/faces, with PRE-COMPUTED Sieve scores.
+    
+    This is the optimized version used by the 3-phase pipeline where all clips
+    are submitted to Sieve in parallel first, and results are passed in.
+    
+    Args:
+        video_path: Path to video file
+        start_time: Original start time (for transcript alignment)
+        end_time: Original end time
+        transcript: Transcript data for speaker timeline
+        sieve_scores: PRE-COMPUTED Sieve scores: {frame_number: {face_x: score}}
+        
+    Returns:
+        List of crop positions
+    """
+    import cv2
+    import mediapipe as mp
+    import numpy as np
+    
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Calculate crop dimensions
+    crop_h = input_h
+    crop_w = int(crop_h * 0.9)
+    if crop_w > input_w:
+        crop_w = input_w
+    
+    logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps")
+    
+    # Build speaker timeline
+    speaker_timeline = build_speaker_timeline(transcript, start_time, end_time)
+    
+    # Detect people with MediaPipe
+    person_detections = []
+    sample_interval = max(1, int(fps / 10))
+    
+    mp_face_mesh = mp.solutions.face_mesh
+    UPPER_LIP_INDICES = [13, 14]
+    LOWER_LIP_INDICES = [78, 308]
+    
+    with mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=5,
+        refine_landmarks=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as face_mesh:
+        
+        frame_idx = 0
+        prev_lip_distances = {}
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if frame_idx % sample_interval != 0:
+                frame_idx += 1
+                continue
+            
+            frame_time = (frame_idx / fps)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_mesh.process(rgb_frame)
+            
+            if results.multi_face_landmarks:
+                for face_idx, face_landmarks in enumerate(results.multi_face_landmarks):
+                    x_coords = [landmark.x for landmark in face_landmarks.landmark]
+                    y_coords = [landmark.y for landmark in face_landmarks.landmark]
+                    
+                    face_center_x = int(np.mean(x_coords) * input_w)
+                    face_center_y = int(np.mean(y_coords) * input_h)
+                    
+                    face_width = (max(x_coords) - min(x_coords)) * input_w
+                    face_height = (max(y_coords) - min(y_coords)) * input_h
+                    face_size = (face_width * face_height) / (input_w * input_h)
+                    
+                    # Lip movement detection
+                    upper_lip_y = np.mean([face_landmarks.landmark[i].y for i in UPPER_LIP_INDICES])
+                    lower_lip_y = np.mean([face_landmarks.landmark[i].y for i in LOWER_LIP_INDICES])
+                    lip_distance = abs(lower_lip_y - upper_lip_y) * input_h
+                    
+                    person_key = f"person_{face_center_x // 100}"
+                    lip_movement = 0
+                    if person_key in prev_lip_distances:
+                        lip_movement = abs(lip_distance - prev_lip_distances[person_key])
+                    prev_lip_distances[person_key] = lip_distance
+                    
+                    # Check for speaking via lip movement
+                    base_threshold = 1.5
+                    resolution_factor = input_h / 1080.0
+                    size_factor = max(0.5, min(2.0, np.sqrt(face_size) * 10))
+                    adaptive_threshold = base_threshold * size_factor * resolution_factor
+                    is_speaking = lip_movement > adaptive_threshold
+                    
+                    # Calculate confidence
+                    size_confidence = min(1.0, face_size * 20)
+                    movement_strength = min(1.0, lip_movement / (adaptive_threshold * 3)) if is_speaking else 0.0
+                    center_distance = abs(face_center_x - input_w / 2) / (input_w / 2)
+                    position_confidence = 1.0 - (center_distance * 0.5)
+                    detection_confidence = size_confidence * 0.3 + movement_strength * 0.5 + position_confidence * 0.2
+                    
+                    person_detections.append({
+                        'frame': frame_idx,
+                        'time': frame_time,
+                        'x': face_center_x,
+                        'y': face_center_y,
+                        'size': face_size,
+                        'lip_movement': lip_movement,
+                        'is_speaking': is_speaking,
+                        'confidence': detection_confidence,
+                    })
+            
+            frame_idx += 1
+        
+        cap.release()
+    
+    if len(person_detections) == 0:
+        logger.warning(f"      ⚠️ No people detected - using center crop")
+        return [{'frame': 0, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
+    
+    # APPLY PRE-COMPUTED SIEVE SCORES (if available)
+    if sieve_scores:
+        sieve_updates = 0
+        for det in person_detections:
+            frame = det['frame']
+            x = det['x']
+            
+            if frame in sieve_scores:
+                frame_scores = sieve_scores[frame]
+                best_score = 0.0
+                for face_x, score in frame_scores.items():
+                    if abs(face_x - x) < 150:
+                        best_score = max(best_score, score)
+                
+                if best_score > 0:
+                    det['is_speaking'] = best_score > 0.5
+                    det['sieve_score'] = best_score
+                    det['confidence'] = (det['confidence'] + best_score) / 2
+                    sieve_updates += 1
+        
+        if sieve_updates > 0:
+            logger.info(f"      ✅ Applied {sieve_updates} pre-computed Sieve scores")
+    
+    # Generate crop positions (same logic as original)
+    crop_positions = []
+    sampled_frames = sorted(set(d['frame'] for d in person_detections))
+    current_center_x = None
+    last_switch_time = 0
+    
+    def is_audio_active(t: float) -> bool:
+        for utt in speaker_timeline:
+            if utt['start'] <= t <= utt['end']:
+                return True
+        return False
+    
+    for frame_num in sampled_frames:
+        frame_time = frame_num / fps
+        frame_detections = [d for d in person_detections if d['frame'] == frame_num]
+        
+        if not frame_detections:
+            center_x = current_center_x if current_center_x is not None else input_w // 2
+        else:
+            audio_active = is_audio_active(frame_time) if speaker_timeline else True
+            
+            if audio_active:
+                speaking_detections = [d for d in frame_detections if d.get('is_speaking', False)]
+                if speaking_detections:
+                    best_speaker = max(speaking_detections, key=lambda d: (
+                        d.get('sieve_score', 0) * 100 +
+                        d.get('lip_movement', 0) * 10 +
+                        d.get('confidence', 0.5) * 5 +
+                        d.get('size', 0) * 100
+                    ))
+                    target_x = best_speaker['x']
+                else:
+                    largest = max(frame_detections, key=lambda d: d.get('size', 0))
+                    target_x = largest['x']
+            else:
+                largest = max(frame_detections, key=lambda d: d.get('size', 0))
+                target_x = largest['x']
+            
+            # Apply hysteresis
+            if current_center_x is not None:
+                distance = abs(target_x - current_center_x)
+                time_since_switch = frame_time - last_switch_time
+                if distance < SPEAKER_HYSTERESIS or time_since_switch < MIN_SPEAKER_DURATION:
+                    center_x = current_center_x
+                else:
+                    center_x = target_x
+                    current_center_x = center_x
+                    last_switch_time = frame_time
+            else:
+                center_x = target_x
+                current_center_x = center_x
+                last_switch_time = frame_time
+        
+        # Calculate crop position with bounds
+        crop_x = center_x - (crop_w // 2)
+        min_safe_margin = 100
+        if center_x < crop_w // 2 + min_safe_margin:
+            crop_x = 0
+        elif center_x > input_w - crop_w // 2 - min_safe_margin:
+            crop_x = input_w - crop_w
+        crop_x = max(0, min(crop_x, input_w - crop_w))
+        
+        crop_positions.append({
+            'frame': frame_num,
+            'crop_x': crop_x,
+            'center_x': center_x,
+            'has_detection': len(frame_detections) > 0
+        })
+    
+    if len(crop_positions) == 0:
+        return [{'frame': 0, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
+    
+    logger.info(f"      ✅ Generated {len(crop_positions)} crop positions")
     return crop_positions
 
 
