@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 aclient = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
-async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
+async def analyze_content(transcript: Dict[str, Any], target_clip_duration: int) -> List[Dict[str, Any]]:
     """Analyze transcript to identify engaging segments.
 
     Args:
         transcript: Transcript from Whisper with segments and timestamps.
                    May include 'transcript_for_ai' field with speaker-labeled text.
+        target_clip_duration: Target duration for clips in seconds (default 60s)
 
     Returns:
         List of engaging segments with start and end times
@@ -35,6 +36,7 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
         segments = transcript.get("segments", [])
 
         logger.info(f"Analyzing transcript with {len(segments)} segments")
+        logger.info(f"Target clip duration: {target_clip_duration}s")
 
         # Handle empty segments gracefully - this is valid for silent videos
         if not segments:
@@ -59,8 +61,10 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
             # Use the pre-formatted AI transcript directly
             engaging_segments = await identify_engaging_segments_from_text(
                 transcript["transcript_for_ai"],
-                segments  # Pass original segments for timestamp reference
+                segments,  # Pass original segments for timestamp reference
+                target_clip_duration=target_clip_duration
             )
+
         else:
             logger.info("Using basic transcript segments (no speaker labels) for AI analysis")
             # Prepare segments with timestamps for analysis
@@ -75,7 +79,7 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
 
             # Use OpenAI to identify engaging segments
-            engaging_segments = await identify_engaging_segments(formatted_segments)
+            engaging_segments = await identify_engaging_segments(formatted_segments, target_clip_duration=target_clip_duration)
 
         return engaging_segments
 
@@ -86,7 +90,8 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 async def identify_engaging_segments_from_text(
     transcript_text: str,
-    segments: List[Dict[str, Any]]
+    segments: List[Dict[str, Any]],
+    target_clip_duration: int
 ) -> List[Dict[str, Any]]:
     """Use OpenAI to identify engaging segments from pre-formatted transcript text.
     
@@ -95,11 +100,17 @@ async def identify_engaging_segments_from_text(
     Args:
         transcript_text: Pre-formatted transcript with speaker labels (e.g., transcript_for_ai)
         segments: Original segments for reference
+        target_clip_duration: Target duration for clips in seconds (default 60s)
         
     Returns:
         List of engaging segments with start and end times
     """
     logger.info(f"Identifying engaging segments from pre-formatted transcript")
+    logger.info(f"Target clip duration: {target_clip_duration}s")
+    
+    # Calculate duration window around target (+/- 10%)
+    min_duration = max(15, int(target_clip_duration * 0.9))  # -10% of target, minimum 15s
+    max_duration = min(180, int(target_clip_duration * 1.1))  # +10% of target, maximum 180s
     
     # Log the exact transcript being sent to AI
     logger.info("="*70)
@@ -208,7 +219,7 @@ a) Find the sentence containing the key moment
 b) Expand backwards: What context is needed? (usual: 1-3 sentences)
 c) Expand forwards: Is the thought complete? (usual: 1-2 sentences)
 d) Verify: Does this stand alone without prior video knowledge?
-e) Check duration: 15-180 seconds? (prefer 20-60s)
+e) Check duration: {min_duration}-{max_duration} seconds? (target ~{target_clip_duration}s)
 
 STEP 4: APPLY BOUNDARIES
 - Use START_TIME of first sentence
@@ -219,7 +230,7 @@ STEP 4: APPLY BOUNDARIES
 ⚙️ TECHNICAL REQUIREMENTS:
 ═══════════════════════════════════════════════════════════════
 
-Duration: 15-180 seconds (prefer 20-60 seconds)
+Duration: {min_duration}-{max_duration} seconds (target ~{target_clip_duration} seconds)
 Count: {target_min} minimum, {target_max} maximum
 Distribution: Spread across beginning (25%), middle (50%), end (25%)
 Overlap: Clips should NOT overlap in time
@@ -333,15 +344,15 @@ REMEMBER:
             # Log segment info for debugging
             logger.info(f"Segment: {seg.get('title')} | Duration: {duration:.1f}s | Start: {seg.get('start_time')}s | End: {seg.get('end_time')}s")
             
-            if duration < 15:
+            if duration < min_duration:
                 logger.warning(
-                    f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < 15s minimum)"
+                    f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < {min_duration}s minimum)"
                 )
                 continue
             
-            if duration > 180:
+            if duration > max_duration:
                 logger.warning(
-                    f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > 180s maximum, 3 minutes)"
+                    f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > {max_duration}s maximum)"
                 )
                 continue
             
@@ -367,11 +378,13 @@ REMEMBER:
 
 async def identify_engaging_segments(
     segments: List[Dict[str, Any]],
+    target_clip_duration: int = 60
 ) -> List[Dict[str, Any]]:
     """Use OpenAI to identify engaging segments in the transcript.
 
     Args:
         segments: List of transcript segments with timestamps
+        target_clip_duration: Target duration for clips in seconds
 
     Returns:
         List of engaging segments with start and end times
@@ -379,6 +392,11 @@ async def identify_engaging_segments(
     """
 
     logger.info(f"Identifying engaging segments from {len(segments)} transcript segments")
+    logger.info(f"Target clip duration: {target_clip_duration}s")
+    
+    # Calculate duration window around target (+/- 10%)
+    min_duration = max(15, int(target_clip_duration * 0.9))  # -10% of target, minimum 15s
+    max_duration = min(180, int(target_clip_duration * 1.1))  # +10% of target, maximum 180s
 
     # Combine segments into a single text with timestamps
     transcript_text = ""
@@ -436,23 +454,23 @@ async def identify_engaging_segments(
         - Be valuable or entertaining to people
 
         CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
-        - Each clip should be between 15-180 seconds long to ensure proper context and engagement
-        - Target around 30-60 seconds for optimal social media performance
-        - MINIMUM: 15 seconds (clips shorter than this will be REJECTED)
-        - MAXIMUM: 180 seconds (3 minutes - for in-depth stories/discussions)
+        - Each clip should be between {min_duration}-{max_duration} seconds long (target ~{target_clip_duration}s)
+        - Target around {target_clip_duration} seconds for optimal social media performance
+        - MINIMUM: {min_duration} seconds (clips shorter than this will be REJECTED)
+        - MAXIMUM: {max_duration} seconds
         - Choose duration based on the content: expand timestamps to capture complete thoughts/stories
-        - Example: If an interesting moment spans 25 seconds, set start_time and end_time to capture those 25 seconds
-        - Example: If a story takes 45 seconds to tell completely, use the full 45 seconds
-        - Example: For a quick insight at 500s that takes 35 seconds: start_time=500, end_time=535
+        - Example: If an interesting moment spans {target_clip_duration} seconds, set start_time and end_time to capture those {target_clip_duration} seconds
+        - Example: If a story takes {int(target_clip_duration * 1.2)} seconds to tell completely, use the full {int(target_clip_duration * 1.2)} seconds
+        - Example: For a quick insight at 500s that takes {target_clip_duration} seconds: start_time=500, end_time={500 + target_clip_duration}
 
         TIMESTAMP CALCULATION GUIDELINES:
         1. Identify the most interesting moment or topic in a section
         2. Find where the topic/story BEGINS (include a bit of context if needed)
         3. Find where the topic/story ENDS (ensure the thought is complete)
         4. Calculate duration = end_time - start_time
-        5. Ensure duration is >= 15 seconds AND <= 180 seconds
-        6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
-        7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
+        5. Ensure duration is >= {min_duration} seconds AND <= {max_duration} seconds
+        6. If a topic is naturally shorter than {min_duration} seconds, expand to include surrounding context
+        7. If a topic is longer than {max_duration} seconds, select the most compelling {target_clip_duration} second portion
 
         VIDEO DURATION (approx): ~{total_minutes} minutes
         TARGET OUTPUT: Generate at least {target_min} and up to {target_max} genuinely engaging clips. If you discover more than {target_max} excellent moments, return the best {target_max}. If fewer exist, return as many as truly engaging.
@@ -471,8 +489,8 @@ async def identify_engaging_segments(
         - "title": a short, compelling title (4–10 words)
 
         MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
-        - Duration >= 15 seconds (MINIMUM - anything less will be rejected and wasted)
-        - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
+        - Duration >= {min_duration} seconds (MINIMUM - anything less will be rejected)
+        - Duration <= {max_duration} seconds (MAXIMUM)
         - Complete thought/story (don't cut off mid-sentence)
         - Self-contained (makes sense without prior context)
 
@@ -533,7 +551,7 @@ async def identify_engaging_segments(
                 duration = segment["end_time"] - segment["start_time"]
                 logger.info(f"Segment {i}: '{segment.get('title', 'No title')}' - Duration: {duration:.1f}s (start: {segment['start_time']:.1f}, end: {segment['end_time']:.1f})")
                 
-                if duration >= settings.MIN_CLIP_DURATION and duration <= settings.MAX_CLIP_DURATION:
+                if duration >= min_duration and duration <= max_duration:
                     valid_segments.append(
                         {
                             "start_time": segment["start_time"],
@@ -543,12 +561,12 @@ async def identify_engaging_segments(
                         }
                     )
                     logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s)")
-                elif duration > settings.MAX_CLIP_DURATION:
-                    # If segment is too long, we could split it into multiple 30-second clips
+                elif duration > max_duration:
+                    # If segment is too long, we could split it into multiple clips
                     # For now, we'll just skip it and let AI handle the segmentation
-                    logger.warning(f"  ❌ REJECTED (too long): {duration:.1f} seconds - Maximum is {settings.MAX_CLIP_DURATION}s")
+                    logger.warning(f"  ❌ REJECTED (too long): {duration:.1f} seconds - Maximum is {max_duration}s")
                 else:
-                    logger.warning(f"  ❌ REJECTED (too short): {duration:.1f} seconds - Minimum is {settings.MIN_CLIP_DURATION}s")
+                    logger.warning(f"  ❌ REJECTED (too short): {duration:.1f} seconds - Minimum is {min_duration}s")
 
         logger.info("=" * 60)
         # Enforce global cap to avoid over-generation

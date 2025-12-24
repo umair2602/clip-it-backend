@@ -440,6 +440,7 @@ async def process_video_job(job_id: str, job_data: dict):
         file_path = job_data.get("file_path")
         original_job_id = job_data.get("original_job_id")
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration")  # Required from frontend
 
         # If user_id is not provided, fetch it from DB
         if not user_id:
@@ -451,6 +452,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 user_id = None
 
         logger.info(f"Processing video job {job_id} for video {video_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
         
         # ⏱️ START PIPELINE TIMING
         import time
@@ -568,8 +570,9 @@ async def process_video_job(job_id: str, job_data: dict):
         # ⏱️ STEP 2: AI CONTENT ANALYSIS
         step_start = time.time()
         logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
+        logger.info(f"   Target clip duration: {target_clip_duration}s")
         
-        segments = await analyze_content(transcript)
+        segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
         
         # Check if cancelled immediately after analysis
         if user_id:
@@ -1353,11 +1356,13 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         url = job_data.get("url")
         auto_process = job_data.get("auto_process", True)
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration")  # Required from frontend
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
         logger.info(f"   Job ID (task_id): {job_id}")
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   User ID: {user_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
 
         # Update MongoDB video status
         if user_id:
@@ -1485,6 +1490,7 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "user_id": user_id,
+                    "target_clip_duration": target_clip_duration,
                 },
             )
             
