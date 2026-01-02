@@ -76,7 +76,7 @@ class Settings:
 
     # API keys - Try AWS SSM first, then environment variables
     OPENAI_API_KEY = get_secret("/clip-it/openai-api-key", "OPENAI_API_KEY")
-SIEVE_API_KEY = get_secret("/clip-it/sieve-api-key", "SIEVE_API_KEY")
+    SIEVE_API_KEY = get_secret("/clip-it/sieve-api-key", "SIEVE_API_KEY")
     HF_TOKEN = get_secret("/clip-it/hf-token", "HF_TOKEN")
     HUGGINGFACE_TOKEN = get_secret("/clip-it/huggingface-token", "HUGGINGFACE_TOKEN")
     ASSEMBLYAI_API_KEY = get_secret("/clip-it/assemblyai-api-key", "ASSEMBLYAI_API_KEY")
