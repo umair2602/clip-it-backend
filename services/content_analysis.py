@@ -343,17 +343,19 @@ REMEMBER:
             # Log segment info for debugging
             logger.info(f"Segment: {seg.get('title')} | Duration: {duration:.1f}s | Start: {seg.get('start_time')}s | End: {seg.get('end_time')}s")
             
-            if duration < min_duration:
-                logger.warning(
-                    f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < {min_duration}s minimum)"
-                )
-                continue
-            
-            if duration > max_duration:
-                logger.warning(
-                    f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > {max_duration}s maximum)"
-                )
-                continue
+            # DISABLED: Duration filtering - let AI-generated clips pass through
+            # The AI prompt already guides duration, so trust the AI's judgment
+            # if duration < min_duration:
+            #     logger.warning(
+            #         f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < {min_duration}s minimum)"
+            #     )
+            #     continue
+            # 
+            # if duration > max_duration:
+            #     logger.warning(
+            #         f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > {max_duration}s maximum)"
+            #     )
+            #     continue
             
             valid_segments.append(seg)
 
@@ -548,21 +550,25 @@ async def identify_engaging_segments(
                 duration = segment["end_time"] - segment["start_time"]
                 logger.info(f"Segment {i}: '{segment.get('title', 'No title')}' - Duration: {duration:.1f}s (start: {segment['start_time']:.1f}, end: {segment['end_time']:.1f})")
                 
-                if duration >= min_duration and duration <= max_duration:
-                    valid_segments.append(
-                        {
-                            "start_time": segment["start_time"],
-                            "end_time": segment["end_time"],
-                            "title": segment.get("title", "Engaging Clip"),
-                            "description": segment.get("description", ""),
-                        }
-                    )
-                    logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s)")
-                elif duration > max_duration:
-                    # If segment is too long, skip it
-                    logger.warning(f"  ❌ REJECTED (too long): {duration:.1f} seconds - Maximum is {max_duration}s")
-                else:
-                    logger.warning(f"  ❌ REJECTED (too short): {duration:.1f} seconds - Minimum is {min_duration}s")
+                # DISABLED: Duration filtering - let AI-generated clips pass through
+                # The AI prompt already guides duration, so trust the AI's judgment
+                # if duration >= min_duration and duration <= max_duration:
+                #     ... (accept)
+                # elif duration > max_duration:
+                #     ... (reject too long)
+                # else:
+                #     ... (reject too short)
+                
+                # Accept all segments regardless of duration
+                valid_segments.append(
+                    {
+                        "start_time": segment["start_time"],
+                        "end_time": segment["end_time"],
+                        "title": segment.get("title", "Engaging Clip"),
+                        "description": segment.get("description", ""),
+                    }
+                )
+                logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s)")
 
         logger.info("=" * 60)
         # Enforce global cap to avoid over-generation
