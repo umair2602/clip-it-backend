@@ -241,7 +241,11 @@ class TalkNetASD:
         results = []
         
         # Process each face track
+        total_tracks = len(face_tracks)
+        logger.info(f"🔄 Processing {total_tracks} face tracks for active speaker detection...")
         for track_idx, track in enumerate(face_tracks):
+            if track_idx % 5 == 0 or track_idx == total_tracks - 1:
+                logger.info(f"  ⏳ Processing track {track_idx + 1}/{total_tracks}...")
             track_frames = track.get('frames', [])
             track_bboxes = track.get('bboxes', [])
             
@@ -504,9 +508,12 @@ async def detect_active_speaker_simple(
         logger.info(f"Audio loaded: shape={audio.shape}, dtype={audio.dtype}, sample_rate={sample_rate}")
         
         # Group detections into tracks (by spatial proximity)
+        logger.info(f"📊 Grouping {len(face_detections)} face detections into speaker tracks...")
         tracks = _group_detections_into_tracks(face_detections, fps)
+        logger.info(f"✅ Found {len(tracks)} speaker tracks to analyze")
         
         # Read video frames
+        logger.info(f"🎥 Loading video frames for analysis...")
         cap = cv2.VideoCapture(video_path)
         frames = []
         while cap.isOpened():
@@ -515,9 +522,13 @@ async def detect_active_speaker_simple(
                 break
             frames.append(frame)
         cap.release()
+        logger.info(f"✅ Loaded {len(frames)} frames from video")
         
         # Run TalkNet
+        logger.info(f"🔍 Running TalkNet inference on {len(tracks)} tracks across {len(frames)} frames...")
+        logger.info(f"⏳ This may take several minutes on CPU (faster with GPU)...")
         results = talknet.detect_active_speaker(frames, tracks, audio, sample_rate, fps)
+        logger.info(f"✅ TalkNet analysis complete! Processed {len(results)} frame predictions")
         
         # Clean up
         if os.path.exists(audio_path):
