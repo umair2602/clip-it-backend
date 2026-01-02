@@ -212,6 +212,12 @@ class ClipItStack(Stack):
                     parameter_name="/clip-it/sieve-api-key"
                 )
             ),
+            "RAPIDAPI_YOUTUBE_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "RapidAPIYouTubeKeyRef",
+                    parameter_name="/clip-it/rapidapi-youtube-key"
+                )
+            ),
             "MONGODB_URL": ecs.Secret.from_ssm_parameter(
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "MongoDBURLRef",
