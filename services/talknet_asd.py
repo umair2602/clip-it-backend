@@ -233,10 +233,11 @@ class TalkNetASD:
             self.load_model()
         
         # Extract audio features for the entire clip
+        logger.info(f"🎵 Extracting MFCC audio features from {len(audio)} samples...")
         audio_features = self.extract_audio_features(audio, sample_rate)
         
         # Log audio features info
-        logger.info(f"MFCC features extracted: shape={audio_features.shape}, dtype={audio_features.dtype}")
+        logger.info(f"✅ MFCC features extracted: shape={audio_features.shape}, dtype={audio_features.dtype}")
         
         results = []
         
@@ -516,11 +517,16 @@ async def detect_active_speaker_simple(
         logger.info(f"🎥 Loading video frames for analysis...")
         cap = cv2.VideoCapture(video_path)
         frames = []
+        frame_count = 0
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
             frames.append(frame)
+            frame_count += 1
+            # Log progress every 100 frames
+            if frame_count % 100 == 0:
+                logger.info(f"  ⏳ Loaded {frame_count} frames so far...")
         cap.release()
         logger.info(f"✅ Loaded {len(frames)} frames from video")
         
