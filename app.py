@@ -379,6 +379,7 @@ class S3UploadRequest(BaseModel):
 class YouTubeRequest(BaseModel):
     url: HttpUrl
     auto_process: bool = True
+    target_clip_duration: int  # Required - must be provided by frontend
 
 
 # DEPRECATED: In-memory storage for task status
@@ -1294,6 +1295,7 @@ async def download_from_youtube(
                 "url": str(request.url),
                 "auto_process": request.auto_process,
                 "user_id": current_user.id,
+                "target_clip_duration": request.target_clip_duration,
             },
         )
 

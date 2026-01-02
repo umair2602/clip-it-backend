@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # TalkNet dependencies - will be checked at runtime
 TALKNET_AVAILABLE = False
 TALKNET_PATH = None
+_TALKNET_INSTANCE = None  # Global singleton instance to avoid re-initialization
 
 def check_talknet_installation():
     """Check if TalkNet is installed and available."""
@@ -459,13 +460,23 @@ async def detect_active_speaker_simple(
     import cv2
     from scipy.io import wavfile
     
+    global _TALKNET_INSTANCE
+    
     if not TALKNET_AVAILABLE:
         logger.warning("TalkNet not available, falling back to basic detection")
         return {}
     
     try:
-        # Initialize TalkNet
-        talknet = TalkNetASD()
+        # Use singleton instance to avoid re-initialization
+        if _TALKNET_INSTANCE is None:
+            logger.info("🎬 Initializing TalkNet model (first time only)...")
+            _TALKNET_INSTANCE = TalkNetASD()
+            _TALKNET_INSTANCE.load_model()
+            logger.info("✅ TalkNet model loaded and cached for reuse")
+        else:
+            logger.info("♻️ Reusing cached TalkNet model instance")
+        
+        talknet = _TALKNET_INSTANCE
         
         # Extract audio from video
         audio_path = video_path.replace('.mp4', '_audio.wav').replace('.avi', '_audio.wav')

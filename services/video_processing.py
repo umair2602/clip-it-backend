@@ -116,8 +116,10 @@ async def _check_cancellation_async(user_id: str, video_id: str):
 # face tracking removed to simplify and speed up clip creation
 
 # Constants for speaker tracking and camera movement
-MIN_SPEAKER_DURATION = 1.0  # Minimum seconds a speaker must talk before camera switches
-SPEAKER_HYSTERESIS = 150  # Pixels of "stickiness" - how much to favor current speaker position
+MIN_SPEAKER_DURATION = 2.0  # Minimum seconds a speaker must talk before camera switches (increased for stability)
+SPEAKER_HYSTERESIS = 250  # Pixels of "stickiness" - how much to favor current speaker position (increased to reduce jitter)
+FRAME_SKIP_INTERVAL = 5  # Process every Nth frame for speaker detection (reduces sensitivity to quick movements)
+SMOOTHING_WINDOW = 3  # Number of frames to average for speaker position smoothing
 
 
 # TalkNet Active Speaker Detection - high accuracy audio-visual model
@@ -375,15 +377,15 @@ async def detect_talknet_crop_positions(
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
     # Calculate crop dimensions - tighter crop for better zoom on speaker
-    # Use 0.9x height as width - closer to 9:16 for less padding in final output
+    # Use 1.0x height as width - less zoom, shows more of the scene
     crop_h = input_h
-    crop_w = int(crop_h * 0.9)  # ~972px for 1080p - tighter zoom on speaker
+    crop_w = int(crop_h * 1.0)  # Full height ratio - less zoom on speaker
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (0.9x aspect ratio - tighter zoom)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (1.0x aspect ratio - less zoom)")
     
     # STEP 1: Build speaker timeline from transcript
     logger.info(f"      🔍 Checking transcript data...")
@@ -403,7 +405,9 @@ async def detect_talknet_crop_positions(
     # NOTE: MediaPipe Face Mesh is used ONLY for face detection and basic lip movement tracking
     # TalkNet ASD (below) handles the actual speaker detection using audio-visual cross-attention
     person_detections = []  # List of all detected people with lip movement data
-    sample_interval = max(1, int(fps / 10))  # IMPROVED: Sample 10 frames per second for better speaker change detection
+    # FRAME SKIPPING: Reduce sampling rate to stabilize speaker selection
+    # Lower FPS = less sensitivity to momentary speaker changes = smoother tracking
+    sample_interval = max(1, int(fps / FRAME_SKIP_INTERVAL))  # Process every Nth frame based on FPS
     
     mp_face_mesh = mp.solutions.face_mesh
     
@@ -589,6 +593,10 @@ async def detect_talknet_crop_positions(
     current_center_x = None
     last_switch_time = 0
     
+    # ACTIVE SPEAKER TRACKING: Remember who we're currently following
+    active_speaker_x = None  # X position of current active speaker
+    active_speaker_tolerance = 300  # Pixels tolerance to consider "same speaker"
+    
     # Check if audio is playing at any given time using speaker timeline
     def is_audio_active(time: float) -> bool:
         """Check if someone is speaking at this time based on transcript"""
@@ -616,32 +624,96 @@ async def detect_talknet_crop_positions(
                 speaking_detections = [d for d in frame_detections if d.get('is_speaking', False)]
                 
                 if speaking_detections:
-                    # Someone is visually speaking - follow them
-                    # Prioritize TalkNet score if available (more accurate), then lip movement
-                    best_speaker = max(speaking_detections, key=lambda d: (
-                        d.get('talknet_score', 0) * 100 +  # HIGHEST priority: TalkNet score (0-100 scale)
-                        d.get('lip_movement', 0) * 10 +    # Then lip movement
-                        d.get('confidence', 0.5) * 5 +     # Then confidence
-                        d.get('size', 0) * 100             # Then size (closer = more important)
-                    ))
-                    target_x = best_speaker['x']
+                    # CRITICAL FIX: If we're already tracking a speaker, STRONGLY prefer them
+                    # This prevents switching to a nearby speaker and centering between them
+                    if active_speaker_x is not None:
+                        # Find if our current speaker is still speaking
+                        current_speaker_still_speaking = [
+                            d for d in speaking_detections 
+                            if abs(d['x'] - active_speaker_x) < active_speaker_tolerance
+                        ]
+                        
+                        if current_speaker_still_speaking:
+                            # Current speaker is still active - STAY with them
+                            best_speaker = max(current_speaker_still_speaking, key=lambda d: (
+                                d.get('talknet_score', 0) * 100 +
+                                d.get('lip_movement', 0) * 10 +
+                                d.get('confidence', 0.5) * 5 +
+                                d.get('size', 0) * 100
+                            ))
+                            target_x = best_speaker['x']
+                            logger.debug(f"      Frame {frame_num}: Continuing with active speaker at X={target_x}")
+                        else:
+                            # Current speaker stopped - find new speaker
+                            best_speaker = max(speaking_detections, key=lambda d: (
+                                d.get('talknet_score', 0) * 100 +
+                                d.get('lip_movement', 0) * 10 +
+                                d.get('confidence', 0.5) * 5 +
+                                d.get('size', 0) * 100
+                            ))
+                            target_x = best_speaker['x']
+                            active_speaker_x = target_x  # Update active speaker
+                            logger.debug(f"      Frame {frame_num}: New speaker detected at X={target_x}")
+                    else:
+                        # No active speaker yet - pick the best one
+                        best_speaker = max(speaking_detections, key=lambda d: (
+                            d.get('talknet_score', 0) * 100 +
+                            d.get('lip_movement', 0) * 10 +
+                            d.get('confidence', 0.5) * 5 +
+                            d.get('size', 0) * 100
+                        ))
+                        target_x = best_speaker['x']
+                        active_speaker_x = target_x  # Set initial active speaker
+                        logger.debug(f"      Frame {frame_num}: Initial speaker at X={target_x}")
+                    
                     talknet_info = f", talknet={best_speaker.get('talknet_score', 'N/A'):.2f}" if 'talknet_score' in best_speaker else ""
-                    logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): Following speaking person at X={target_x} (lip_movement={best_speaker.get('lip_movement', 0):.2f}{talknet_info})")
+                    logger.debug(f"         Details: lip_movement={best_speaker.get('lip_movement', 0):.2f}{talknet_info}")
                 else:
                     # No one visually speaking but audio is active
-                    # Fall back to largest/most prominent person (likely the speaker)
+                    # If we have an active speaker, stay with them
+                    if active_speaker_x is not None:
+                        # Find person closest to active speaker position
+                        closest = min(frame_detections, key=lambda d: abs(d['x'] - active_speaker_x))
+                        if abs(closest['x'] - active_speaker_x) < active_speaker_tolerance:
+                            target_x = closest['x']
+                            logger.debug(f"      Frame {frame_num}: Staying with active speaker (no visual speech) at X={target_x}")
+                        else:
+                            # Active speaker moved too far, pick largest
+                            largest = max(frame_detections, key=lambda d: d.get('size', 0))
+                            target_x = largest['x']
+                            active_speaker_x = target_x
+                            logger.debug(f"      Frame {frame_num}: Active speaker lost, following largest at X={target_x}")
+                    else:
+                        # Fall back to largest/most prominent person (likely the speaker)
+                        largest = max(frame_detections, key=lambda d: d.get('size', 0))
+                        target_x = largest['x']
+                        active_speaker_x = target_x
+                        logger.debug(f"      Frame {frame_num}: Audio active, following largest person at X={target_x}")
+            else:
+                # NO AUDIO - stay with active speaker if we have one, else follow largest
+                if active_speaker_x is not None:
+                    # Find person closest to active speaker
+                    closest = min(frame_detections, key=lambda d: abs(d['x'] - active_speaker_x))
+                    if abs(closest['x'] - active_speaker_x) < active_speaker_tolerance:
+                        target_x = closest['x']
+                    else:
+                        largest = max(frame_detections, key=lambda d: d.get('size', 0))
+                        target_x = largest['x']
+                        active_speaker_x = target_x
+                else:
+                    # No active speaker - follow the largest/most prominent person
                     largest = max(frame_detections, key=lambda d: d.get('size', 0))
                     target_x = largest['x']
-                    logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): Audio active, following largest person at X={target_x}")
-            else:
-                # NO AUDIO - follow the largest/most prominent person
-                largest = max(frame_detections, key=lambda d: d.get('size', 0))
-                target_x = largest['x']
-                logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): No audio, following largest person at X={target_x}")
+                    active_speaker_x = target_x
+                logger.debug(f"      Frame {frame_num} ({frame_time:.1f}s): No audio, following person at X={target_x}")
+            
+            # CRITICAL FIX: Don't smooth positions - use target_x directly to avoid centering between speakers
+            # Smoothing was causing the camera to average positions when switching speakers
+            # Instead, rely on hysteresis and MIN_SPEAKER_DURATION for stability
             
             # Apply hysteresis to prevent jittery switching
             if current_center_x is not None:
-                distance = abs(target_x - current_center_x)
+                distance = abs(target_x - current_center_x)  # Use target_x directly, not smoothed
                 time_since_switch = frame_time - last_switch_time
                 
                 # Only switch if:
@@ -649,12 +721,14 @@ async def detect_talknet_crop_positions(
                 # 2. Enough time has passed since last switch
                 if distance < SPEAKER_HYSTERESIS or time_since_switch < MIN_SPEAKER_DURATION:
                     center_x = current_center_x  # Stay with current position
+                    logger.debug(f"      Frame {frame_num}: Hysteresis applied - staying at X={current_center_x} (target={target_x}, distance={distance}px, time_since_switch={time_since_switch:.1f}s)")
                 else:
-                    center_x = target_x
+                    center_x = target_x  # Switch to new speaker directly
                     current_center_x = center_x
                     last_switch_time = frame_time
+                    logger.debug(f"      Frame {frame_num}: Speaker switch to X={center_x} (distance={distance}px, time_since_switch={time_since_switch:.1f}s)")
             else:
-                # First frame - just use target
+                # First frame - use target position directly
                 center_x = target_x
                 current_center_x = center_x
                 last_switch_time = frame_time
@@ -839,29 +913,31 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
     
-    # Tighter crop for better zoom on speaker - use 0.9x height as width
+    # Less zoom for wider view - use 1.0x height as width
     crop_h = input_h
-    crop_w = int(crop_h * 0.9)  # ~972px for 1080p video - tighter zoom on speaker
+    crop_w = int(crop_h * 1.0)  # Full height ratio - less zoom on speaker
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
     
     logger.info(f"      📐 Video: {input_w}x{input_h}, {total_frames} frames @ {fps:.1f}fps")
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (0.9x aspect ratio - tighter zoom)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (1.0x aspect ratio - less zoom)")
     
     # IMPROVED: Build frame-by-frame crop positions with smooth interpolation
     if len(crop_positions) > 1 and crop_w < input_w:
         # Only do dynamic cropping if we're actually cropping (not using full width)
         import numpy as np
+        from bisect import bisect_left, bisect_right
         
-        # Create smooth interpolation of crop positions over time
-        all_frames = list(range(total_frames))
-        frame_to_crop = {}
+        # Create keyframe lookup (sorted by frame number)
+        # This is memory efficient - only stores keyframes, not every frame
+        keyframe_frames = []
+        keyframe_crop_x = []
         
-        # Fill in crop_x for sampled frames
         for pos in crop_positions:
-            frame_to_crop[pos['frame']] = pos['crop_x']
+            keyframe_frames.append(pos['frame'])
+            keyframe_crop_x.append(pos['crop_x'])
         
         # Log keyframe positions
         logger.info(f"      🎯 Crop keyframes ({len(crop_positions)} positions):")
@@ -872,47 +948,45 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         if len(crop_positions) > 5:
             logger.info(f"         ... and {len(crop_positions) - 5} more keyframes")
         
-        # Interpolate between sampled frames
-        sampled_frames = sorted(frame_to_crop.keys())
-        interpolated_crops = []
-        
-        for frame in all_frames:
-            # Find surrounding keyframes
-            before_frames = [f for f in sampled_frames if f <= frame]
-            after_frames = [f for f in sampled_frames if f > frame]
+        def get_crop_x_for_frame(frame_idx: int) -> int:
+            """Get interpolated crop_x for a specific frame using binary search. O(log n) lookup."""
+            if not keyframe_frames:
+                return (input_w - crop_w) // 2  # Center fallback
             
-            if before_frames and after_frames:
-                # Interpolate between surrounding keyframes
-                f1 = before_frames[-1]
-                f2 = after_frames[0]
-                x1 = frame_to_crop[f1]
-                x2 = frame_to_crop[f2]
-                
-                # Linear interpolation with ease-in-out smoothing
-                alpha = (frame - f1) / (f2 - f1)
-                # Apply smoothstep for smoother transitions (ease-in-out)
-                alpha_smooth = alpha * alpha * (3.0 - 2.0 * alpha)
-                crop_x = int(x1 + (x2 - x1) * alpha_smooth)
-            elif before_frames:
-                crop_x = frame_to_crop[before_frames[-1]]
-            elif after_frames:
-                crop_x = frame_to_crop[after_frames[0]]
+            # Binary search to find surrounding keyframes
+            idx = bisect_right(keyframe_frames, frame_idx)
+            
+            if idx == 0:
+                # Before first keyframe - use first keyframe's value
+                crop_x = keyframe_crop_x[0]
+            elif idx >= len(keyframe_frames):
+                # After last keyframe - use last keyframe's value
+                crop_x = keyframe_crop_x[-1]
             else:
-                crop_x = (input_w - crop_w) // 2  # Center fallback
+                # Between two keyframes - interpolate
+                f1 = keyframe_frames[idx - 1]
+                f2 = keyframe_frames[idx]
+                x1 = keyframe_crop_x[idx - 1]
+                x2 = keyframe_crop_x[idx]
+                
+                # Linear interpolation with smoothstep
+                if f2 != f1:
+                    alpha = (frame_idx - f1) / (f2 - f1)
+                    alpha_smooth = alpha * alpha * (3.0 - 2.0 * alpha)  # Smoothstep
+                    crop_x = int(x1 + (x2 - x1) * alpha_smooth)
+                else:
+                    crop_x = x1
             
             # Clamp to valid range
-            crop_x = max(0, min(crop_x, input_w - crop_w))
-            interpolated_crops.append(crop_x)
+            return max(0, min(crop_x, input_w - crop_w))
         
-        # Use interpolated crops directly without additional smoothing
-        smoothed_crops = interpolated_crops
+        # Log crop movement statistics using keyframes
+        if keyframe_crop_x:
+            crop_range = max(keyframe_crop_x) - min(keyframe_crop_x)
+            logger.info(f"      📊 Crop movement: min={min(keyframe_crop_x):.0f}, max={max(keyframe_crop_x):.0f}, range={crop_range:.0f}px")
         
-        # Log crop movement statistics
-        crop_range = max(smoothed_crops) - min(smoothed_crops)
-        logger.info(f"      📊 Crop movement: min={min(smoothed_crops):.0f}, max={max(smoothed_crops):.0f}, range={crop_range:.0f}px")
-        
-        # Now apply dynamic crop frame-by-frame using OpenCV
-        logger.info(f"      🎬 Applying dynamic crop with frame-by-frame processing...")
+        # Use OpenCV for dynamic frame-by-frame cropping with smooth speaker following
+        logger.info(f"      🎬 Applying dynamic crop with OpenCV frame-by-frame processing...")
         
         # Reset video capture
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -924,22 +998,60 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         # Create video writer for cropped frames
         out = cv2.VideoWriter(temp_output, fourcc, fps, (crop_w, crop_h))
         
+        if not out.isOpened():
+            logger.error(f"      ❌ Failed to open VideoWriter, falling back to static crop")
+            cap.release()
+            # Fallback to static crop - use most common keyframe position
+            from collections import Counter
+            dominant_crop_x = Counter(keyframe_crop_x).most_common(1)[0][0] if keyframe_crop_x else (input_w - crop_w) // 2
+            filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+            cmd = ["ffmpeg", "-y", "-i", temp_path, "-vf", filter_str, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
+            subprocess.run(cmd, check=True, capture_output=True)
+            return
+        
         frame_idx = 0
         last_log_time = 0
+        frames_written = 0
+        errors_count = 0
+        last_good_crop_x = get_crop_x_for_frame(0)
         
         while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Get crop position for this frame
-            crop_x = int(smoothed_crops[frame_idx])
-            
-            # Crop the frame
-            cropped_frame = frame[0:crop_h, crop_x:crop_x+crop_w]
-            
-            # Write cropped frame
-            out.write(cropped_frame)
+            try:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Get crop position using O(log n) binary search lookup
+                crop_x = get_crop_x_for_frame(frame_idx)
+                last_good_crop_x = crop_x  # Save for recovery
+                
+                # Crop the frame
+                cropped_frame = frame[0:crop_h, crop_x:crop_x+crop_w]
+                
+                # Verify frame dimensions before writing
+                if cropped_frame.shape[0] == crop_h and cropped_frame.shape[1] == crop_w:
+                    out.write(cropped_frame)
+                    frames_written += 1
+                else:
+                    # If dimensions don't match, create a black frame
+                    logger.warning(f"         Frame {frame_idx}: Invalid crop dimensions, using black frame")
+                    black_frame = np.zeros((crop_h, crop_w, 3), dtype=np.uint8)
+                    out.write(black_frame)
+                    frames_written += 1
+                
+            except Exception as frame_error:
+                errors_count += 1
+                if errors_count <= 5:  # Only log first 5 errors
+                    logger.warning(f"         Frame {frame_idx} error: {frame_error}")
+                # Write a frame with last known good position to maintain continuity
+                try:
+                    if 'frame' in dir() and frame is not None:
+                        safe_crop_x = max(0, min(int(last_good_crop_x), input_w - crop_w))
+                        safe_frame = frame[0:crop_h, safe_crop_x:safe_crop_x+crop_w]
+                        out.write(safe_frame)
+                        frames_written += 1
+                except:
+                    pass  # Skip this frame entirely if we can't recover
             
             # Log progress every 2 seconds
             current_time = frame_idx / fps
@@ -953,31 +1065,49 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         cap.release()
         out.release()
         
-        logger.info(f"      ✅ Dynamic cropping complete, re-encoding with h264...")
+        logger.info(f"      📊 Processed {frame_idx} frames, wrote {frames_written}, errors: {errors_count}")
         
-        # Re-encode with h264 and audio using ffmpeg
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", temp_output,
-            "-i", temp_path,  # Original for audio
-            "-map", "0:v",  # Video from temp_output
-            "-map", "1:a?",  # Audio from original (if exists)
-            "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",  # Scale with padding
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            output_path
-        ]
-        
-        subprocess.run(cmd, check=True, capture_output=True)
-        
-        # Clean up temp file
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
+        # Check if we got a valid output
+        if os.path.exists(temp_output) and os.path.getsize(temp_output) > 0:
+            logger.info(f"      ✅ Dynamic cropping complete, re-encoding with h264...")
+            
+            # Re-encode with h264 and audio using ffmpeg
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i", temp_output,
+                "-i", temp_path,  # Original for audio
+                "-map", "0:v",  # Video from temp_output
+                "-map", "1:a?",  # Audio from original (if exists)
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                output_path
+            ]
+            
+            subprocess.run(cmd, check=True, capture_output=True)
+            
+            # Clean up temp file
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            
+            logger.info(f"      ✅ Dynamic speaker-following crop completed successfully")
+        else:
+            # Fallback to static crop if OpenCV output failed
+            logger.warning(f"      ⚠️ OpenCV output empty, falling back to static crop")
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            
+            from collections import Counter
+            dominant_crop_x = Counter(keyframe_crop_x).most_common(1)[0][0] if keyframe_crop_x else (input_w - crop_w) // 2
+            filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+            cmd = ["ffmpeg", "-y", "-i", temp_path, "-vf", filter_str, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
+            subprocess.run(cmd, check=True, capture_output=True)
+            logger.info(f"      ✅ Static fallback crop completed")
             
     else:
         # Single position - use static crop with ffmpeg (faster)

@@ -16,6 +16,7 @@ from services.transcription_assemblyai import transcribe_audio
 from services.video_processing import generate_thumbnail, process_video, create_clip
 from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
 from utils.s3_storage import s3_client
+from utils.rapidapi_downloader import download_youtube_video_rapidapi
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video
 from logging_config import setup_logging
@@ -440,6 +441,7 @@ async def process_video_job(job_id: str, job_data: dict):
         file_path = job_data.get("file_path")
         original_job_id = job_data.get("original_job_id")
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration")  # From frontend
 
         # If user_id is not provided, fetch it from DB
         if not user_id:
@@ -451,6 +453,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 user_id = None
 
         logger.info(f"Processing video job {job_id} for video {video_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
         
         # ⏱️ START PIPELINE TIMING
         import time
@@ -568,8 +571,9 @@ async def process_video_job(job_id: str, job_data: dict):
         # ⏱️ STEP 2: AI CONTENT ANALYSIS
         step_start = time.time()
         logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
+        logger.info(f"   Target clip duration: {target_clip_duration}s")
         
-        segments = await analyze_content(transcript)
+        segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
         
         # Check if cancelled immediately after analysis
         if user_id:
@@ -1144,8 +1148,14 @@ async def process_s3_download_job(job_id: str, job_data: dict):
 async def _upload_clip_to_s3_async(clip_path: str, video_id: str, clip_id: str) -> tuple:
     """Upload clip to S3 asynchronously"""
     try:
-        loop = asyncio.get_event_loop()
-        file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+        if not os.path.exists(clip_path):
+            logger.error(f"Clip file not found: {clip_path}")
+            return False, None
+            
+        loop = asyncio.get_running_loop()  # Use get_running_loop() instead of deprecated get_event_loop()
+        file_size = os.path.getsize(clip_path)
+        
+        logger.info(f"[S3 Upload] Starting upload: {clip_path} ({file_size/1024/1024:.1f}MB)")
         
         # Use multipart for large files
         if file_size > 50 * 1024 * 1024:  # 50MB
@@ -1163,16 +1173,23 @@ async def _upload_clip_to_s3_async(clip_path: str, video_id: str, clip_id: str) 
                 )
             )
         
+        logger.info(f"[S3 Upload] Completed: success={success}, key={s3_key}")
         return success, s3_key
     except Exception as e:
         logger.error(f"Error uploading clip to S3: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False, None
 
 
 async def _upload_thumbnail_to_s3_async(thumbnail_path: str, video_id: str, clip_id: str) -> tuple:
     """Upload thumbnail to S3 asynchronously"""
     try:
-        loop = asyncio.get_event_loop()
+        if not os.path.exists(thumbnail_path):
+            logger.warning(f"Thumbnail file not found: {thumbnail_path}")
+            return False, None
+            
+        loop = asyncio.get_running_loop()  # Use get_running_loop() instead of deprecated get_event_loop()
         success, s3_key = await loop.run_in_executor(
             None,
             lambda: s3_client.upload_thumbnail_to_s3(thumbnail_path, video_id, f"clip_{clip_id}_thumbnail.jpg")
@@ -1180,6 +1197,8 @@ async def _upload_thumbnail_to_s3_async(thumbnail_path: str, video_id: str, clip
         return success, s3_key
     except Exception as e:
         logger.error(f"Error uploading thumbnail to S3: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False, None
 
 
@@ -1353,11 +1372,13 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         url = job_data.get("url")
         auto_process = job_data.get("auto_process", True)
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration")  # From frontend
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
         logger.info(f"   Job ID (task_id): {job_id}")
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   User ID: {user_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
 
         # Update MongoDB video status
         if user_id:
@@ -1380,30 +1401,63 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         video_dir = upload_dir / video_id
         video_dir.mkdir(exist_ok=True)
 
-        # Three-tier download fallback system
+        # Four-tier download fallback system (TIER 0 is RapidAPI - highest priority)
         file_path, title, video_info = None, None, None
         max_retries = 3
 
-        # Tier 1: Try Sieve API
+        # TIER 0: Try RapidAPI YouTube Downloader (PRIMARY METHOD)
         for attempt in range(1, max_retries + 1):
             try:
-                logger.info(f"Job {job_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
-                file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
+                logger.info(f"Job {job_id}: [TIER 0] Attempt {attempt} to download with RapidAPI service (PRIMARY)")
+                file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
                 if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ Sieve download successful")
+                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful (TIER 0)")
                     break
-            except Exception as sieve_error:
-                logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
+            except Exception as rapidapi_error:
+                logger.warning(f"Job {job_id}: RapidAPI download failed (attempt {attempt}): {str(rapidapi_error)}")
                 if attempt == max_retries:
-                    logger.error(f"Job {job_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix.")
+                    logger.error(f"Job {job_id}: All {max_retries} RapidAPI attempts failed. Falling back to Tier 1 (Sieve).")
                     break
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
 
-        # Tier 2: Fallback to pytubefix if Sieve failed
+        # Tier 1: Try Sieve API (fallback if RapidAPI fails)
         if not file_path or not title:
             for attempt in range(1, max_retries + 1):
                 try:
-                    logger.info(f"Job {job_id}: [Tier 2] Attempt {attempt} to download with pytubefix")
+                    logger.info(f"Job {job_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
+                    file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
+                    if file_path and title:
+                        logger.info(f"Job {job_id}: ✅ Sieve download successful")
+                        break
+                except Exception as sieve_error:
+                    logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
+                    if attempt == max_retries:
+                        logger.error(f"Job {job_id}: All {max_retries} Sieve attempts failed. Falling back to Tier 2 (yt-dlp).")
+                        break
+                    await asyncio.sleep(5)
+
+        # Tier 2: Fallback to yt-dlp if Sieve failed (more robust on cloud servers)
+        if not file_path or not title:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    from utils.ytdlp_downloader import download_youtube_video_ytdlp
+                    logger.info(f"Job {job_id}: [Tier 2] Attempt {attempt} to download with yt-dlp")
+                    file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
+                    if file_path and title:
+                        logger.info(f"Job {job_id}: ✅ yt-dlp download successful")
+                        break
+                except Exception as ytdlp_error:
+                    logger.warning(f"Job {job_id}: yt-dlp download failed (attempt {attempt}): {str(ytdlp_error)}")
+                    if attempt == max_retries:
+                        logger.error(f"Job {job_id}: All {max_retries} yt-dlp attempts failed. Falling back to pytubefix.")
+                        break
+                    await asyncio.sleep(5)
+
+        # Tier 3: Final fallback to pytubefix (often blocked on cloud servers)
+        if not file_path or not title:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.info(f"Job {job_id}: [Tier 3] Attempt {attempt} to download with pytubefix")
                     file_path, title, video_info = await download_youtube_video(url, video_dir)
                     if file_path and title:
                         logger.info(f"Job {job_id}: ✅ pytubefix download successful")
@@ -1411,23 +1465,12 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                 except Exception as pytubefix_error:
                     logger.warning(f"Job {job_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
                     if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp.")
+                        logger.error(f"Job {job_id}: All download methods failed.")
                         break
                     await asyncio.sleep(5)
 
-        # Tier 3: Final fallback to yt-dlp
         if not file_path or not title:
-            try:
-                from utils.ytdlp_downloader import download_youtube_video_ytdlp
-                logger.info(f"Job {job_id}: [Tier 3] Attempting download with yt-dlp (final fallback)")
-                file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
-                if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ yt-dlp download successful")
-            except Exception as ytdlp_error:
-                logger.error(f"Job {job_id}: yt-dlp download failed: {str(ytdlp_error)}")
-
-        if not file_path or not title:
-            raise Exception("Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)")
+            raise Exception("Failed to download YouTube video after trying all methods (RapidAPI, Sieve, yt-dlp, pytubefix)")
 
         logger.info(f"Job {job_id}: Download completed successfully: {file_path}")
 
@@ -1485,6 +1528,7 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "user_id": user_id,
+                    "target_clip_duration": target_clip_duration,
                 },
             )
             
