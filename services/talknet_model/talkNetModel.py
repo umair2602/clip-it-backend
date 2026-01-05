@@ -257,7 +257,7 @@ class talkNetModel(nn.Module):
         
         x = x.unsqueeze(1).transpose(2, 3)  # (B, 1, F, T)
         
-        B, C, F, T = x.shape
+        B, C, feat_dim, T = x.shape  # Changed F to feat_dim to avoid shadowing torch.nn.functional.F
         
         # Handle empty or very short audio
         if T == 0:
