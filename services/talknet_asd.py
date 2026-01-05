@@ -334,36 +334,35 @@ class TalkNetASD:
                 # Pad audio - use correct padding for 2D array (T, F)
                 pad_length = expected_audio - audio_length
                 
-                # CRITICAL FIX: Ensure pad_length is a Python int, not numpy scalar
-                if isinstance(pad_length, np.ndarray):
-                    pad_length = int(pad_length.item())
-                elif not isinstance(pad_length, int):
-                    pad_length = int(pad_length)
-                
+                # CRITICAL FIX: Convert pad_length to Python int (numpy scalars cause .pad() error)
                 try:
-                    # Ensure audio_segment is 2D before padding
+                    # Force conversion to Python int
+                    pad_length = int(pad_length)
+                    
+                    # Ensure audio_segment is a proper 2D numpy array
                     if not isinstance(audio_segment, np.ndarray):
-                        logger.warning(f"Audio segment for track {track_idx} is {type(audio_segment)}, not numpy array. Converting...")
                         audio_segment = np.array(audio_segment)
                     
                     if audio_segment.ndim != 2:
-                        logger.warning(f"Audio segment for track {track_idx} is not 2D (ndim={audio_segment.ndim}), reshaping...")
                         if audio_segment.ndim == 1:
                             audio_segment = audio_segment.reshape(-1, 1)
                         elif audio_segment.ndim == 0:
                             logger.warning(f"Audio segment is scalar for track {track_idx}, skipping")
                             continue
                         else:
-                            raise ValueError(f"Cannot handle audio_segment with ndim={audio_segment.ndim}")
+                            logger.warning(f"Cannot handle audio_segment with ndim={audio_segment.ndim}, skipping track {track_idx}")
+                            continue
                     
-                    # Log debug info
-                    logger.debug(f"Padding audio for track {track_idx}: shape={audio_segment.shape}, pad_length={pad_length} (type={type(pad_length)})")
-                    
-                    # ((before_T, after_T), (before_F, after_F))
+                    # Now do the padding with proper tuple format
+                    # ((before_rows, after_rows), (before_cols, after_cols))
                     audio_segment = np.pad(audio_segment, ((0, pad_length), (0, 0)), mode='edge')
-                except Exception as pad_error:
-                    logger.warning(f"Failed to pad audio for track {track_idx}: {pad_error}, type(audio_segment)={type(audio_segment)}, type(pad_length)={type(pad_length)}, shape={getattr(audio_segment, 'shape', 'N/A')}")
+                    
+                except (TypeError, ValueError, AttributeError) as pad_error:
+                    logger.error(f"Failed to pad audio for track {track_idx}: {pad_error}")
+                    logger.error(f"  pad_length={pad_length} (type={type(pad_length)})")
+                    logger.error(f"  audio_segment type={type(audio_segment)}, shape={getattr(audio_segment, 'shape', 'N/A')}")
                     continue
+                    
             elif audio_length > expected_audio:
                 audio_segment = audio_segment[:expected_audio]
             
@@ -381,7 +380,12 @@ class TalkNetASD:
                             'bbox': track_bboxes[i] if i < len(track_bboxes) else None
                         })
             except Exception as e:
-                logger.warning(f"TalkNet inference failed for track {track_idx}: {e}")
+                logger.error(f"TalkNet inference failed for track {track_idx}: {e}")
+                logger.error(f"  video_features shape: {video_features.shape if hasattr(video_features, 'shape') else type(video_features)}")
+                logger.error(f"  audio_segment shape: {audio_segment.shape if hasattr(audio_segment, 'shape') else type(audio_segment)}")
+                logger.error(f"  fps: {fps}")
+                import traceback
+                logger.error(f"  Full traceback: {traceback.format_exc()}")
         
         return results
     
