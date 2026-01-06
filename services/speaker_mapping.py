@@ -68,7 +68,8 @@ async def map_speakers_from_sample(
         static_image_mode=False,
         max_num_faces=5,
         refine_landmarks=False,
-        min_detection_confidence=0.5
+        min_detection_confidence=0.3,  # Lowered from 0.5 for better detection
+        min_tracking_confidence=0.3     # Lower threshold for tracking
     ) as face_mesh:
         
         frame_idx = 0
@@ -115,6 +116,12 @@ async def map_speakers_from_sample(
     cap.release()
     
     logger.info(f"   ✅ Detected {len(person_detections)} person instances")
+    
+    # If no faces detected in first 10s, try a longer sample or middle of video
+    if len(person_detections) == 0 and sample_duration < 30:
+        logger.warning(f"   ⚠️ No faces in first {sample_duration}s, trying first 30 seconds...")
+        # Retry with 30 seconds
+        return await map_speakers_from_sample(video_path, transcript, sample_duration=30.0)
     
     # STEP 2: Run TalkNet on sample window ONLY
     if TALKNET_AVAILABLE and person_detections:
