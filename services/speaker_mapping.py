@@ -334,10 +334,10 @@ def generate_crop_positions_from_transcript(
     
     utterances = transcript.get('utterances', [])
     
-    # Filter utterances to clip time range
+    # Filter utterances to clip time range (times are already in seconds from AssemblyAI)
     clip_utterances = [
         u for u in utterances
-        if u.get('start', 0) / 1000 < end_time and u.get('end', 0) / 1000 > start_time
+        if u.get('start', 0) < end_time and u.get('end', 0) > start_time
     ]
     
     if not clip_utterances:
@@ -356,8 +356,8 @@ def generate_crop_positions_from_transcript(
         # Find which speaker is talking at this time
         active_speaker = None
         for utterance in clip_utterances:
-            utt_start = utterance.get('start', 0) / 1000
-            utt_end = utterance.get('end', 0) / 1000
+            utt_start = utterance.get('start', 0)  # Already in seconds from AssemblyAI
+            utt_end = utterance.get('end', 0)      # Already in seconds from AssemblyAI
             
             if utt_start <= frame_time <= utt_end:
                 active_speaker = utterance.get('speaker')
@@ -365,6 +365,14 @@ def generate_crop_positions_from_transcript(
         
         if active_speaker and active_speaker in speaker_map:
             target_x = speaker_map[active_speaker]
+        elif active_speaker:
+            # Unknown speaker - log warning and use center (will trigger fallback in parent)
+            if frame_num == 0:  # Only log once per clip
+                logger.warning(f"   🚨 UNMAPPED SPEAKER DETECTED: '{active_speaker}' at {frame_time:.2f}s")
+                logger.warning(f"      📋 Currently mapped speakers: {list(speaker_map.keys())}")
+                logger.warning(f"      🔄 Triggering speaker discovery mode for this clip")
+            target_x = None  # Signal that we need fallback
+            break  # Exit early - this clip needs full analysis
         elif current_x is not None:
             target_x = current_x  # Stay with last position
         else:
@@ -376,6 +384,11 @@ def generate_crop_positions_from_transcript(
         
         current_x = target_x
         crop_positions.append((frame_num, target_x))
+    
+    # Check if we exited early due to unmapped speaker
+    if crop_positions and crop_positions[-1][1] is None:
+        logger.warning(f"   ⚠️ Clip contains unmapped speakers - returning empty to trigger fallback")
+        return []  # Empty list signals fallback needed
     
     logger.info(f"   ✅ Generated {len(crop_positions)} crop positions from transcript")
     
