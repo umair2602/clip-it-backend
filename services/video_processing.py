@@ -177,8 +177,11 @@ async def process_video(
             sample_duration=10.0  # Only analyze first 10 seconds
         )
         
-        logger.info(f"\n✅ Speaker mapping complete! Found {len(global_speaker_map)} speakers:")
-        for speaker, x_pos in global_speaker_map.items():
+        # Track discovered speakers across clips (mutable dict for learning new speakers)
+        discovered_speakers = global_speaker_map.copy()
+        
+        logger.info(f"\n✅ Speaker mapping complete! Found {len(discovered_speakers)} speakers:")
+        for speaker, x_pos in discovered_speakers.items():
             logger.info(f"   Speaker {speaker}: X position = {x_pos}")
         logger.info("="*70 + "\n")
         
@@ -217,15 +220,30 @@ async def process_video(
 
             # Create the clip
             logger.info(f"   ⏳ Step 1/3: Creating video clip...")
-            clip_path = await create_clip(
+            clip_result = await create_clip(
                 video_path=video_path,
                 output_dir=str(output_dir),
                 start_time=segment["start_time"],
                 end_time=segment["end_time"],
                 clip_id=clip_id,
                 transcript=transcript,
-                speaker_map=global_speaker_map,  # Use pre-computed speaker positions
+                speaker_map=discovered_speakers,  # Pass mutable speaker map
             )
+            
+            # Unpack result - may include new speaker discoveries
+            if isinstance(clip_result, tuple):
+                clip_path, new_speakers = clip_result
+                # Merge newly discovered speakers into global map
+                if new_speakers:
+                    logger.info(f"   🆕 SPEAKER DISCOVERY: Found {len(new_speakers)} new speaker(s) in this clip")
+                    for speaker, pos in new_speakers.items():
+                        if speaker not in discovered_speakers:
+                            discovered_speakers[speaker] = pos
+                            logger.info(f"   ✅ CACHED NEW SPEAKER: {speaker} → X={pos} (will use for future clips)")
+                        else:
+                            logger.debug(f"   ℹ️  Speaker {speaker} already cached at X={discovered_speakers[speaker]}")
+            else:
+                clip_path = clip_result
 
             # Only process if clip was created
             if clip_path is not None:
@@ -314,6 +332,21 @@ async def process_video(
             sequential_estimate = parallel_elapsed * len(segments) / MAX_CONCURRENT_CLIPS
             speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
             logger.info(f"📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
+        
+        # Log speaker discovery summary
+        total_speakers = len(discovered_speakers)
+        initial_speakers = len(global_speaker_map) if global_speaker_map else 0
+        new_speakers_found = total_speakers - initial_speakers
+        
+        if new_speakers_found > 0:
+            logger.info(f"\n{'='*70}")
+            logger.info(f"🎯 SPEAKER DISCOVERY SUMMARY")
+            logger.info(f"   Initial mapped speakers: {initial_speakers} {list(global_speaker_map.keys()) if global_speaker_map else []}")
+            logger.info(f"   Newly discovered speakers: {new_speakers_found}")
+            logger.info(f"   Total speakers in video: {total_speakers}")
+            logger.info(f"   Final speaker map: {discovered_speakers}")
+            logger.info(f"{'='*70}")
+        
         logger.info("="*70 + "\n")
 
         return processed_clips
@@ -331,14 +364,18 @@ async def create_clip(
     clip_id: str, 
     transcript: Dict[str, Any] = None,
     speaker_map: Dict[str, int] = None  # Pre-computed speaker positions
-) -> str:
+) -> tuple:  # Returns (clip_path, newly_discovered_speakers)
     """
     Extract video segment and convert to vertical (9:16) format using OPTIMIZED speaker tracking.
     
     OPTIMIZATION: Instead of running TalkNet on every frame:
     1. Uses pre-computed speaker_map (from first 10s analysis)
     2. Generates crop positions from transcript timestamps
-    3. Reduces CPU usage by 90%+ and prevents auto-scaling issues
+    3. If unmapped speaker found, runs TalkNet and caches new speaker for future clips
+    4. Reduces CPU usage by 70-90%+ and prevents auto-scaling issues
+    
+    Returns:
+        Tuple of (clip_path, newly_discovered_speakers_dict)
     """
     logger.info(f"🎬 Creating clip {clip_id}: {start_time:.2f}s - {end_time:.2f}s")
     
@@ -358,11 +395,31 @@ async def create_clip(
     await check_cancellation()
     
     # Step 2: Generate crop positions from transcript (OPTIMIZED - no heavy computation!)
+    newly_discovered_speakers = {}  # Track any new speakers found
+    
     if speaker_map:
         logger.info(f"   🚀 Using optimized transcript-based cropping (90%+ faster than TalkNet!)...")
         crop_positions = await generate_optimized_crop_positions(
             temp_path, start_time, end_time, transcript, speaker_map
         )
+        
+        # If empty list returned, it means clip has unmapped speakers - fall back and learn
+        if not crop_positions:
+            # Log which speakers are in the clip vs which are known
+            clip_speakers = set()
+            if transcript and 'utterances' in transcript:
+                for utt in transcript['utterances']:
+                    if float(utt.get('start', 0)) < end_time and float(utt.get('end', 0)) > start_time:
+                        clip_speakers.add(utt.get('speaker', 'Unknown'))
+            missing_speakers = clip_speakers - set(speaker_map.keys())
+            logger.warning(f"   ⚠️ UNMAPPED SPEAKERS DETECTED: {missing_speakers}")
+            logger.info(f"   🔍 Known speakers: {set(speaker_map.keys())}")
+            logger.info(f"   🎯 Running TalkNet on this clip to discover missing speakers...")
+            
+            crop_positions, new_speakers = await detect_talknet_crop_positions_with_discovery(
+                temp_path, start_time, end_time, transcript, speaker_map
+            )
+            newly_discovered_speakers = new_speakers
     else:
         # Fallback to old method if no speaker map
         logger.warning(f"   ⚠️ No speaker map available, falling back to full TalkNet analysis...")
@@ -380,7 +437,7 @@ async def create_clip(
         os.remove(temp_path)
     
     logger.info(f"   ✅ Clip created with TalkNet speaker tracking: {output_path}")
-    return output_path
+    return output_path, newly_discovered_speakers
 
 
 async def generate_optimized_crop_positions(
@@ -442,6 +499,93 @@ async def generate_optimized_crop_positions(
     logger.info(f"      ✅ Generated {len(crop_positions)} crop positions (instant - no TalkNet needed!)")
     
     return crop_positions
+
+
+async def detect_talknet_crop_positions_with_discovery(
+    video_path: str,
+    start_time: float,
+    end_time: float,
+    transcript: Dict[str, Any] = None,
+    speaker_map: Dict[str, float] = None
+) -> tuple:
+    """
+    Run TalkNet ASD to detect crop positions AND discover new speakers for caching.
+    
+    This is used when an unmapped speaker is encountered (e.g., Speaker C appears at minute 5).
+    Instead of just generating crop positions, we also extract and return the speaker's X position
+    so it can be cached for future clips.
+    
+    Returns:
+        tuple: (crop_positions list, newly_discovered_speakers dict)
+               e.g., ([{...crop data...}], {'C': 800})
+    """
+    logger.info(f"      🔍 Running TalkNet with speaker discovery mode...")
+    
+    # Run full TalkNet analysis
+    crop_positions = await detect_talknet_crop_positions(video_path, start_time, end_time, transcript)
+    
+    # Extract speaker positions from the crop results
+    newly_discovered_speakers = {}
+    
+    if transcript and 'utterances' in transcript and speaker_map is not None:
+        # Get all speakers in this clip
+        clip_speakers = set()
+        for utterance in transcript['utterances']:
+            utt_start = float(utterance.get('start', 0))
+            utt_end = float(utterance.get('end', 0))
+            speaker = utterance.get('speaker', 'Unknown')
+            
+            # Check if utterance overlaps with clip
+            if utt_start < end_time and utt_end > start_time:
+                clip_speakers.add(speaker)
+        
+        # Find speakers that aren't in the map yet
+        unmapped_speakers = {s for s in clip_speakers if s not in speaker_map}
+        
+        if unmapped_speakers:
+            logger.info(f"      🆕 Found {len(unmapped_speakers)} unmapped speaker(s): {unmapped_speakers}")
+            
+            # For each unmapped speaker, extract their X position from crop_positions
+            for speaker in unmapped_speakers:
+                # Get all utterances for this speaker
+                speaker_utterances = [
+                    utt for utt in transcript['utterances']
+                    if utt.get('speaker') == speaker and
+                    float(utt.get('start', 0)) < end_time and
+                    float(utt.get('end', 0)) > start_time
+                ]
+                
+                if speaker_utterances:
+                    # Collect X positions from crop_positions during this speaker's utterances
+                    speaker_x_positions = []
+                    
+                    for crop in crop_positions:
+                        crop_time = crop.get('time', 0)
+                        
+                        # Check if this crop falls within any of this speaker's utterances
+                        for utt in speaker_utterances:
+                            utt_start = float(utt.get('start', 0))
+                            utt_end = float(utt.get('end', 0))
+                            
+                            if utt_start <= crop_time <= utt_end:
+                                # Use center_x if available, otherwise crop_x
+                                x_pos = crop.get('center_x') or crop.get('crop_x')
+                                if x_pos is not None:
+                                    speaker_x_positions.append(x_pos)
+                                break
+                    
+                    if speaker_x_positions:
+                        # Use median X position for stability
+                        median_x = int(np.median(speaker_x_positions))
+                        newly_discovered_speakers[speaker] = median_x
+                        logger.info(f"      ✅ SPEAKER EXTRACTED: {speaker} → X={median_x}")
+                        logger.info(f"         📊 Analyzed {len(speaker_x_positions)} frame samples during {len(speaker_utterances)} utterance(s)")
+                        logger.info(f"         📍 Position range: X={min(speaker_x_positions)}-{max(speaker_x_positions)} (median={median_x})")
+                    else:
+                        logger.warning(f"      ⚠️ EXTRACTION FAILED: Could not determine X position for speaker {speaker}")
+                        logger.warning(f"         Checked {len(speaker_utterances)} utterance(s) but found no matching crop positions")
+    
+    return crop_positions, newly_discovered_speakers
 
 
 async def detect_talknet_crop_positions(
@@ -847,8 +991,12 @@ async def detect_talknet_crop_positions(
         # Final bounds check
         crop_x = max(0, min(crop_x, input_w - crop_w))
         
+        # Calculate frame time relative to clip start
+        frame_time = start_time + (frame_num / fps)
+        
         crop_positions.append({
             'frame': frame_num,
+            'time': frame_time,  # Add time for speaker discovery
             'crop_x': crop_x,
             'center_x': center_x,
             'has_detection': len(frame_detections) > 0
@@ -856,7 +1004,7 @@ async def detect_talknet_crop_positions(
     
     if len(crop_positions) == 0:
         logger.warning(f"      ⚠️ No crop positions generated - using center")
-        return [{'frame': 0, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
+        return [{'frame': 0, 'time': start_time, 'crop_x': (input_w - crop_w) // 2, 'center_x': input_w // 2, 'has_detection': False}]
     
     # Log summary
     unique_positions = len(set(p['crop_x'] for p in crop_positions))

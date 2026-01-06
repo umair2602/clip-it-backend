@@ -517,22 +517,41 @@ async def detect_active_speaker_simple(
         tracks = _group_detections_into_tracks(face_detections, fps)
         logger.info(f"✅ Found {len(tracks)} speaker tracks to analyze")
         
-        # Read video frames
+        # Read video frames - LIMIT TO 500 FRAMES MAX to prevent memory issues on production
         logger.info(f"🎥 Loading video frames for analysis...")
         cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        MAX_FRAMES = 500  # Limit to prevent OOM on AWS ECS
+        
+        # If video has more than MAX_FRAMES, sample every Nth frame
+        if total_frames > MAX_FRAMES:
+            sample_rate = int(total_frames / MAX_FRAMES)
+            logger.warning(f"⚠️ Video has {total_frames} frames, sampling every {sample_rate}th frame to stay under {MAX_FRAMES} limit")
+        else:
+            sample_rate = 1
+            logger.info(f"📊 Video has {total_frames} frames, loading all")
+        
         frames = []
         frame_count = 0
-        while cap.isOpened():
+        frames_loaded = 0
+        
+        while cap.isOpened() and frames_loaded < MAX_FRAMES:
             ret, frame = cap.read()
             if not ret:
                 break
-            frames.append(frame)
+            
+            # Only keep frames according to sample rate
+            if frame_count % sample_rate == 0:
+                frames.append(frame)
+                frames_loaded += 1
+                # Log progress every 100 frames
+                if frames_loaded % 100 == 0:
+                    logger.info(f"  ⏳ Loaded {frames_loaded} frames so far...")
+            
             frame_count += 1
-            # Log progress every 100 frames
-            if frame_count % 100 == 0:
-                logger.info(f"  ⏳ Loaded {frame_count} frames so far...")
+            
         cap.release()
-        logger.info(f"✅ Loaded {len(frames)} frames from video")
+        logger.info(f"✅ Loaded {len(frames)} frames from video (sampled from {frame_count} total frames)")
         
         # Run TalkNet
         logger.info(f"🔍 Running TalkNet inference on {len(tracks)} tracks across {len(frames)} frames...")
