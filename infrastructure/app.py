@@ -583,7 +583,7 @@ class ClipItStack(Stack):
             cluster=cluster,
             task_definition=worker_task_definition,
             desired_count=1,
-            service_name="clip-it-worker-service",
+            service_name="clip-it-gpu-worker-service",
             capacity_provider_strategies=[
                 ecs.CapacityProviderStrategy(
                     capacity_provider=gpu_capacity_provider.capacity_provider_name,
