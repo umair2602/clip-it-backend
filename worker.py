@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import shutil
+import signal
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +34,28 @@ output_dir.mkdir(exist_ok=True)
 
 # Global Whisper model
 whisper_model = None
+
+# Global tracker for the current job being processed (for signal handling)
+current_active_job_id = None
+
+
+def handle_interruption(signo, frame):
+    """Handle termination signals from AWS Spot or user"""
+    global current_active_job_id
+    if current_active_job_id:
+        logger.warning(f"🛑 Termination signal {signo} received! Requeueing job {current_active_job_id}...")
+        # Requeue job will mark it as 'rescheduling'
+        job_queue.requeue_job(current_active_job_id)
+    else:
+        logger.info(f"Signal {signo} received, but no active job to requeue.")
+    
+    logger.info("Worker shutting down.")
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, handle_interruption)
+signal.signal(signal.SIGINT, handle_interruption)
 
 
 async def cleanup_old_files(max_age_hours: int = 24):
@@ -99,8 +123,12 @@ async def initialize_worker():
 
         whisper_model = load_model(model_size="tiny")
         logger.info("Worker initialized successfully.")
+        
+        # Recover any jobs stuck from a previous crash or Spot interruption
+        job_queue.recover_stuck_jobs()
     except Exception as e:
         logger.error(f"Error initializing worker: {str(e)}", exc_info=True)
+
 
 
 async def process_youtube_download_job(job_id: str, job_data: dict):
@@ -1298,7 +1326,12 @@ async def worker_main():
             job_id = job_queue.get_next_job()
 
             if job_id:
+                # Track active job for signal handling
+                global current_active_job_id
+                current_active_job_id = job_id
+                
                 # Get job details
+
                 job = job_queue.get_job(job_id)
                 if not job:
                     logger.warning(f"Job {job_id} not found")
@@ -1338,7 +1371,11 @@ async def worker_main():
                         job_id,
                         {"status": "error", "message": f"Unknown job type: {job_type}"},
                     )
+                
+                # Clear active job tracker after processing
+                current_active_job_id = None
             else:
+
                 # No job available, sleep for a bit
                 await asyncio.sleep(5)
 

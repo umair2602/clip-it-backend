@@ -61,14 +61,18 @@ async def create_user_video(user_id: str, video_data: Dict[str, Any]) -> Optiona
         
         logger.info(f"📝 Video model created with process_task_id: {video.process_task_id}")
         
-        # Add video to user's videos array
+        # Add video to user's videos array, but only if it doesn't already exist (Idempotency ✅)
         result = users_collection.update_one(
-            {"_id": ObjectId(user_id)},
+            {
+                "_id": ObjectId(user_id),
+                "videos.id": {"$ne": video.id}  # Only push if id is not present
+            },
             {
                 "$push": {"videos": video.dict()},
                 "$set": {"updated_at": utc_now()}
             }
         )
+
         
         if result.modified_count > 0:
             logger.info(f"✅ Created video {video.id} for user {user_id}")
@@ -336,11 +340,14 @@ async def add_clip_to_video(user_id: str, video_id: str, clip_data: Dict[str, An
         logger.info(f"Created clip model with ID: {clip.id}")
         logger.info(f"Clip dict: {clip.dict()}")
         
-        # Add clip to video's clips array
+        # Add clip to video's clips array, but only if it doesn't already exist
+        # We use start_time and end_time as a simple way to identify duplicate clips on retry
         result = users_collection.update_one(
             {
                 "_id": ObjectId(user_id),
-                "videos.id": video_id
+                "videos.id": video_id,
+                "videos.clips.start_time": {"$ne": clip.start_time},
+                "videos.clips.end_time": {"$ne": clip.end_time}
             },
             {
                 "$push": {"videos.$.clips": clip.dict()},
@@ -350,6 +357,7 @@ async def add_clip_to_video(user_id: str, video_id: str, clip_data: Dict[str, An
                 }
             }
         )
+
         
         logger.info(f"Update result: {result.modified_count} documents modified")
         logger.info(f"Update result matched: {result.matched_count} documents matched")

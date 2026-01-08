@@ -103,6 +103,70 @@ class ClipItStack(Stack):
             ]
         )
 
+        # ========================================
+        # EC2 GPU INFRASTRUCTURE FOR WORKERS
+        # ========================================
+
+        # Get GPU-optimized AMI
+        gpu_ami = ecs.EcsOptimizedImage.amazon_linux2(
+            hardware_type=ecs.AmiHardwareType.GPU
+        )
+
+        # Launch Template for Spot GPU instances
+        spot_launch_template = ec2.LaunchTemplate(
+            self, "GPUSpotLaunchTemplate",
+            instance_type=ec2.InstanceType("g4dn.xlarge"),
+            machine_image=gpu_ami,
+            security_group=ec2.SecurityGroup(
+                self, "WorkerEC2SecurityGroup",
+                vpc=vpc,
+                description="Security group for GPU EC2 worker instances",
+                allow_all_outbound=True
+            ),
+            spot_options=ec2.LaunchTemplateSpotOptions(
+                request_type=ec2.SpotRequestType.ONE_TIME,
+                max_price=0.25
+            ),
+            role=iam.Role(
+                self, "EC2InstanceRole",
+                assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+                managed_policies=[
+                    iam.ManagedPolicy.from_aws_managed_policy_name(
+                        "service-role/AmazonEC2ContainerServiceforEC2Role"
+                    ),
+                    iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
+                ]
+            ),
+            user_data=ec2.UserData.for_linux()
+        )
+
+        spot_launch_template.user_data.add_commands(
+            f"echo ECS_CLUSTER={cluster.cluster_name} >> /etc/ecs/ecs.config",
+            "echo ECS_ENABLE_GPU_SUPPORT=true >> /etc/ecs/ecs.config",
+            "systemctl restart ecs"
+        )
+
+        # Auto Scaling Group for 1 Spot Worker
+        gpu_asg = autoscaling.AutoScalingGroup(
+            self, "GPUWorkerASG",
+            vpc=vpc,
+            launch_template=spot_launch_template,
+            min_capacity=1,
+            max_capacity=1,
+            desired_capacity=1,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+        )
+
+        # Capacity Provider
+        gpu_capacity_provider = ecs.AsgCapacityProvider(
+            self, "GPUCapacityProvider",
+            auto_scaling_group=gpu_asg,
+            enable_managed_termination_protection=False,
+            enable_managed_scaling=False
+        )
+        cluster.add_asg_capacity_provider(gpu_capacity_provider)
+
+
         # Create task execution role
         task_execution_role = iam.Role(
             self, "TaskExecutionRole",
@@ -320,13 +384,12 @@ class ClipItStack(Stack):
             port_mappings=[ecs.PortMapping(container_port=8000)]
         )
 
-        # Worker service task definition
-        worker_task_definition = ecs.FargateTaskDefinition(
+        # Worker service task definition (EC2 for GPU)
+        worker_task_definition = ecs.Ec2TaskDefinition(
             self, "WorkerTaskDefinition",
-            cpu=2048,
-            memory_limit_mib=4096,
             execution_role=task_execution_role,
             task_role=task_role,
+            network_mode=ecs.NetworkMode.AWS_VPC,
             family="clip-it-worker-task"
         )
 
@@ -338,8 +401,12 @@ class ClipItStack(Stack):
                 log_group=log_group
             ),
             environment=env_vars,
-            secrets=secrets
+            secrets=secrets,
+            gpu_count=1,
+            memory_limit_mib=8192,
+            cpu=2048
         )
+
 
         # Create Application Load Balancer
         alb_security_group = ec2.SecurityGroup(
@@ -463,16 +530,21 @@ class ClipItStack(Stack):
             enable_execute_command=True  # Enable debugging
         )
 
-        worker_service = ecs.FargateService(
+        worker_service = ecs.Ec2Service(
             self, "WorkerService",
             cluster=cluster,
             task_definition=worker_task_definition,
-            desired_count=0,  # Start with 0 tasks to avoid immediate failures
+            desired_count=1,
             service_name="clip-it-worker-service",
-            assign_public_ip=True,
-            security_groups=[ecs_security_group],
-            enable_execute_command=True  # Enable debugging
+            capacity_provider_strategies=[
+                ecs.CapacityProviderStrategy(
+                    capacity_provider=gpu_capacity_provider.capacity_provider_name,
+                    weight=1
+                )
+            ],
+            enable_execute_command=True
         )
+
 
         # Register web service with target group
         web_service.attach_to_application_target_group(web_target_group)
@@ -488,16 +560,9 @@ class ClipItStack(Stack):
             target_utilization_percent=70
         )
 
-        # Create auto-scaling for worker service
-        worker_scaling = worker_service.auto_scale_task_count(
-            min_capacity=1,
-            max_capacity=5
-        )
+        # No auto-scaling for GPU worker (fixed to 1)
+        # We manually keep it at 1 for cost management as per request
 
-        worker_scaling.scale_on_cpu_utilization(
-            "WorkerCpuScaling",
-            target_utilization_percent=80
-        )
 
         # Store important values in SSM Parameter Store
         ssm.StringParameter(

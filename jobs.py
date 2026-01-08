@@ -120,24 +120,28 @@ class JobQueue:
             # For memory storage, just return None (no queuing in development)
             return None
     
-    def release_job_lock(self, job_id: str):
-        """Release the distributed lock for a job"""
-        if self.redis_client:
-            lock_key = f"job:lock:{job_id}"
-            # Only release if we own the lock
-            lock_owner = self.redis_client.get(lock_key)
-            if lock_owner == self.worker_id:
-                self.redis_client.delete(lock_key)
-                logger.info(f"Worker {self.worker_id} released lock for job {job_id}")
-            else:
-                logger.warning(f"Cannot release lock for job {job_id} - owned by {lock_owner}")
-    
     def requeue_job(self, job_id: str):
-        """Requeue a job (e.g., on failure) and release lock"""
+        """Requeue a job (e.g., on failure or interruption) and release lock"""
         if self.redis_client:
+            # Update status to 'rescheduling' for user feedback
+            self.update_job(job_id, {
+                "status": "rescheduling",
+                "message": "Resource reclamation in progress. Rescheduling job..."
+            })
             self.release_job_lock(job_id)
             self.redis_client.lpush("job_queue", job_id)
             logger.info(f"Job {job_id} requeued for retry")
+
+    def recover_stuck_jobs(self):
+        """Find jobs in 'processing' state and put them back in queue (for worker startup)"""
+        if self.redis_client:
+            logger.info("Checking for stuck jobs to recover...")
+            all_jobs = self.get_all_jobs()
+            for job_id, job in all_jobs.items():
+                if job.get("status") == "processing" or job.get("status") == "rescheduling":
+                    logger.info(f"Recovering stuck job {job_id} (status: {job.get('status')})")
+                    self.requeue_job(job_id)
+
 
     def get_all_jobs(self) -> Dict[str, Dict[str, Any]]:
         """Get all jobs (for debugging)"""
