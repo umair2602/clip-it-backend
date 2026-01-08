@@ -105,37 +105,87 @@ async def register_uploaded_video(
     description: Optional[str] = Form(None, description="Video description")
 ):
     """
-    Register a video that was uploaded to S3.
+    Register a video that was uploaded to S3 and start processing.
     """
     try:
-        # Create video record
-        video_data = VideoCreate(
-            user_id=current_user.id,
-            filename=filename,
-            title=title,
-            description=description,
-            s3_key=s3_key,
-            status=VideoStatus.UPLOADING,
-            video_type=VideoType.UPLOAD
+        logger.info(f"="*80)
+        logger.info(f"📤 UPLOAD REGISTRATION REQUEST RECEIVED")
+        logger.info(f"   User ID: {current_user.id}")
+        logger.info(f"   Video ID: {video_id}")
+        logger.info(f"   S3 Key: {s3_key}")
+        logger.info(f"   Filename: {filename}")
+        logger.info(f"   Title: {title}")
+        logger.info(f"="*80)
+        
+        # Create background processing job FIRST to get job_id
+        logger.info(f"🎯 Creating background job for uploaded video processing...")
+        job_id = job_queue.add_job(
+            "process_uploaded_video",
+            {
+                "video_id": video_id,
+                "s3_key": s3_key,
+                "user_id": current_user.id
+            }
         )
-        # Insert video and fetch the document with _id
-        db = video_service.db
-        videos_collection = db["videos"]
-        video_dict = video_data.dict()
-        result = videos_collection.insert_one(video_dict)
-        video = videos_collection.find_one({"_id": result.inserted_id})
-        # Convert ObjectId to string
-        video["_id"] = str(video["_id"])
-        video["video_id"] = video["_id"]
-        # S3 URL assertion
-        if video.get('s3_url') and not str(video['s3_url']).startswith('https://'):
-            raise HTTPException(status_code=500, detail='Non-S3 URL detected in video object!')
-        return {
-            "message": "Video registered successfully",
-            "video": video
+        logger.info(f"✅ Background job created: {job_id}")
+        
+        # Create video record in user.videos array with process_task_id set from the start
+        logger.info(f"📝 Creating video record in user.videos array...")
+        video_data_dict = {
+            "title": title or filename,
+            "description": description or "Uploaded video",
+            "filename": filename,
+            "s3_key": s3_key,
+            "status": VideoStatus.PROCESSING,
+            "video_type": VideoType.UPLOAD,
+            "process_task_id": job_id,  # Set immediately!
+            "job_id": job_id
         }
+        
+        created_video_id = await create_user_video(current_user.id, video_data_dict)
+        
+        if not created_video_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create video record"
+            )
+        
+        logger.info(f"="*80)
+        logger.info(f"🎉 UPLOAD REGISTRATION SUCCESSFUL")
+        logger.info(f"   Video ID: {created_video_id}")
+        logger.info(f"   Job ID: {job_id}")
+        logger.info(f"   Process Task ID: {job_id}")
+        logger.info(f"   Status: processing")
+        logger.info(f"="*80)
+        
+        return {
+            "message": "Video registered successfully and processing started",
+            "video": {
+                "video_id": created_video_id,
+                "id": created_video_id,
+                "title": title or filename,
+                "status": "processing",
+                "process_task_id": job_id,
+                "job_id": job_id,
+                "s3_key": s3_key,
+                "video_type": "upload"
+            },
+            "job_id": job_id,
+            "process_task_id": job_id,
+            "status": "processing"
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error registering uploaded video: {str(e)}")
+        logger.error(f"="*80)
+        logger.error(f"💥 ERROR REGISTERING UPLOADED VIDEO")
+        logger.error(f"   Error Type: {type(e).__name__}")
+        logger.error(f"   Error Message: {str(e)}")
+        logger.error(f"   User ID: {current_user.id}")
+        logger.error(f"   Video ID: {video_id}")
+        logger.error(f"="*80)
+        logger.exception("Full stack trace:")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -275,7 +325,7 @@ async def get_video_history(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     video_type: Optional[VideoType] = Query(None, description="Filter by video type"),
-    status: Optional[VideoStatus] = Query(None, description="Filter by status")
+    status_filter: Optional[VideoStatus] = Query(None, description="Filter by status")
 ):
     """
     Get user's video upload and download history.
@@ -293,7 +343,7 @@ async def get_video_history(
             page=page,
             page_size=page_size,
             video_type=video_type,
-            status=status
+            status=status_filter
         )
         
         return history
@@ -536,6 +586,54 @@ async def get_clip_history(
         
     except Exception as e:
         logger.error(f"Error getting clip history: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
+
+
+@router.post("/{video_id}/cancel")
+async def cancel_video_processing(
+    video_id: str,
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """
+    Cancel video processing and mark as failed.
+    
+    - **video_id**: ID of the video to cancel
+    
+    Updates the video status to 'failed' with error message indicating user cancellation.
+    """
+    try:
+        logger.info(f"🛑 Cancel request received for video {video_id} by user {current_user.id}")
+        
+        # Update video status to failed
+        update_data = {
+            "status": VideoStatus.FAILED,
+            "error_message": "Processing cancelled by user",
+            "updated_at": utc_now()
+        }
+        
+        success = await update_user_video(current_user.id, video_id, update_data)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Video not found or you don't have permission to cancel it"
+            )
+        
+        logger.info(f"✅ Video {video_id} marked as failed (cancelled by user)")
+        
+        return {
+            "message": "Video processing cancelled successfully",
+            "video_id": video_id,
+            "status": "failed"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling video {video_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"

@@ -2,7 +2,6 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 openai>=1.0.0
-openai-whisper>=20231117
 torch>=2.0.0
 opencv-python>=4.8.0
 mediapipe>=0.10.7
@@ -26,6 +25,9 @@ argon2-cffi>=23.1.0
 pydantic[email]>=2.0.0
 s3transfer>=0.10.0
 sounddevice>=0.4.0
+librosa>=0.10.0
+soundfile>=0.12.0
+scipy>=1.11.0
 tiktoken>=0.5.0
 tqdm>=4.65.0
 httpx>=0.25.0
@@ -35,10 +37,10 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 openai>=1.0.0
-openai-whisper>=20231117
 torch>=2.0.0
 opencv-python>=4.8.0
-mediapipe>=0.10.7
+protobuf<5.0.0  # Pin for MediaPipe compatibility
+mediapipe>=0.10.7,<0.10.22  # Pin to legacy solutions API (0.10.22+ changed API)
 numpy>=1.24.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
@@ -65,13 +67,13 @@ httpx>=0.25.0
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 respx>=0.20.0
+assemblyai>=0.17.0
 
-# Speaker diarization dependencies
-pyannote.audio
-pyannote.core
-pyannote.database
-pyannote.metrics
-soundfile  # Required for pyannote.audio to load audio files
+# Google API client
+google-auth
+google-auth-oauthlib
+google-api-python-client
 
-# WhisperX for word-level alignment with speaker diarization
-whisperx
+# TalkNet ASD (Active Speaker Detection)
+gdown>=4.7.0
+python_speech_features>=0.6.0

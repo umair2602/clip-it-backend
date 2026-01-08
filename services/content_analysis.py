@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 aclient = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
-async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
+async def analyze_content(transcript: Dict[str, Any], target_clip_duration: int) -> List[Dict[str, Any]]:
     """Analyze transcript to identify engaging segments.
 
     Args:
         transcript: Transcript from Whisper with segments and timestamps.
                    May include 'transcript_for_ai' field with speaker-labeled text.
+        target_clip_duration: Target duration for clips in seconds (from frontend)
 
     Returns:
         List of engaging segments with start and end times
@@ -35,6 +36,7 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
         segments = transcript.get("segments", [])
 
         logger.info(f"Analyzing transcript with {len(segments)} segments")
+        logger.info(f"Target clip duration: {target_clip_duration}s")
 
         # Handle empty segments gracefully - this is valid for silent videos
         if not segments:
@@ -59,7 +61,8 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
             # Use the pre-formatted AI transcript directly
             engaging_segments = await identify_engaging_segments_from_text(
                 transcript["transcript_for_ai"],
-                segments  # Pass original segments for timestamp reference
+                segments,  # Pass original segments for timestamp reference
+                target_clip_duration=target_clip_duration
             )
         else:
             logger.info("Using basic transcript segments (no speaker labels) for AI analysis")
@@ -75,7 +78,7 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
 
             # Use OpenAI to identify engaging segments
-            engaging_segments = await identify_engaging_segments(formatted_segments)
+            engaging_segments = await identify_engaging_segments(formatted_segments, target_clip_duration=target_clip_duration)
 
         return engaging_segments
 
@@ -86,7 +89,8 @@ async def analyze_content(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 async def identify_engaging_segments_from_text(
     transcript_text: str,
-    segments: List[Dict[str, Any]]
+    segments: List[Dict[str, Any]],
+    target_clip_duration: int
 ) -> List[Dict[str, Any]]:
     """Use OpenAI to identify engaging segments from pre-formatted transcript text.
     
@@ -95,11 +99,17 @@ async def identify_engaging_segments_from_text(
     Args:
         transcript_text: Pre-formatted transcript with speaker labels (e.g., transcript_for_ai)
         segments: Original segments for reference
+        target_clip_duration: Target duration for clips in seconds
         
     Returns:
         List of engaging segments with start and end times
     """
     logger.info(f"Identifying engaging segments from pre-formatted transcript")
+    logger.info(f"Target clip duration: {target_clip_duration}s")
+    
+    # Calculate duration window around target (+/- 10%)
+    min_duration = max(15, int(target_clip_duration * 0.9))  # -10% of target, minimum 15s
+    max_duration = min(180, int(target_clip_duration * 1.1))  # +10% of target, maximum 180s
     
     # Log the exact transcript being sent to AI
     logger.info("="*70)
@@ -120,79 +130,177 @@ async def identify_engaging_segments_from_text(
         total_duration = 0.0
         total_minutes = 0
 
-    # Compute dynamic target clip counts (aiming for many clips on long videos)
-    # Rough density: ~1 clip per 2 minutes, clamped to MAX_CLIPS_PER_EPISODE
-    rough_target = int(total_duration / 120) if total_duration > 0 else 6
-    target_min = max(6 if total_minutes < 20 else 8, min(rough_target, settings.MAX_CLIPS_PER_EPISODE))
-    target_max = min(target_min + 10, settings.MAX_CLIPS_PER_EPISODE)
+    # Compute dynamic target clip counts (conservative formula for quality over quantity)
+    # Rough density: ~1 clip per 3-4 minutes, scaled down for all video lengths
+    rough_target = max(2, int(total_duration / 180)) if total_duration > 0 else 2
+    target_min = min(rough_target, 3)  # Start with 2-3 clips minimum
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Add only 2 more for range
 
     # Log targets
     logger.info(f"Clip targets (speaker-labeled): duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
 
-    # Create prompt for OpenAI with explicit targets
+    # Enhanced prompt that leverages AssemblyAI's perfect sentence boundaries
     prompt = f"""
-        You are an expert AI that identifies viral-worthy video clips from audio transcripts. You will be given a transcript with speaker labels and timestamps in the format:
+You are an expert AI specialized in extracting viral-worthy video clips from speaker-diarized transcripts. You have been given a PERFECTLY FORMATTED transcript where each line represents a complete sentence with precise timestamps and speaker labels:
 
-        [START_TIME - END_TIME] SPEAKER_XX: spoken sentence
+FORMAT: [START_TIME - END_TIME] SPEAKER_X: complete sentence
 
-        VIDEO DURATION (approx): ~{total_minutes} minutes
-        TARGET OUTPUT: Generate at least {target_min} and up to {target_max} genuinely engaging clips. If you discover more than {target_max} excellent moments, return the best {target_max}. If fewer exist, return as many as truly engaging.
-        DISTRIBUTION: Spread clips across the entire video (beginning/middle/end). Avoid clustering in one section.
+VIDEO DURATION: ~{total_minutes} minutes
+TARGET: Generate {target_min}-{target_max} exceptional clips (quality over quantity)
 
-        What makes a GREAT clip (prioritize these):
-        ✅ Controversial or surprising statements
-        ✅ Strong opinions or hot takes  
-        ✅ Funny moments, jokes, or witty remarks
-        ✅ Unexpected facts or revelations
-        ✅ Emotional stories or personal anecdotes
-        ✅ Practical advice or life tips
-        ✅ Debates, disagreements, or tension between speakers
-        ✅ "Aha!" moments or insights
-        ✅ Behind-the-scenes revelations
-        ✅ Predictions or bold claims
+═══════════════════════════════════════════════════════════════
+🎯 CRITICAL BOUNDARY RULES (MUST FOLLOW):
+═══════════════════════════════════════════════════════════════
 
-        STRICT REQUIREMENTS:
-        • Each clip MUST be 15-180 seconds (prefer 20-60 seconds)
-        • Generate MULTIPLE clips - scan the ENTIRE transcript
-        • Each clip should be from a DIFFERENT part of the conversation
-        • Clips should be STANDALONE - no prior context needed
-        • Focus on the MOST engaging parts that could go viral
+1. **SENTENCE BOUNDARIES ARE SACRED**:
+   - ✅ ALWAYS start at [START_TIME] of a sentence
+   - ✅ ALWAYS end at [END_TIME] of a sentence
+   - ❌ NEVER start or end mid-sentence
+   - ❌ NEVER use arbitrary timestamps between sentences
 
-        SEARCH STRATEGY - Apply this systematically:
-        1. Scan the beginning (first 25% of transcript) - find 1-2 clips
-        2. Scan the middle (25%-75% of transcript) - find 2-4 clips  
-        3. Scan the end (last 25% of transcript) - find 1-2 clips
-        4. Look for topic changes, energy shifts, laughter, emphasis
-        5. Identify moments where speakers disagree or debate
-        6. Find moments where speakers get excited or passionate
+2. **SELECTING START POINT**:
+   - Find the interesting moment
+   - Go back to find the FIRST sentence that provides necessary context
+   - Use that sentence's START_TIME as your clip start
+   - Example: If exciting moment is at [120.5], but setup starts at [115.2], use 115.2
 
-        DURATION CALCULATION:
-        - Find the interesting moment
-        - Expand backwards to include setup/context (2-5 seconds)
-        - Expand forwards to include the complete thought/punchline
-        - Ensure total duration is 15-180 seconds
-        - If naturally short, add surrounding context to reach 15+ seconds
+3. **SELECTING END POINT**:
+   - From the interesting moment, continue forward to the LAST sentence that completes the thought
+   - Use that sentence's END_TIME as your clip end
+   - Example: If punchline is at [135.8] but speaker continues to [140.3], use 140.3
 
-                CLIP GENERATION STRATEGY:
-        - Generate clips based ONLY on the number of genuinely interesting moments found
-                - Prefer {target_min}-{target_max} clips given the video length; do not exceed {target_max}
-        - Quality over quantity - only include truly engaging segments
-                - If you find only 2 great moments, return 2 clips; if you find more than {target_max}, select the strongest {target_max}
+4. **SPEAKER TURN AWARENESS**:
+   - If a clip involves dialogue, include complete exchanges
+   - Don't end mid-conversation - wait for a natural conversational pause
+   - Example: 
+     ❌ BAD: [100.0 - 110.0] cuts off during SPEAKER_B's response
+     ✅ GOOD: [100.0 - 115.5] includes full exchange: A asks, B responds completely
 
-        IMPORTANT: Don't just pick one good moment - find ALL engaging segments throughout the video. Think like a social media editor who extracts every viral-worthy moment.
+═══════════════════════════════════════════════════════════════
+🔥 WHAT MAKES A VIRAL CLIP:
+═══════════════════════════════════════════════════════════════
 
-        Return ONLY a JSON array with this format:
-        [
-          {{"start_time": X, "end_time": Y, "title": "Compelling Title"}}
-        ]
+**TIER 1 - MUST INCLUDE** (highest priority):
+  • Controversial statements or hot takes
+  • Shocking revelations or plot twists
+  • Heated debates or disagreements
+  • Unexpected punchlines or comebacks
+  • "Did they really just say that?" moments
 
-        Transcript to analyze:
-        {transcript_text}
-        """
+**TIER 2 - HIGHLY VALUABLE**:
+  • Funny jokes or witty remarks
+  • Emotional stories that give chills
+  • Practical life-changing advice
+  • Behind-the-scenes secrets
+  • Bold predictions or claims
+
+**TIER 3 - GOOD TO INCLUDE**:
+  • Interesting facts or statistics
+  • Personal anecdotes with lessons
+  • "Aha!" moments or insights
+  • Topic introductions that hook viewers
+
+═══════════════════════════════════════════════════════════════
+📋 SELECTION PROCESS:
+═══════════════════════════════════════════════════════════════
+
+STEP 1: READ THE ENTIRE TRANSCRIPT
+- Identify ALL potentially viral moments
+- Mark moments where you felt: surprised, intrigued, entertained, or informed
+
+STEP 2: PRIORITIZE BY TIER
+- Start with Tier 1 moments (controversial, shocking)
+- Add Tier 2 moments (funny, emotional)
+- Fill remaining slots with Tier 3 (interesting, insightful)
+
+STEP 3: FOR EACH SELECTED MOMENT:
+a) Find the sentence containing the key moment
+b) Expand backwards: What context is needed? (usual: 1-3 sentences)
+c) Expand forwards: Is the thought complete? (usual: 1-2 sentences)
+d) Verify: Does this stand alone without prior video knowledge?
+e) Check duration: {min_duration}-{max_duration} seconds? (target ~{target_clip_duration}s)
+
+STEP 4: APPLY BOUNDARIES
+- Use START_TIME of first sentence
+- Use END_TIME of last sentence
+- NEVER modify timestamps - use exact values from transcript
+
+═══════════════════════════════════════════════════════════════
+⚙️ TECHNICAL REQUIREMENTS:
+═══════════════════════════════════════════════════════════════
+
+Duration: {min_duration}-{max_duration} seconds (target ~{target_clip_duration} seconds)
+Count: {target_min} minimum, {target_max} maximum
+Distribution: Spread across beginning (25%), middle (50%), end (25%)
+Overlap: Clips should NOT overlap in time
+Quality: Every clip should be genuinely share-worthy
+
+═══════════════════════════════════════════════════════════════
+📝 EXAMPLES (SHOWING CORRECT BOUNDARY SELECTION):
+═══════════════════════════════════════════════════════════════
+
+EXAMPLE 1: Controversial Statement
+Transcript:
+[100.0 - 103.5] SPEAKER_A: So here's my controversial take.
+[103.5 - 108.2] SPEAKER_A: I think social media is actually making us happier, not sadder.
+[108.2 - 112.8] SPEAKER_A: Everyone says it's toxic, but I disagree completely.
+[112.8 - 115.0] SPEAKER_B: Wait, really?
+[115.0 - 120.5] SPEAKER_B: That's a hot take considering all the research.
+
+✅ CORRECT CLIP: {{"start_time": 100.0, "end_time": 120.5, "title": "Social Media Makes Us Happier?"}}
+   - Includes setup ("here's my controversial take")
+   - Includes full statement
+   - Includes reaction (adds context/tension)
+   - Uses exact sentence boundaries
+
+❌ WRONG: {{"start_time": 103.5, "end_time": 112.8"}}
+   - Missing setup context
+   - Cuts off mid-conversation (no reaction)
+
+EXAMPLE 2: Funny Moment
+Transcript:
+[200.0 - 205.3] SPEAKER_A: I tried to impress my date by cooking.
+[205.3 - 210.8] SPEAKER_A: I set off the fire alarm making toast.
+[210.8 - 213.5] SPEAKER_B: Toast? You set off the alarm with toast?
+[213.5 - 218.2] SPEAKER_A: In my defense, it was very crispy toast.
+
+✅ CORRECT CLIP: {{"start_time": 200.0, "end_time": 218.2, "title": "Fire Alarm From Toast"}}
+   - Complete story arc: setup → punchline → reaction → callback
+   - Natural ending after final joke
+
+═══════════════════════════════════════════════════════════════
+🎬 OUTPUT FORMAT:
+═══════════════════════════════════════════════════════════════
+
+Return ONLY a JSON array. Each clip must have:
+- start_time: EXACT timestamp from transcript (sentence START_TIME)
+- end_time: EXACT timestamp from transcript (sentence END_TIME)  
+- title: Compelling, curiosity-inducing title (4-8 words)
+
+Example:
+[
+  {{"start_time": 100.0, "end_time": 120.5, "title": "Why I Quit My $500K Job"}},
+  {{"start_time": 300.2, "end_time": 335.8, "title": "The Hardest Truth About Success"}}
+]
+
+═══════════════════════════════════════════════════════════════
+📊 TRANSCRIPT TO ANALYZE:
+═══════════════════════════════════════════════════════════════
+
+{transcript_text}
+
+═══════════════════════════════════════════════════════════════
+REMEMBER:
+- Use EXACT timestamps from sentences (don't create new ones)
+- NEVER cut mid-sentence or mid-word
+- Prioritize viral potential over number of clips
+- Each clip should make someone want to watch / share immediately
+═══════════════════════════════════════════════════════════════
+"""
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {
                 "role": "system",
@@ -200,8 +308,8 @@ async def identify_engaging_segments_from_text(
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.7,
-        max_tokens=4000,
+        temperature=0.8,
+        max_tokens=8000,
         n=1,
         stop=None,
     )
@@ -235,17 +343,19 @@ async def identify_engaging_segments_from_text(
             # Log segment info for debugging
             logger.info(f"Segment: {seg.get('title')} | Duration: {duration:.1f}s | Start: {seg.get('start_time')}s | End: {seg.get('end_time')}s")
             
-            if duration < 15:
-                logger.warning(
-                    f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < 15s minimum)"
-                )
-                continue
-            
-            if duration > 180:
-                logger.warning(
-                    f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > 180s maximum, 3 minutes)"
-                )
-                continue
+            # DISABLED: Duration filtering - let AI-generated clips pass through
+            # The AI prompt already guides duration, so trust the AI's judgment
+            # if duration < min_duration:
+            #     logger.warning(
+            #         f"Skipping segment '{seg.get('title')}' - too short ({duration:.1f}s < {min_duration}s minimum)"
+            #     )
+            #     continue
+            # 
+            # if duration > max_duration:
+            #     logger.warning(
+            #         f"Skipping segment '{seg.get('title')}' - too long ({duration:.1f}s > {max_duration}s maximum)"
+            #     )
+            #     continue
             
             valid_segments.append(seg)
 
@@ -269,11 +379,13 @@ async def identify_engaging_segments_from_text(
 
 async def identify_engaging_segments(
     segments: List[Dict[str, Any]],
+    target_clip_duration: int
 ) -> List[Dict[str, Any]]:
     """Use OpenAI to identify engaging segments in the transcript.
 
     Args:
         segments: List of transcript segments with timestamps
+        target_clip_duration: Target duration for clips in seconds
 
     Returns:
         List of engaging segments with start and end times
@@ -281,6 +393,11 @@ async def identify_engaging_segments(
     """
 
     logger.info(f"Identifying engaging segments from {len(segments)} transcript segments")
+    logger.info(f"Target clip duration: {target_clip_duration}s")
+    
+    # Calculate duration window around target (+/- 10%)
+    min_duration = max(15, int(target_clip_duration * 0.9))  # -10% of target, minimum 15s
+    max_duration = min(180, int(target_clip_duration * 1.1))  # +10% of target, maximum 180s
 
     # Combine segments into a single text with timestamps
     transcript_text = ""
@@ -310,9 +427,13 @@ async def identify_engaging_segments(
         total_duration = 0.0
         total_minutes = 0
 
-    rough_target = int(total_duration / 120) if total_duration > 0 else 6
-    target_min = max(6 if total_minutes < 20 else 8, min(rough_target, settings.MAX_CLIPS_PER_EPISODE))
-    target_max = min(target_min + 10, settings.MAX_CLIPS_PER_EPISODE)
+    # Compute dynamic target clip counts (balanced formula for good coverage)
+    # Rough density: ~1 clip per 2.5 minutes for comprehensive coverage
+    rough_target = min(max(4, int(total_duration / 150)), settings.MAX_CLIPS_PER_EPISODE) if total_duration > 0 else 4
+    # For videos over 30 mins, ensure minimum of 8 clips
+    target_min = 8 if total_minutes >= 30 else max(4, min(rough_target - 1, 6))
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Tight range near target
+    target_max = min(rough_target + 2, settings.MAX_CLIPS_PER_EPISODE)  # Tight range near target
 
     # Log targets
     logger.info(f"Clip targets: duration~{total_minutes}m -> min {target_min}, max {target_max}, cap {settings.MAX_CLIPS_PER_EPISODE}")
@@ -334,23 +455,21 @@ async def identify_engaging_segments(
         - Be valuable or entertaining to people
 
         CRITICAL DURATION REQUIREMENT - READ CAREFULLY:
-        - Each clip should be between 15-180 seconds long to ensure proper context and engagement
-        - Target around 30-60 seconds for optimal social media performance
-        - MINIMUM: 15 seconds (clips shorter than this will be REJECTED)
-        - MAXIMUM: 180 seconds (3 minutes - for in-depth stories/discussions)
+        - Each clip should be between {min_duration}-{max_duration} seconds long (target ~{target_clip_duration}s)
+        - Target around {target_clip_duration} seconds for optimal social media performance
+        - MINIMUM: {min_duration} seconds (clips shorter than this will be REJECTED)
+        - MAXIMUM: {max_duration} seconds
         - Choose duration based on the content: expand timestamps to capture complete thoughts/stories
-        - Example: If an interesting moment spans 25 seconds, set start_time and end_time to capture those 25 seconds
-        - Example: If a story takes 45 seconds to tell completely, use the full 45 seconds
-        - Example: For a quick insight at 500s that takes 35 seconds: start_time=500, end_time=535
+        - Example: If an interesting moment spans {target_clip_duration} seconds, set start_time and end_time to capture those {target_clip_duration} seconds
 
         TIMESTAMP CALCULATION GUIDELINES:
         1. Identify the most interesting moment or topic in a section
         2. Find where the topic/story BEGINS (include a bit of context if needed)
         3. Find where the topic/story ENDS (ensure the thought is complete)
         4. Calculate duration = end_time - start_time
-        5. Ensure duration is >= 15 seconds AND <= 180 seconds
-        6. If a topic is naturally shorter than 15 seconds, expand to include surrounding context
-        7. If a topic is longer than 180 seconds, select the most compelling 30-90 second portion
+        5. Ensure duration is >= {min_duration} seconds AND <= {max_duration} seconds
+        6. If a topic is naturally shorter than {min_duration} seconds, expand to include surrounding context
+        7. If a topic is longer than {max_duration} seconds, select the most compelling {target_clip_duration} second portion
 
         VIDEO DURATION (approx): ~{total_minutes} minutes
         TARGET OUTPUT: Generate at least {target_min} and up to {target_max} genuinely engaging clips. If you discover more than {target_max} excellent moments, return the best {target_max}. If fewer exist, return as many as truly engaging.
@@ -369,8 +488,8 @@ async def identify_engaging_segments(
         - "title": a short, compelling title (4–10 words)
 
         MANDATORY VALIDATION: Before submitting your response, verify EVERY clip meets these requirements:
-        - Duration >= 15 seconds (MINIMUM - anything less will be rejected and wasted)
-        - Duration <= 180 seconds (MAXIMUM - 3 minutes for in-depth content)
+        - Duration >= {min_duration} seconds (MINIMUM - anything less will be rejected)
+        - Duration <= {max_duration} seconds (MAXIMUM)
         - Complete thought/story (don't cut off mid-sentence)
         - Self-contained (makes sense without prior context)
 
@@ -382,7 +501,7 @@ async def identify_engaging_segments(
 
     # Call OpenAI API
     response = await aclient.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {
                 "role": "system",
@@ -390,8 +509,8 @@ async def identify_engaging_segments(
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.7,  # Increased for more creative clip detection
-        max_tokens=4000,  # Increased to handle more clips
+        temperature=0.8,  # Increased for more creative clip detection
+        max_tokens=8000,  # Increased to handle more clips
         n=1,
         stop=None,
     )
@@ -431,22 +550,25 @@ async def identify_engaging_segments(
                 duration = segment["end_time"] - segment["start_time"]
                 logger.info(f"Segment {i}: '{segment.get('title', 'No title')}' - Duration: {duration:.1f}s (start: {segment['start_time']:.1f}, end: {segment['end_time']:.1f})")
                 
-                if duration >= settings.MIN_CLIP_DURATION and duration <= settings.MAX_CLIP_DURATION:
-                    valid_segments.append(
-                        {
-                            "start_time": segment["start_time"],
-                            "end_time": segment["end_time"],
-                            "title": segment.get("title", "Engaging Clip"),
-                            "description": segment.get("description", ""),
-                        }
-                    )
-                    logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s)")
-                elif duration > settings.MAX_CLIP_DURATION:
-                    # If segment is too long, we could split it into multiple 30-second clips
-                    # For now, we'll just skip it and let AI handle the segmentation
-                    logger.warning(f"  ❌ REJECTED (too long): {duration:.1f} seconds - Maximum is {settings.MAX_CLIP_DURATION}s")
-                else:
-                    logger.warning(f"  ❌ REJECTED (too short): {duration:.1f} seconds - Minimum is {settings.MIN_CLIP_DURATION}s")
+                # DISABLED: Duration filtering - let AI-generated clips pass through
+                # The AI prompt already guides duration, so trust the AI's judgment
+                # if duration >= min_duration and duration <= max_duration:
+                #     ... (accept)
+                # elif duration > max_duration:
+                #     ... (reject too long)
+                # else:
+                #     ... (reject too short)
+                
+                # Accept all segments regardless of duration
+                valid_segments.append(
+                    {
+                        "start_time": segment["start_time"],
+                        "end_time": segment["end_time"],
+                        "title": segment.get("title", "Engaging Clip"),
+                        "description": segment.get("description", ""),
+                    }
+                )
+                logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s)")
 
         logger.info("=" * 60)
         # Enforce global cap to avoid over-generation
@@ -487,7 +609,7 @@ async def generate_clip_title(segment_text: str) -> str:
 
     try:
         response = await aclient.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {
                     "role": "system",

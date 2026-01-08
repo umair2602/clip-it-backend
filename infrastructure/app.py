@@ -276,6 +276,12 @@ class ClipItStack(Stack):
                     parameter_name="/clip-it/sieve-api-key"
                 )
             ),
+            "RAPIDAPI_YOUTUBE_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "RapidAPIYouTubeKeyRef",
+                    parameter_name="/clip-it/rapidapi-youtube-key"
+                )
+            ),
             "MONGODB_URL": ecs.Secret.from_ssm_parameter(
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "MongoDBURLRef",
@@ -358,6 +364,48 @@ class ClipItStack(Stack):
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "AssemblyAIAPIKeyRef",
                     parameter_name="/clip-it/assemblyai-api-key"
+                )
+            ),
+            "YOUTUBE_CLIENT_ID": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "YouTubeClientIDRef",
+                    parameter_name="/clip-it/youtube-client-id"
+                )
+            ),
+            "YOUTUBE_CLIENT_SECRET": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "YouTubeClientSecretRef",
+                    parameter_name="/clip-it/youtube-client-secret"
+                )
+            ),
+            "YOUTUBE_REDIRECT_URI": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "YouTubeRedirectURIRef",
+                    parameter_name="/clip-it/youtube-redirect-uri"
+                )
+            ),
+            "INSTA_APP_ID": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "InstaAppIDRef",
+                    parameter_name="/clip-it/insta-app-id"
+                )
+            ),
+            "INSTA_APP_SECRET": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "InstaAppSecretRef",
+                    parameter_name="/clip-it/insta-app-secret"
+                )
+            ),
+            "INSTA_REDIRECT_URI": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "InstaRedirectURIRef",
+                    parameter_name="/clip-it/insta-redirect-uri"
+                )
+            ),
+            "INSTA_APP_SCOPE": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "InstaAppScopeRef",
+                    parameter_name="/clip-it/insta-app-scope"
                 )
             ),
         }

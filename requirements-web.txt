@@ -8,22 +8,49 @@ boto3>=1.34.0
 Pillow>=10.0.0
 opencv-python>=4.8.0
 openai>=1.0.0
+assemblyai>=0.17.0
 openai-whisper>=20231117
 torch>=2.0.0
-mediapipe>=0.10.7
+protobuf<5.0.0  # Pin for MediaPipe compatibility
+mediapipe>=0.10.7,<0.10.22  # Pin to legacy solutions API (0.10.22+ changed API)
 numpy>=1.24.0
 redis>=5.0.0
 celery[redis]>=5.3.0
 pymongo>=4.6.0
 python-jose[cryptography]>=3.3.0
 passlib>=1.7.4
+bcrypt==4.3.0
 argon2-cffi>=23.1.0
 pydantic[email]>=2.0.0
+email-validator
 s3transfer>=0.10.0
 httpx>=0.25.0
 ffmpeg-python>=0.2.0
 sievedata
 pytube>=15.0.0
 pytubefix>=6.0.0
+yt-dlp>=2024.0.0
+psutil>=5.9.0
+sounddevice>=0.4.0
+tiktoken>=0.5.0
+tqdm>=4.65.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+respx>=0.20.0
 requests>=2.31.0
 starlette>=0.27.0
+
+# Google API client
+google-auth>=2.20.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.90.0
+requests-oauthlib>=1.3.1
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+scipy>=1.11.0
+
+# TalkNet ASD (Active Speaker Detection)
+gdown>=4.7.0
+python_speech_features>=0.6.0

@@ -13,7 +13,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, Depends, Response
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    Depends,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,14 +43,28 @@ from services.content_analysis import analyze_content
 from services.face_tracking import track_faces
 
 # Import services
-from services.transcription import load_model, transcribe_audio, transcribe_audio_sync
 from services.video_processing import create_clip, generate_thumbnail, process_video
-from services.user_video_service import create_user_video, update_video_s3_url, get_user_video, get_user_videos, get_user_clips, add_clip_to_video
+from services.user_video_service import (
+    create_user_video,
+    update_video_s3_url,
+    get_user_video,
+    get_user_videos,
+    get_user_clips,
+    add_clip_to_video,
+    update_user_video,
+)
 
 # Import S3 client and validator
 from utils.s3_storage import s3_client
-from utils.s3_storage_multipart import multipart_s3_client  # For optimized multipart uploads
-from utils.s3_validator import assert_s3_url, validate_response_urls, sanitize_urls_for_response, assert_response_urls
+from utils.s3_storage_multipart import (
+    multipart_s3_client,
+)  # For optimized multipart uploads
+from utils.s3_validator import (
+    assert_s3_url,
+    validate_response_urls,
+    sanitize_urls_for_response,
+    assert_response_urls,
+)
 from utils.sieve_downloader import download_youtube_video_sieve
 
 # Import YouTube downloader (both original and new Sieve version)
@@ -53,6 +76,7 @@ from routes.auth import router as auth_router, get_current_user
 # Import video routes
 from routes.video import router as video_router
 from routes.tiktok import router as tiktok_router
+from routes.youtube import router as youtube_router
 
 # Import models
 from models.user import User, VideoType, VideoStatus
@@ -63,6 +87,7 @@ from database.connection import mongodb, get_database
 from bson import ObjectId
 
 import cv2
+
 
 def generate_video_thumbnail(video_path, thumbnail_path, timestamp=1.0):
     cap = cv2.VideoCapture(video_path)
@@ -80,22 +105,25 @@ def generate_video_thumbnail(video_path, thumbnail_path, timestamp=1.0):
 # PARALLEL CLIP PROCESSING FUNCTIONS
 # ============================================================================
 
+
 async def process_single_clip_async(
     clip: dict,
     index: int,
     file_path: str,
     video_id: str,
     output_dir: str,
-    s3_client_instance
+    s3_client_instance,
 ) -> tuple:
     """
     Process a single clip completely (creation + thumbnail + upload).
-    
+
     Returns tuple of (index, result_dict) for result tracking
     """
     try:
-        logging.info(f"[PARALLEL] Starting async processing of clip {index}: {clip.get('id')}")
-        
+        logging.info(
+            f"[PARALLEL] Starting async processing of clip {index}: {clip.get('id')}"
+        )
+
         # Step 1: Create the clip
         clip_path = await create_clip(
             video_path=file_path,
@@ -104,47 +132,55 @@ async def process_single_clip_async(
             end_time=clip["end_time"],
             clip_id=clip.get("id"),
         )
-        
+
         if not clip_path:
             logging.warning(f"[PARALLEL] Failed to create clip {index}")
             return index, None
-        
+
         logging.info(f"[PARALLEL] Clip {index} created at {clip_path}")
-        
+
         # Step 2: Generate thumbnail
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_thumb:
             thumbnail_path = temp_thumb.name
-        
+
         clip_duration = clip.get("end_time", 0) - clip.get("start_time", 0)
         thumbnail_timestamp = (
-            min(clip_duration / 3, clip_duration - 0.5)
-            if clip_duration > 1.5
-            else 0
+            min(clip_duration / 3, clip_duration - 0.5) if clip_duration > 1.5 else 0
         )
-        
+
         generated_path = await generate_thumbnail(
             clip_path, thumbnail_path, thumbnail_timestamp
         )
-        
+
         logging.info(f"[PARALLEL] Clip {index} thumbnail generated: {generated_path}")
-        
+
         # Step 3: Upload to S3 (clip and thumbnail in parallel)
         clip_upload = asyncio.create_task(
-            _upload_clip_to_s3_async(clip_path, video_id, clip.get("id"), s3_client_instance)
-        )
-        
-        thumbnail_upload = None
-        if generated_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
-            thumbnail_upload = asyncio.create_task(
-                _upload_thumbnail_to_s3_async(thumbnail_path, video_id, clip.get("id"), s3_client_instance)
+            _upload_clip_to_s3_async(
+                clip_path, video_id, clip.get("id"), s3_client_instance
             )
-        
+        )
+
+        thumbnail_upload = None
+        if (
+            generated_path
+            and os.path.exists(thumbnail_path)
+            and os.path.getsize(thumbnail_path) > 0
+        ):
+            thumbnail_upload = asyncio.create_task(
+                _upload_thumbnail_to_s3_async(
+                    thumbnail_path, video_id, clip.get("id"), s3_client_instance
+                )
+            )
+
         # Wait for both uploads
         clip_result = await clip_upload
         thumb_result = await thumbnail_upload if thumbnail_upload else (False, None)
-        
-        logging.info(f"[PARALLEL] Clip {index} upload: {clip_result[0]}, Thumbnail upload: {thumb_result[0]}")
-        
+
+        logging.info(
+            f"[PARALLEL] Clip {index} upload: {clip_result[0]}, Thumbnail upload: {thumb_result[0]}"
+        )
+
         # Step 4: Cleanup
         try:
             if os.path.exists(clip_path):
@@ -153,55 +189,69 @@ async def process_single_clip_async(
                 os.unlink(thumbnail_path)
         except Exception as cleanup_err:
             logging.warning(f"[PARALLEL] Cleanup error for clip {index}: {cleanup_err}")
-        
+
         # Return results
         return index, {
-            'clip_s3_key': clip_result[1],
-            'thumbnail_s3_key': thumb_result[1],
-            'title': clip.get('title'),
-            'start_time': clip.get('start_time'),
-            'end_time': clip.get('end_time'),
+            "clip_s3_key": clip_result[1],
+            "thumbnail_s3_key": thumb_result[1],
+            "title": clip.get("title"),
+            "start_time": clip.get("start_time"),
+            "end_time": clip.get("end_time"),
         }
-        
+
     except Exception as e:
         logging.error(f"[PARALLEL] Error processing clip {index}: {str(e)}")
         import traceback
+
         logging.error(f"[PARALLEL] Traceback: {traceback.format_exc()}")
         return index, None
 
 
-async def _upload_clip_to_s3_async(clip_path: str, video_id: str, clip_id: str, s3_client_instance) -> tuple:
+async def _upload_clip_to_s3_async(
+    clip_path: str, video_id: str, clip_id: str, s3_client_instance
+) -> tuple:
     """Wrapper for async S3 clip upload (runs in thread pool)
-    
+
     Automatically uses multipart upload for large files (>50MB)
     """
     loop = asyncio.get_event_loop()
-    
+
     # Check file size to decide upload method
     file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
-    
+
     # Use multipart for files > 50MB, regular for smaller
     if file_size > 50 * 1024 * 1024:
-        logging.info(f"[PARALLEL] File size {file_size / 1024 / 1024:.1f}MB - using optimized multipart upload")
+        logging.info(
+            f"[PARALLEL] File size {file_size / 1024 / 1024:.1f}MB - using optimized multipart upload"
+        )
         return await loop.run_in_executor(
             None,
-            lambda: multipart_s3_client.upload_clip_to_s3_optimized(clip_path, video_id, clip_id)
+            lambda: multipart_s3_client.upload_clip_to_s3_optimized(
+                clip_path, video_id, clip_id
+            ),
         )
     else:
-        logging.info(f"[PARALLEL] File size {file_size / 1024 / 1024:.1f}MB - using standard upload")
+        logging.info(
+            f"[PARALLEL] File size {file_size / 1024 / 1024:.1f}MB - using standard upload"
+        )
         return await loop.run_in_executor(
             None,
-            lambda: s3_client_instance.upload_clip_to_s3(clip_path, video_id, clip_id)
+            lambda: s3_client_instance.upload_clip_to_s3(clip_path, video_id, clip_id),
         )
 
 
-async def _upload_thumbnail_to_s3_async(thumb_path: str, video_id: str, clip_id: str, s3_client_instance) -> tuple:
+async def _upload_thumbnail_to_s3_async(
+    thumb_path: str, video_id: str, clip_id: str, s3_client_instance
+) -> tuple:
     """Wrapper for async S3 thumbnail upload (runs in thread pool)"""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None,
-        lambda: s3_client_instance.upload_thumbnail_to_s3(thumb_path, video_id, clip_id)
+        lambda: s3_client_instance.upload_thumbnail_to_s3(
+            thumb_path, video_id, clip_id
+        ),
     )
+
 
 # ============================================================================
 # END PARALLEL CLIP PROCESSING FUNCTIONS
@@ -214,7 +264,7 @@ async def _upload_thumbnail_to_s3_async(thumb_path: str, video_id: str, clip_id:
 app = FastAPI(
     title="AI Podcast Clipper API",
     description="API for AI-powered podcast clipping with user authentication",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Include authentication routes
@@ -226,8 +276,17 @@ app.include_router(video_router)
 # Include TikTok routes
 app.include_router(tiktok_router)
 
+# Include YouTube routes
+app.include_router(youtube_router)
+
+# Include Instagram routes
+from routes.instagram import router as instagram_router
+
+app.include_router(instagram_router)
+
 # TikTok site verification
 VERIFICATION_FILENAME = "tiktok4QPEpS6YFmd4DmFfdr2Kjw4YKsWvEWky.txt"
+
 
 @app.get(f"/{VERIFICATION_FILENAME}", include_in_schema=False)
 def serve_tiktok_verification():
@@ -236,19 +295,15 @@ def serve_tiktok_verification():
     print(f"DEBUG: Verification file path: {verification_path}")
     print(f"DEBUG: File exists: {verification_path.exists()}")
     if not verification_path.exists():
-        raise HTTPException(status_code=404, detail=f"Verification file not found at {verification_path}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Verification file not found at {verification_path}",
+        )
     return FileResponse(verification_path, media_type="text/plain")
-
-
-
-# Pre-load the Whisper model
-whisper_model = None
 
 
 @app.on_event("startup")
 async def startup_event():
-    global whisper_model
-
     # Initialize MongoDB connection
     try:
         logging.info("Connecting to MongoDB...")
@@ -258,34 +313,6 @@ async def startup_event():
             logging.error("Failed to connect to MongoDB")
     except Exception as e:
         logging.error(f"Error connecting to MongoDB: {str(e)}")
-
-    # Pre-load Whisper model
-    try:
-        logging.info("Pre-loading Whisper model...")
-        # Check for GPU availability
-        import torch
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda":
-            logging.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
-            try:
-                logging.info(f"CUDA version: {torch.version.cuda}")
-            except AttributeError:
-                logging.info("CUDA version information not available")
-            logging.info(
-                f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB"
-            )
-        else:
-            logging.warning(
-                "No GPU detected. Using CPU for transcription (will be slower)"
-            )
-
-        whisper_model = load_model(model_size="tiny")
-        logging.info("Whisper model loaded successfully.")
-    except Exception as e:
-        logging.error(f"Error loading Whisper model: {str(e)}", exc_info=True)
-        # We'll continue without pre-loading and let the transcribe_audio function
-        # handle model loading when needed
 
 
 # Configure CORS
@@ -352,14 +379,16 @@ class S3UploadRequest(BaseModel):
 class YouTubeRequest(BaseModel):
     url: HttpUrl
     auto_process: bool = True
+    target_clip_duration: int  # Required - must be provided by frontend
 
 
-# DEPRECATED: In-memory storage for task status 
+# DEPRECATED: In-memory storage for task status
 # WARNING: This is NOT safe for multi-instance deployments!
 # This dictionary is NOT shared across containers - each web instance has its own copy.
 # Status should ONLY be checked via Redis job queue or MongoDB.
 # TODO: Remove all tasks[...] assignments and use only Redis/MongoDB
 tasks = {}  # ⚠️ DO NOT USE in production with multiple instances!
+
 
 # Tiktok
 @app.get(f"/tiktok{settings.TIKTOK_VERIFICATION_KEY}.txt")
@@ -369,16 +398,17 @@ async def verify_tiktok_domain():
         media_type="text/plain",
     )
 
+
 # Routes
 @app.get("/")
 async def read_root(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
-    error_description: Optional[str] = None
+    error_description: Optional[str] = None,
 ):
     """Root endpoint that handles TikTok OAuth callbacks since TikTok only verifies the base domain"""
-    
+
     # If this is a TikTok OAuth callback, handle it
     if code or state or error:
         # Handle the OAuth callback
@@ -390,19 +420,20 @@ async def read_root(
             <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
                 <h1 style="color: #ff4444;">❌ TikTok Authorization Failed</h1>
                 <p><strong>Error:</strong> {error}</p>
-                <p><strong>Description:</strong> {error_description or 'No description provided'}</p>
+                <p><strong>Description:</strong> {error_description or "No description provided"}</p>
                 <p style="color: #666; font-size: 14px;">This window will close automatically.</p>
                 <script>setTimeout(() => window.close(), 5000);</script>
             </body>
             </html>
             """)
-        
+
         if code and state:
             # Redirect to the actual TikTok callback endpoint with the parameters
             from fastapi.responses import RedirectResponse
+
             callback_url = f"/tiktok/callback/?code={code}&state={state}"
             return RedirectResponse(url=callback_url)
-    
+
     # Default response for non-OAuth requests
     return {"message": "Welcome to AI Podcast Clipper API"}
 
@@ -412,10 +443,10 @@ async def auth_endpoint(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
-    error_description: Optional[str] = None
+    error_description: Optional[str] = None,
 ):
     """Auth endpoint to handle TikTok OAuth callbacks"""
-    
+
     # If this is a TikTok OAuth callback, handle it
     if code or state or error:
         # Handle the OAuth callback
@@ -427,19 +458,20 @@ async def auth_endpoint(
             <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
                 <h1 style="color: #ff4444;">❌ TikTok Authorization Failed</h1>
                 <p><strong>Error:</strong> {error}</p>
-                <p><strong>Description:</strong> {error_description or 'No description provided'}</p>
+                <p><strong>Description:</strong> {error_description or "No description provided"}</p>
                 <p style="color: #666; font-size: 14px;">This window will close automatically.</p>
                 <script>setTimeout(() => window.close(), 5000);</script>
             </body>
             </html>
             """)
-        
+
         if code and state:
             # Redirect to the actual TikTok callback endpoint with the parameters
             from fastapi.responses import RedirectResponse
+
             callback_url = f"/tiktok/callback?code={code}&state={state}"
             return RedirectResponse(url=callback_url)
-    
+
     # Default response for non-OAuth requests
     return {"message": "Auth endpoint - TikTok OAuth callback handler"}
 
@@ -447,7 +479,7 @@ async def auth_endpoint(
 @app.get("/health")
 async def health_check():
     """Health check endpoint to verify the API is running"""
-    return {"status": "ok", "whisper_model_loaded": whisper_model is not None}
+    return {"status": "ok"}
 
 
 @app.get("/heartbeat")
@@ -509,15 +541,17 @@ async def heartbeat():
 
 @app.post("/upload")
 async def upload_video(
-    background_tasks: BackgroundTasks, 
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
     # Generate a unique ID for the video
     video_id = str(uuid.uuid4())
 
     # Create a temporary file for processing
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as temp_file:
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=f"_{file.filename}"
+    ) as temp_file:
         # Save the uploaded file to temporary location
         shutil.copyfileobj(file.file, temp_file)
         temp_file_path = temp_file.name
@@ -527,22 +561,24 @@ async def upload_video(
         success, s3_key = s3_client.upload_file_to_s3(
             temp_file_path, video_id, file.filename, file.content_type
         )
-        
+
         if not success:
             raise HTTPException(status_code=500, detail="Failed to upload file to S3")
 
         # Generate S3 URL
         s3_url = s3_client.get_object_url(s3_key)
-        
+
         # Validate S3 URL
         assert_s3_url(s3_url, "upload endpoint")
 
         logging.info(f"Video uploaded successfully to S3: {s3_url}")
 
         # Generate thumbnail after successful upload
-        thumbnail_path = tempfile.mktemp(suffix='.jpg')
+        thumbnail_path = tempfile.mktemp(suffix=".jpg")
         if generate_video_thumbnail(temp_file_path, thumbnail_path):
-            thumb_success, thumb_s3_key = s3_client.upload_thumbnail_to_s3(thumbnail_path, video_id)
+            thumb_success, thumb_s3_key = s3_client.upload_thumbnail_to_s3(
+                thumbnail_path, video_id
+            )
             if thumb_success:
                 thumbnail_url = s3_client.get_object_url(thumb_s3_key)
             else:
@@ -564,12 +600,12 @@ async def upload_video(
             "status": VideoStatus.PROCESSING,
             "video_type": VideoType.UPLOAD,
             "thumbnail_url": thumbnail_url,
-            "clip_thumbnail_url": thumbnail_url # Initialize clip_thumbnail_url
+            "clip_thumbnail_url": thumbnail_url,  # Initialize clip_thumbnail_url
         }
-        
+
         # Create video in user's videos array
         created_video_id = await create_user_video(current_user.id, video_data)
-        
+
         if not created_video_id:
             logging.error(f"Failed to create video document for user {current_user.id}")
             # Don't fail the upload if database save fails
@@ -577,15 +613,32 @@ async def upload_video(
         # Add job to Redis queue for worker to process
         # The job_id returned IS the task_id that frontend will poll
         from jobs import job_queue
+
         task_id = job_queue.add_job(
             "process_uploaded_video",
             {
                 "video_id": created_video_id or video_id,
                 "s3_key": s3_key,
-                "user_id": current_user.id
-            }
+                "user_id": current_user.id,
+            },
         )
-        
+
+        # Update the video document with the process_task_id so frontend can poll it
+        # This matches the YouTube download flow
+        if created_video_id:
+            try:
+                await update_user_video(
+                    current_user.id,
+                    created_video_id,
+                    {"process_task_id": task_id, "job_id": task_id},
+                )
+                logging.info(
+                    f"✅ Updated video {created_video_id} with process_task_id: {task_id}"
+                )
+            except Exception as e:
+                logging.error(f"Failed to update video with process_task_id: {str(e)}")
+                # Don't fail the upload if this update fails
+
         # Also store in tasks dict for backwards compatibility with /status endpoint
         tasks[task_id] = {
             "status": "processing",
@@ -602,12 +655,13 @@ async def upload_video(
             "filename": file.filename,
             "status": "processing",
             "task_id": task_id,
-            "s3_url": s3_url
+            "process_task_id": task_id,  # Include process_task_id for frontend tracking
+            "s3_url": s3_url,
         }
-        
+
         # Validate response URLs
         assert_response_urls(response, "upload endpoint response")
-        
+
         return response
 
     finally:
@@ -621,15 +675,16 @@ async def upload_video(
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):
     """Get task status from Redis job queue, in-memory tasks, or MongoDB video document
-    
+
     Optimized for fast responses to prevent timeout issues.
     """
     try:
         logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         logging.info(f"📡 STATUS REQUEST for task_id: {task_id}")
-        
+
         # Priority 1: Check Redis job queue (for worker-processed jobs)
         from jobs import job_queue
+
         job = job_queue.get_job(task_id)
         if job:
             logging.info(f"   ✅ Found in Redis job queue")
@@ -641,6 +696,15 @@ async def get_status(task_id: str):
                 except Exception:
                     raw_data = {}
             video_id_in_job = raw_data.get("video_id")
+
+            # NOTE: previously we attempted to treat jobs whose referenced
+            # video_id could not be found in the DB as 'orphaned' and removed
+            # them from the Redis queue. This caused some valid new tasks to be
+            # marked orphaned prematurely (e.g. race conditions where the
+            # video doc wasn't present yet). That behavior has been removed
+            # to allow the unified background pipeline to proceed; the
+            # frontend already stops polling on explicit orphan responses
+            # from the backend when appropriate.
 
             # Attempt to fetch process_task_id from MongoDB if we have a video_id
             process_task_id = None
@@ -654,18 +718,24 @@ async def get_status(task_id: str):
                     if user_with_video and user_with_video.get("videos"):
                         candidate_video = user_with_video["videos"][0]
                         process_task_id = candidate_video.get("process_task_id")
-                        logging.info(f"   🔍 Retrieved process_task_id from MongoDB: {process_task_id}")
+                        logging.info(
+                            f"   🔍 Retrieved process_task_id from MongoDB: {process_task_id}"
+                        )
                 except Exception as e:
-                    logging.warning(f"   ⚠️ Failed to lookup process_task_id for video {video_id_in_job}: {e}")
+                    logging.warning(
+                        f"   ⚠️ Failed to lookup process_task_id for video {video_id_in_job}: {e}"
+                    )
 
             # Fallback: if process_task_id not stored yet but unified pipeline is used, use current task_id
             if not process_task_id:
                 # Unified pipeline sets process_task_id equal to initial job id at creation
                 process_task_id = task_id
-                logging.info(f"   ↩️ Using task_id as process_task_id fallback: {process_task_id}")
+                logging.info(
+                    f"   ↩️ Using task_id as process_task_id fallback: {process_task_id}"
+                )
 
             # Convert Redis job format to task response format with early process_task_id
-            response = {
+            return {
                 "status": job.get("status", "unknown"),
                 "progress": int(job.get("progress", 0)),
                 "message": job.get("message", ""),
@@ -674,83 +744,47 @@ async def get_status(task_id: str):
                 "created_at": job.get("created_at"),
                 "updated_at": job.get("updated_at"),
             }
-            
-            # If completed, fetch clips from MongoDB (for both YouTube and direct upload)
-            if job.get("status") == "completed" and video_id_in_job:
-                try:
-                    logging.info(f"   📦 Job completed - fetching clips from MongoDB for video: {video_id_in_job}")
-                    db = get_database()
-                    users_collection = db.users
-                    user_with_video = users_collection.find_one(
-                        {"videos.id": video_id_in_job}, {"videos.$": 1}
-                    )
-                    if user_with_video and user_with_video.get("videos"):
-                        video = user_with_video["videos"][0]
-                        clips = video.get("clips", [])
-                        response["clips_count"] = len(clips) if clips else 0
-                        
-                        # Format clips for frontend
-                        clips_formatted = []
-                        for clip_doc in clips:
-                            clip_data = {
-                                "id": str(clip_doc.get("id")),
-                                "title": clip_doc.get("title"),
-                                "start_time": clip_doc.get("start_time", 0),
-                                "end_time": clip_doc.get("end_time", 0),
-                                "duration": clip_doc.get("duration", 0),
-                                "s3_key": clip_doc.get("s3_key"),
-                                "s3_url": clip_doc.get("s3_url"),
-                                "thumbnail_url": clip_doc.get("thumbnail_url"),
-                                "transcription": clip_doc.get("transcription", ""),
-                            }
-                            clips_formatted.append(clip_data)
-                        
-                        response["clips"] = clips_formatted
-                        logging.info(f"   ✅ Added {len(clips_formatted)} clips to Redis response")
-                    else:
-                        logging.warning(f"   ⚠️ Video {video_id_in_job} not found in MongoDB")
-                except Exception as e:
-                    logging.warning(f"   ⚠️ Failed to fetch clips from MongoDB: {e}")
-                    # Don't fail the request if clip fetching fails
-            
-            return response
-        
+
         # Priority 2: REMOVED in-memory tasks check (not safe for multi-instance)
         # Old code: if task_id in tasks: return tasks[task_id]
         # This was causing 404s when different web instances handled request vs status
-        
+
         # Priority 3: Query MongoDB directly for speed (avoid service layer overhead)
         db = get_database()
-        
+
         # NEW PATTERN: Search in users.videos[] array
         users_collection = db.users
         video_info = None
-        
+
         # Try to find video in users collection by video ID
         user = users_collection.find_one(
             {"videos.id": task_id},
-            {"videos.$": 1}  # Only return matching video
+            {"videos.$": 1},  # Only return matching video
         )
-        
-        if user and user.get('videos'):
-            video_info = user['videos'][0]
-            logging.info(f"   ✅ Found video {task_id} in users.videos array (by video ID)")
-        
+
+        if user and user.get("videos"):
+            video_info = user["videos"][0]
+            logging.info(
+                f"   ✅ Found video {task_id} in users.videos array (by video ID)"
+            )
+
         # If not found by video ID, try to find by process_task_id
         if not video_info:
             user = users_collection.find_one(
                 {"videos.process_task_id": task_id},
-                {"videos.$": 1}  # Only return matching video
+                {"videos.$": 1},  # Only return matching video
             )
-            
-            if user and user.get('videos'):
-                video_info = user['videos'][0]
-                logging.info(f"   ✅ Found video in users.videos array (by process_task_id: {task_id})")
-        
+
+            if user and user.get("videos"):
+                video_info = user["videos"][0]
+                logging.info(
+                    f"   ✅ Found video in users.videos array (by process_task_id: {task_id})"
+                )
+
         # OLD PATTERN: Fallback to videos collection
         if not video_info:
             videos_collection = db.videos
-            
+
             # Try to find video by _id or video_id
             try:
                 # First try by ObjectId if it's a valid ObjectId
@@ -758,31 +792,33 @@ async def get_status(task_id: str):
                     video_info = videos_collection.find_one({"_id": ObjectId(task_id)})
             except:
                 pass
-            
+
             # If not found, try by video_id field
             if not video_info:
                 video_info = videos_collection.find_one({"video_id": task_id})
-            
+
             # If still not found, try by id field
             if not video_info:
                 video_info = videos_collection.find_one({"id": task_id})
-            
+
             if video_info:
                 logging.info(f"Found video {task_id} in videos collection")
-        
+
         if not video_info:
             logging.warning(f"   ❌ Video NOT FOUND for task_id: {task_id}")
             logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             raise HTTPException(status_code=404, detail="Task not found")
-        
+
         # Log what we found
         logging.info(f"   📄 Video found in MongoDB:")
         logging.info(f"      ID: {video_info.get('id', 'N/A')}")
         logging.info(f"      Status: {video_info.get('status', 'N/A')}")
-        logging.info(f"      Process Task ID: {video_info.get('process_task_id', 'NONE')}")
+        logging.info(
+            f"      Process Task ID: {video_info.get('process_task_id', 'NONE')}"
+        )
         logging.info(f"      Clips count: {len(video_info.get('clips', []))}")
         logging.info(f"      Has clips array: {('clips' in video_info)}")
-        
+
         # Convert video status to task status format
         status_map = {
             "downloading": "downloading",
@@ -793,18 +829,20 @@ async def get_status(task_id: str):
             "uploading": "downloading",
             "queued": "queued",
             "transcribing": "transcribing",
-            "analyzing": "analyzing"
+            "analyzing": "analyzing",
         }
-        
+
         video_status = video_info.get("status", "downloading")
-        
+
         task_status = {
             "status": status_map.get(video_status, "downloading"),
             "progress": get_progress_from_status(video_status),
-            "message": get_message_from_status(video_status, video_info.get("error_message")),
+            "message": get_message_from_status(
+                video_status, video_info.get("error_message")
+            ),
             "video_id": str(video_info.get("_id", video_info.get("id", task_id))),
         }
-        
+
         # Add timestamps if available
         if "updated_at" in video_info:
             updated_at = video_info["updated_at"]
@@ -812,23 +850,23 @@ async def get_status(task_id: str):
                 task_status["updated_at"] = updated_at.isoformat()
             else:
                 task_status["updated_at"] = str(updated_at)
-        
+
         if "created_at" in video_info:
             created_at = video_info["created_at"]
             if isinstance(created_at, datetime.datetime):
                 task_status["created_at"] = created_at.isoformat()
             else:
                 task_status["created_at"] = str(created_at)
-        
+
         # Add process_task_id if available (for YouTube downloads)
         if "process_task_id" in video_info:
             task_status["process_task_id"] = video_info["process_task_id"]
-        
+
         # Add clips data if completed (frontend needs this to display clips)
         if video_status == "completed":
             clips = video_info.get("clips", [])
             task_status["clips_count"] = len(clips) if clips else 0
-            
+
             # Include full clips data for frontend display
             clips_formatted = []
             for clip_doc in clips:
@@ -844,23 +882,29 @@ async def get_status(task_id: str):
                     "transcription": clip_doc.get("transcription", ""),
                 }
                 clips_formatted.append(clip_data)
-            
+
             task_status["clips"] = clips_formatted
-        
+
         # Log the response
         logging.info(f"   📤 RESPONSE:")
         logging.info(f"      Status: {task_status['status']}")
         logging.info(f"      Progress: {task_status['progress']}%")
         logging.info(f"      Video ID: {task_status.get('video_id', 'N/A')}")
-        logging.info(f"      Process Task ID: {task_status.get('process_task_id', 'NONE')}")
+        logging.info(
+            f"      Process Task ID: {task_status.get('process_task_id', 'NONE')}"
+        )
         logging.info(f"      Clips in response: {len(task_status.get('clips', []))}")
-        logging.info(f"      Clips count field: {task_status.get('clips_count', 'N/A')}")
+        logging.info(
+            f"      Clips count field: {task_status.get('clips_count', 'N/A')}"
+        )
         logging.info(f"      Requested Task ID: {task_id}")
-        logging.info(f"      Task ID Match: {'✅ MATCH' if task_status.get('process_task_id') == task_id or task_status.get('video_id') == task_id else '⚠️ MISMATCH'}")
+        logging.info(
+            f"      Task ID Match: {'✅ MATCH' if task_status.get('process_task_id') == task_id or task_status.get('video_id') == task_id else '⚠️ MISMATCH'}"
+        )
         logging.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        
+
         return task_status
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -873,32 +917,26 @@ def get_progress_from_status(status: str) -> int:
     """Map video status to progress percentage - aligned with actual pipeline steps"""
     progress_map = {
         # Step 1: Downloading YouTube video
-        "queued": 5,                    # Job queued
-        "downloading": 10,              # Downloading YouTube video
-        "downloaded": 15,               # Download complete
-        "uploading": 18,                # Uploading to storage
-        
+        "queued": 5,  # Job queued
+        "downloading": 10,  # Downloading YouTube video
+        "downloaded": 15,  # Download complete
+        "uploading": 18,  # Uploading to storage
         # Step 2: Transcribing
-        "processing_started": 20,       # Starting processing
-        "transcribing": 30,             # Transcribing audio with Whisper
-        
+        "processing_started": 20,  # Starting processing
+        "transcribing": 30,  # Transcribing audio with AssemblyAI
         # Step 3: Finding interesting content
-        "analyzing": 50,                # AI analyzing content for best moments
-        
+        "analyzing": 50,  # AI analyzing content for best moments
         # Step 4: Generating clips
-        "processing": 70,               # Creating video clips with FFmpeg
-        
+        "processing": 70,  # Creating video clips with FFmpeg
         # Step 5: Clips download/upload (final stages)
-        "uploading_clips": 90,          # Uploading clips to S3
-        
+        "uploading_clips": 90,  # Uploading clips to S3
         # Step 6: Finished
-        "completed": 100,               # All done!
-        
+        "completed": 100,  # All done!
         # Error states
         "failed": 0,
         "error": 0,
         "timeout": 0,
-        "stuck": 0
+        "stuck": 0,
     }
     return progress_map.get(status, 0)
 
@@ -909,35 +947,29 @@ def get_message_from_status(status: str, error_message: str = None) -> str:
         return f"Error: {error_message}"
     if status == "error" and error_message:
         return f"Error: {error_message}"
-    
+
     message_map = {
         # Step 1: Downloading YouTube video
         "queued": "Queued for processing...",
         "downloading": "Downloading YouTube video...",
         "downloaded": "Download complete",
         "uploading": "Uploading video to storage...",
-        
         # Step 2: Transcribing
         "processing_started": "Starting video processing...",
         "transcribing": "Transcribing audio...",
-        
         # Step 3: Finding interesting content
         "analyzing": "Finding interesting content...",
-        
         # Step 4: Generating clips
         "processing": "Generating clips...",
-        
         # Step 5: Clips download (upload to S3)
         "uploading_clips": "Uploading clips...",
-        
         # Step 6: Finished
         "completed": "Finished!",
-        
         # Error states
         "failed": "Processing failed",
         "error": "An error occurred",
         "timeout": "Processing timed out",
-        "stuck": "Processing stuck"
+        "stuck": "Processing stuck",
     }
     return message_map.get(status, "Processing...")
 
@@ -948,13 +980,14 @@ async def get_clips(video_id: str):
     try:
         # First try the new user video service structure
         from services.user_video_service import get_user_video_by_video_id
+
         video_info = await get_user_video_by_video_id(video_id)
-        
+
         if video_info:
             # Get clips from the video document
-            clips_data = video_info.get('clips', [])
+            clips_data = video_info.get("clips", [])
             clips = []
-            
+
             for clip_doc in clips_data:
                 clip = {
                     "id": str(clip_doc.get("id")),
@@ -966,26 +999,28 @@ async def get_clips(video_id: str):
                     "s3_url": clip_doc.get("s3_url"),
                     "thumbnail_url": clip_doc.get("thumbnail_url"),
                     "transcription": clip_doc.get("transcription", ""),
-                    "created_at": clip_doc.get("created_at").isoformat() if clip_doc.get("created_at") else None
+                    "created_at": clip_doc.get("created_at").isoformat()
+                    if clip_doc.get("created_at")
+                    else None,
                 }
                 clips.append(clip)
-            
+
             response = {"clips": clips}
-            
+
             # Validate response URLs
             assert_response_urls(response, "clips endpoint response")
-            
+
             logging.info(f"Retrieved {len(clips)} clips for video {video_id}")
             return response
-        
+
         # Fallback to old structure if video not found in new structure
         db = get_database()
         clips_collection = db.clips
-        
+
         # Fetch clips for the video from database
         clips_cursor = clips_collection.find({"video_id": video_id})
         clips = []
-        
+
         for clip_doc in clips_cursor:
             clip = {
                 "id": str(clip_doc.get("_id")),
@@ -997,18 +1032,20 @@ async def get_clips(video_id: str):
                 "s3_url": clip_doc.get("s3_url"),
                 "thumbnail_url": clip_doc.get("thumbnail_url"),
                 "transcription": clip_doc.get("transcription", ""),
-                "created_at": clip_doc.get("created_at").isoformat() if clip_doc.get("created_at") else None
+                "created_at": clip_doc.get("created_at").isoformat()
+                if clip_doc.get("created_at")
+                else None,
             }
             clips.append(clip)
-        
+
         response = {"clips": clips}
-        
+
         # Validate response URLs
         assert_response_urls(response, "clips endpoint response")
-        
+
         logging.info(f"Retrieved {len(clips)} clips for video {video_id}")
         return response
-        
+
     except Exception as e:
         logging.error(f"Error fetching clips for video {video_id}: {e}")
         # Return empty list on error
@@ -1045,7 +1082,11 @@ async def process_video_endpoint(video_id: str, background_tasks: BackgroundTask
 
     # Start background processing
     background_tasks.add_task(
-        process_podcast, task_id=task_id, video_id=video_id, file_path=video_path, user_id=None
+        process_podcast,
+        task_id=task_id,
+        video_id=video_id,
+        file_path=video_path,
+        user_id=None,
     )
 
     return {"task_id": task_id, "video_id": video_id, "status": "processing"}
@@ -1090,8 +1131,7 @@ async def generate_clip(background_tasks: BackgroundTasks, request: ClipRequest)
 
 @app.post("/s3-upload-url")
 async def get_s3_upload_url(
-    request: S3UploadRequest,
-    current_user: Annotated[User, Depends(get_current_user)]
+    request: S3UploadRequest, current_user: Annotated[User, Depends(get_current_user)]
 ):
     """Generate a presigned URL for direct S3 upload from the frontend"""
     if not s3_client.available:
@@ -1119,13 +1159,15 @@ async def get_s3_upload_url(
             "s3_url": s3_client.get_object_url(presigned_data["s3_key"]),
             "status": VideoStatus.UPLOADING,
             "video_type": VideoType.UPLOAD,
-            "content_type": request.content_type
+            "content_type": request.content_type,
         }
-        
+
         # Save to user's videos array
         await create_user_video(current_user.id, video_data)
-        logging.info(f"Created video entry for user {current_user.id} with video_id: {video_id}")
-        
+        logging.info(
+            f"Created video entry for user {current_user.id} with video_id: {video_id}"
+        )
+
     except Exception as e:
         logging.error(f"Error creating video entry: {str(e)}")
         # Don't fail the upload URL generation if database save fails
@@ -1141,9 +1183,9 @@ async def get_s3_upload_url(
 @app.post("/register-s3-upload")
 async def register_uploaded_file(
     current_user: Annotated[User, Depends(get_current_user)],
-    video_id: str = Form(...), 
-    s3_key: str = Form(...), 
-    filename: str = Form(...)
+    video_id: str = Form(...),
+    s3_key: str = Form(...),
+    filename: str = Form(...),
 ):
     """Register a file that was directly uploaded to S3"""
     if not s3_client.available:
@@ -1160,12 +1202,12 @@ async def register_uploaded_file(
         video_update_data = {
             "s3_url": s3_client.get_object_url(s3_key),
             "status": VideoStatus.COMPLETED,
-            "updated_at": datetime.datetime.now()
+            "updated_at": datetime.datetime.now(),
         }
-        
+
         await update_video_s3_url(current_user.id, video_id, video_update_data)
         logging.info(f"Updated S3 upload video {video_id} for user {current_user.id}")
-        
+
     except Exception as e:
         logging.error(f"Error updating S3 upload video in database: {e}")
         # Don't fail the registration if database save fails
@@ -1180,10 +1222,10 @@ async def register_uploaded_file(
 
 @app.post("/process-s3-video/{video_id}")
 async def process_s3_video(
-    video_id: str, 
-    s3_key: str, 
+    video_id: str,
+    s3_key: str,
     background_tasks: BackgroundTasks,
-    current_user: Annotated[User, Depends(get_current_user)]
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
     """Start processing a video that was uploaded to S3"""
     if not s3_client.available:
@@ -1231,7 +1273,7 @@ async def process_s3_video(
 async def download_from_youtube(
     background_tasks: BackgroundTasks,
     request: YouTubeRequest,
-    current_user: Annotated[User, Depends(get_current_user)]
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
     """Download a video from YouTube locally and process it (no S3 upload of original video).
 
@@ -1245,6 +1287,7 @@ async def download_from_youtube(
 
         # Create background job FIRST to get the task_id (same as job_id)
         from jobs import job_queue
+
         task_id = job_queue.add_job(
             "process_youtube_download",  # unified v2 handler keeps same job_id across download+process
             {
@@ -1252,6 +1295,7 @@ async def download_from_youtube(
                 "url": str(request.url),
                 "auto_process": request.auto_process,
                 "user_id": current_user.id,
+                "target_clip_duration": request.target_clip_duration,
             },
         )
 
@@ -1295,20 +1339,23 @@ async def download_from_youtube(
 
 
 async def process_youtube_download_local(
-    task_id: str, video_id: str, url: str, auto_process: bool = True, user_id: str = None
+    task_id: str,
+    video_id: str,
+    url: str,
+    auto_process: bool = True,
+    user_id: str = None,
 ):
     """Process a YouTube download locally (no S3 upload of original video)"""
     try:
         # Import user video service
         from services.user_video_service import update_user_video
-        
+
         # Update video status in MongoDB (primary source of truth)
         if user_id:
-            await update_user_video(user_id, video_id, {
-                "status": "downloading",
-                "updated_at": utc_now()
-            })
-        
+            await update_user_video(
+                user_id, video_id, {"status": "downloading", "updated_at": utc_now()}
+            )
+
         # Also update in-memory tasks for backwards compatibility
         tasks[task_id] = {
             "status": "downloading",
@@ -1327,54 +1374,83 @@ async def process_youtube_download_local(
         # Three-tier download fallback system
         file_path, title, video_info = None, None, None
         max_retries = 3
-        
+
         # Tier 1: Try Sieve API (fastest, requires valid API key)
         for attempt in range(1, max_retries + 1):
             try:
-                logging.info(f"Task {task_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
-                file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
+                logging.info(
+                    f"Task {task_id}: [Tier 1] Attempt {attempt} to download with Sieve service"
+                )
+                file_path, title, video_info = await download_youtube_video_sieve(
+                    url, video_dir
+                )
                 if file_path and title:
                     logging.info(f"Task {task_id}: ✅ Sieve download successful")
                     break
             except Exception as sieve_error:
-                logging.warning(f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
+                logging.warning(
+                    f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}"
+                )
                 if attempt == max_retries:
-                    logging.error(f"Task {task_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix.")
+                    logging.error(
+                        f"Task {task_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix."
+                    )
                     break
                 await asyncio.sleep(5)
-        
+
         # Tier 2: Fallback to pytubefix if Sieve failed
         if not file_path or not title:
             for attempt in range(1, max_retries + 1):
                 try:
-                    logging.info(f"Task {task_id}: [Tier 2] Attempt {attempt} to download with pytubefix")
-                    file_path, title, video_info = await download_youtube_video(url, video_dir)
+                    logging.info(
+                        f"Task {task_id}: [Tier 2] Attempt {attempt} to download with pytubefix"
+                    )
+                    file_path, title, video_info = await download_youtube_video(
+                        url, video_dir
+                    )
                     if file_path and title:
-                        logging.info(f"Task {task_id}: ✅ pytubefix download successful")
+                        logging.info(
+                            f"Task {task_id}: ✅ pytubefix download successful"
+                        )
                         break
                 except Exception as pytubefix_error:
-                    logging.warning(f"Task {task_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
+                    logging.warning(
+                        f"Task {task_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}"
+                    )
                     if attempt == max_retries:
-                        logging.error(f"Task {task_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp.")
+                        logging.error(
+                            f"Task {task_id}: All {max_retries} pytubefix attempts failed. Falling back to yt-dlp."
+                        )
                         break
                     await asyncio.sleep(5)
-        
+
         # Tier 3: Final fallback to yt-dlp if both Sieve and pytubefix failed
         if not file_path or not title:
             try:
                 from utils.ytdlp_downloader import download_youtube_video_ytdlp
-                logging.info(f"Task {task_id}: [Tier 3] Attempting download with yt-dlp (final fallback)")
-                file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
+
+                logging.info(
+                    f"Task {task_id}: [Tier 3] Attempting download with yt-dlp (final fallback)"
+                )
+                file_path, title, video_info = await download_youtube_video_ytdlp(
+                    url, video_dir
+                )
                 if file_path and title:
                     logging.info(f"Task {task_id}: ✅ yt-dlp download successful")
             except Exception as ytdlp_error:
-                logging.error(f"Task {task_id}: yt-dlp download failed: {str(ytdlp_error)}")
+                logging.error(
+                    f"Task {task_id}: yt-dlp download failed: {str(ytdlp_error)}"
+                )
 
         if not file_path or not title:
-            raise Exception(f"Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)")
+            raise Exception(
+                f"Failed to download YouTube video after trying all methods (Sieve, pytubefix, yt-dlp)"
+            )
 
-        logging.info(f"Task {task_id}: Download completed successfully to local file: {file_path}")
-        
+        logging.info(
+            f"Task {task_id}: Download completed successfully to local file: {file_path}"
+        )
+
         # Update video in database
         try:
             video_data = {
@@ -1385,15 +1461,20 @@ async def process_youtube_download_local(
                 "status": "downloaded",
                 "video_type": "youtube",
                 "duration": video_info.get("length_seconds") if video_info else None,
-                "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else None,
-                "content_type": "video/mp4"
+                "file_size": os.path.getsize(file_path)
+                if os.path.exists(file_path)
+                else None,
+                "content_type": "video/mp4",
             }
             from services.user_video_service import update_user_video
+
             await update_user_video(user_id, video_id, video_data)
             logging.info(f"Updated YouTube video {video_id} in database.")
         except Exception as e:
-            logging.error(f"Error updating YouTube video in database: {e}", exc_info=True)
-        
+            logging.error(
+                f"Error updating YouTube video in database: {e}", exc_info=True
+            )
+
         # Update task
         tasks[task_id] = {
             "status": "downloaded",
@@ -1414,8 +1495,10 @@ async def process_youtube_download_local(
         if auto_process:
             try:
                 process_task_id = str(uuid.uuid4())
-                logging.info(f"Task {task_id}: Created process task ID: {process_task_id}")
-                
+                logging.info(
+                    f"Task {task_id}: Created process task ID: {process_task_id}"
+                )
+
                 tasks[process_task_id] = {
                     "status": "queued",
                     "progress": 0,
@@ -1425,40 +1508,56 @@ async def process_youtube_download_local(
                     "video_id": video_id,
                     "original_task_id": task_id,
                 }
-                
+
                 tasks[task_id]["process_task_id"] = process_task_id
                 tasks[task_id]["status"] = "processing_started"
                 tasks[task_id]["message"] = "Processing has started"
                 tasks[task_id]["updated_at"] = datetime.datetime.now().isoformat()
-                
+
                 # 🔍 Save process_task_id to MongoDB
-                logging.info(f"🔍 DEBUG [API]: About to update process_task_id in MongoDB")
+                logging.info(
+                    f"🔍 DEBUG [API]: About to update process_task_id in MongoDB"
+                )
                 logging.info(f"   user_id: {user_id}")
                 logging.info(f"   video_id: {video_id}")
                 logging.info(f"   process_task_id: {process_task_id}")
-                
+
                 if user_id:
-                    update_result = await update_user_video(user_id, video_id, {
-                        "process_task_id": process_task_id,
-                        "updated_at": utc_now()
-                    })
-                    logging.info(f"✅ Updated MongoDB [API]: video {video_id} with process_task_id: {process_task_id}, result: {update_result}")
+                    update_result = await update_user_video(
+                        user_id,
+                        video_id,
+                        {"process_task_id": process_task_id, "updated_at": utc_now()},
+                    )
+                    logging.info(
+                        f"✅ Updated MongoDB [API]: video {video_id} with process_task_id: {process_task_id}, result: {update_result}"
+                    )
                 else:
-                    logging.warning(f"⚠️ WARNING [API]: user_id is None, cannot update MongoDB with process_task_id")
-                
+                    logging.warning(
+                        f"⚠️ WARNING [API]: user_id is None, cannot update MongoDB with process_task_id"
+                    )
+
                 # Process directly from local file (no S3 download needed)
                 await process_podcast(
-                    process_task_id, video_id, file_path, original_task_id=task_id, user_id=user_id
+                    process_task_id,
+                    video_id,
+                    file_path,
+                    original_task_id=task_id,
+                    user_id=user_id,
                 )
-                
+
             except Exception as process_error:
-                logging.error(f"Error starting processing for task {task_id}: {str(process_error)}", exc_info=True)
-                tasks[task_id].update({
-                    "status": "error",
-                    "message": f"Error starting processing: {str(process_error)}",
-                    "updated_at": datetime.datetime.now().isoformat(),
-                })
-                
+                logging.error(
+                    f"Error starting processing for task {task_id}: {str(process_error)}",
+                    exc_info=True,
+                )
+                tasks[task_id].update(
+                    {
+                        "status": "error",
+                        "message": f"Error starting processing: {str(process_error)}",
+                        "updated_at": datetime.datetime.now().isoformat(),
+                    }
+                )
+
     except Exception as e:
         logging.error(f"Error in YouTube download process: {str(e)}", exc_info=True)
         tasks[task_id] = {
@@ -1471,7 +1570,11 @@ async def process_youtube_download_local(
 
 # DEPRECATED: Old S3-based YouTube download (kept for reference, not used)
 async def process_youtube_download_s3(
-    task_id: str, video_id: str, url: str, auto_process: bool = True, user_id: str = None
+    task_id: str,
+    video_id: str,
+    url: str,
+    auto_process: bool = True,
+    user_id: str = None,
 ):
     """DEPRECATED: Process a YouTube download directly to S3 (no longer used - we process locally)"""
     try:
@@ -1487,8 +1590,10 @@ async def process_youtube_download_s3(
         logging.info(f"Task {task_id}: Starting YouTube download to S3 for URL: {url}")
 
         # Download directly to S3
-        success, s3_key, video_info = await s3_client.download_youtube_to_s3(url, video_id)
-        
+        success, s3_key, video_info = await s3_client.download_youtube_to_s3(
+            url, video_id
+        )
+
         if not success or not s3_key:
             logging.error(f"Task {task_id}: Failed to download YouTube video to S3")
             tasks[task_id] = {
@@ -1501,19 +1606,23 @@ async def process_youtube_download_s3(
 
         # Log the successful download
         logging.info(f"Task {task_id}: Download completed successfully to S3: {s3_key}")
-        
+
         # Save video information to database using the new user video service
         try:
             # Extract video ID from URL for title
-            video_id_from_url = url.split('/')[-1] if url else "unknown"
-            
-            logging.info(f"Attempting to update video in database with user_id: {user_id}")
-            
+            video_id_from_url = url.split("/")[-1] if url else "unknown"
+
+            logging.info(
+                f"Attempting to update video in database with user_id: {user_id}"
+            )
+
             # Update video data for user's videos array
             video_data = {
                 "title": video_info.get("title", f"YouTube Video {video_id_from_url}"),
                 "description": f"YouTube video downloaded from {url}",
-                "filename": video_info.get("filename", f"youtube_{video_id_from_url}.mp4"),
+                "filename": video_info.get(
+                    "filename", f"youtube_{video_id_from_url}.mp4"
+                ),
                 "s3_key": s3_key,
                 "s3_url": s3_client.get_object_url(s3_key),
                 "source_url": url,
@@ -1521,15 +1630,20 @@ async def process_youtube_download_s3(
                 "video_type": "youtube",
                 "duration": video_info.get("duration"),
                 "file_size": video_info.get("file_size"),
-                "content_type": "video/mp4"
+                "content_type": "video/mp4",
             }
             from services.user_video_service import update_user_video
+
             await update_user_video(user_id, video_id, video_data)
-            logging.info(f"Updated YouTube video {video_id} in database using new service.")
+            logging.info(
+                f"Updated YouTube video {video_id} in database using new service."
+            )
         except Exception as e:
-            logging.error(f"Error updating YouTube video in database: {e}", exc_info=True)
+            logging.error(
+                f"Error updating YouTube video in database: {e}", exc_info=True
+            )
             # Don't fail the download if database save fails
-        
+
         # Update task with S3 information
         tasks[task_id] = {
             "status": "downloaded",
@@ -1557,8 +1671,10 @@ async def process_youtube_download_s3(
             try:
                 # Create a new task ID for processing
                 process_task_id = str(uuid.uuid4())
-                logging.info(f"Task {task_id}: Created process task ID: {process_task_id}")
-                
+                logging.info(
+                    f"Task {task_id}: Created process task ID: {process_task_id}"
+                )
+
                 # Initialize processing task
                 tasks[process_task_id] = {
                     "status": "queued",
@@ -1569,26 +1685,36 @@ async def process_youtube_download_s3(
                     "video_id": video_id,
                     "original_task_id": task_id,
                 }
-                
+
                 # Update the original task with the processing task ID
                 tasks[task_id]["process_task_id"] = process_task_id
                 tasks[task_id]["status"] = "processing_started"
                 tasks[task_id]["message"] = "Processing has started"
                 tasks[task_id]["updated_at"] = datetime.datetime.now().isoformat()
-                
+
                 # Start processing with S3 key
                 await process_s3_podcast(
-                    process_task_id, video_id, s3_key, None, original_task_id=task_id, user_id=user_id
+                    process_task_id,
+                    video_id,
+                    s3_key,
+                    None,
+                    original_task_id=task_id,
+                    user_id=user_id,
                 )
-                
+
             except Exception as process_error:
-                logging.error(f"Error starting processing for task {task_id}: {str(process_error)}", exc_info=True)
-                tasks[task_id].update({
-                    "status": "error",
-                    "message": f"Error starting processing: {str(process_error)}",
-                    "updated_at": datetime.datetime.now().isoformat(),
-                })
-                
+                logging.error(
+                    f"Error starting processing for task {task_id}: {str(process_error)}",
+                    exc_info=True,
+                )
+                tasks[task_id].update(
+                    {
+                        "status": "error",
+                        "message": f"Error starting processing: {str(process_error)}",
+                        "updated_at": datetime.datetime.now().isoformat(),
+                    }
+                )
+
     except Exception as e:
         logging.error(f"Error in YouTube download process: {str(e)}", exc_info=True)
         tasks[task_id] = {
@@ -1598,8 +1724,16 @@ async def process_youtube_download_s3(
             "updated_at": datetime.datetime.now().isoformat(),
         }
 
+
 # New background task for S3 processing
-async def process_s3_podcast(task_id: str, video_id: str, s3_key: str, local_path: str = None, original_task_id: Optional[str] = None, user_id: str = None):
+async def process_s3_podcast(
+    task_id: str,
+    video_id: str,
+    s3_key: str,
+    local_path: str = None,
+    original_task_id: Optional[str] = None,
+    user_id: str = None,
+):
     try:
         # Create temporary file for processing if not provided
         if not local_path:
@@ -1639,10 +1773,13 @@ async def process_s3_podcast(task_id: str, video_id: str, s3_key: str, local_pat
 
 # Background tasks
 async def process_podcast(
-    task_id: str, video_id: str, file_path: str, original_task_id: Optional[str] = None, user_id: str = None
+    task_id: str,
+    video_id: str,
+    file_path: str,
+    original_task_id: Optional[str] = None,
+    user_id: str = None,
 ):
     try:
-        global whisper_model
         logging.info(
             f"Starting podcast processing for task {task_id}, video {video_id}"
         )
@@ -1676,144 +1813,13 @@ async def process_podcast(
             print(f"Video file not found at path: {file_path}")
             raise FileNotFoundError(f"Video file not found at path: {file_path}")
 
-        # Transcribe the audio using the pre-loaded model
-        try:
-            # Make transcription non-blocking by running in thread pool
-            import asyncio
-            import functools
-            from concurrent.futures import ThreadPoolExecutor
-
-            # Use limited thread pool to prevent resource exhaustion
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="whisper-worker"
-            )
-            loop = asyncio.get_event_loop()
-
-            # Run transcription in separate thread to keep API responsive
-            transcript = await loop.run_in_executor(
-                executor, functools.partial(
-                    transcribe_audio_sync, 
-                    file_path, 
-                    "tiny",
-                    enable_diarization=True  # Enable speaker diarization
-                )
-            )
-            if not transcript:
-                raise ValueError("Transcription returned None")
-
-            # Print the transcript output to the console for debugging
-            print("\n--- TRANSCRIPTION OUTPUT ---\n", transcript, "\n--- END TRANSCRIPTION OUTPUT ---\n")
-
-            # Handle empty segments gracefully - this is valid for silent/corrupted videos
-            segments_count = len(transcript.get("segments", []))
-            logging.info(f"Transcription completed with {segments_count} segments")
-
-            if segments_count == 0:
-                logging.warning("Video appears to be silent or have no speech content")
-                # Continue processing with empty transcript - don't fail
-        except Exception as e:
-            logging.error(f"Transcription failed: {str(e)}")
-
-            # Try one more time with CPU-only mode
-            logging.info("Retrying transcription with CPU-only mode")
-            try:
-                # Force CPU transcription by temporarily setting CUDA_VISIBLE_DEVICES
-                original_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-                os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-                # Reload the model on CPU
-                from services.transcription import load_model
-
-                cpu_model = load_model(model_size="tiny")
-
-                # Transcribe with CPU
-
-                audio_path = file_path
-                if not file_path.lower().endswith((".mp3", ".wav", ".flac", ".aac")):
-                    from services.transcription import extract_audio
-
-                    audio_path = extract_audio(file_path)
-
-                try:
-                    from services.transcription import safe_whisper_transcribe
-
-                    transcript = safe_whisper_transcribe(
-                        cpu_model, audio_path, fp16=False
-                    )
-                except Exception as transcribe_error:
-                    error_str = str(transcribe_error).lower()
-                    # Check for empty audio related errors
-                    if any(
-                        pattern in error_str
-                        for pattern in [
-                            "reshape tensor",
-                            "0 elements",
-                            "linear(",
-                            "unknown parameter type",
-                            "dimension size -1",
-                            "ambiguous",
-                            "in_features",
-                            "out_features",
-                            "cannot reshape",
-                            "unspecified dimension",
-                            "failed to load audio",
-                            "ffmpeg version",
-                            "could not open",
-                            "invalid data found",
-                        ]
-                    ):
-                        logging.info(
-                            "CPU transcription detected empty/silent audio - using empty transcript"
-                        )
-                        transcript = {"text": "", "segments": [], "language": "en"}
-                    else:
-                        raise transcribe_error
-
-                # Restore original CUDA settings
-                if original_cuda_devices is not None:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_devices
-                else:
-                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-
-                # Don't fail if we have empty segments - that's OK for silent videos
-                if not transcript:
-                    raise ValueError("CPU transcription returned None")
-
-                logging.info(
-                    f"CPU transcription completed with {len(transcript.get('segments', []))} segments"
-                )
-            except Exception as cpu_error:
-                logging.error(f"CPU transcription also failed: {str(cpu_error)}")
-
-                # If CPU also fails with empty audio errors, create empty transcript
-                error_str = str(cpu_error).lower()
-                if any(
-                    pattern in error_str
-                    for pattern in [
-                        "reshape tensor",
-                        "0 elements",
-                        "linear(",
-                        "unknown parameter type",
-                        "dimension size -1",
-                        "ambiguous",
-                        "in_features",
-                        "out_features",
-                        "cannot reshape",
-                        "unspecified dimension",
-                        "failed to load audio",
-                        "ffmpeg version",
-                        "could not open",
-                        "invalid data found",
-                    ]
-                ):
-                    logging.info(
-                        "Both transcription attempts failed with empty audio - proceeding with empty transcript"
-                    )
-                    transcript = {"text": "", "segments": [], "language": "en"}
-                else:
-                    raise ValueError(
-                        f"Transcription failed after multiple attempts: {str(e)}"
-                    )
+        # DEPRECATED: Transcription is now handled by worker.py using AssemblyAI
+        # This code path should never execute
+        logging.error("DEPRECATED: process_podcast transcription block reached")
+        raise ValueError(
+            "Transcription should be handled by worker service, not process_podcast. "
+            "This function is deprecated."
+        )
 
         # Update task status
         tasks[task_id].update(
@@ -1953,24 +1959,27 @@ async def process_podcast(
         # ====================================================================
         # PARALLEL CLIP PROCESSING - Process multiple clips at same time
         # ====================================================================
-        
+
         if clips:
-            logging.info(f"[PARALLEL] Starting parallel processing of {len(clips)} clips")
-            
+            logging.info(
+                f"[PARALLEL] Starting parallel processing of {len(clips)} clips"
+            )
+
             import time
+
             parallel_start_time = time.time()
-            
+
             # Prepare for parallel processing
             MAX_CONCURRENT_CLIPS = 3  # Adjust based on system resources
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIPS)
-            
+
             async def bounded_process_clip(clip, idx):
                 """Process clip with concurrency limit"""
                 async with semaphore:
                     return await process_single_clip_async(
                         clip, idx, file_path, video_id, output_dir, s3_client
                     )
-            
+
             # Update progress - starting parallel processing
             tasks[task_id].update(
                 {
@@ -1979,7 +1988,7 @@ async def process_podcast(
                     "updated_at": datetime.datetime.now().isoformat(),
                 }
             )
-            
+
             if original_task_id and original_task_id in tasks:
                 tasks[original_task_id].update(
                     {
@@ -1988,47 +1997,71 @@ async def process_podcast(
                         "updated_at": datetime.datetime.now().isoformat(),
                     }
                 )
-            
+
             # Create all clip processing tasks
-            clip_tasks = [
-                bounded_process_clip(clip, i)
-                for i, clip in enumerate(clips)
-            ]
-            
+            clip_tasks = [bounded_process_clip(clip, i) for i, clip in enumerate(clips)]
+
             # Run all tasks in parallel
-            logging.info(f"[PARALLEL] Running {len(clip_tasks)} clips in parallel (max {MAX_CONCURRENT_CLIPS} concurrent)")
+            logging.info(
+                f"[PARALLEL] Running {len(clip_tasks)} clips in parallel (max {MAX_CONCURRENT_CLIPS} concurrent)"
+            )
             results = await asyncio.gather(*clip_tasks, return_exceptions=True)
-            
+
             # Process results
             logging.info(f"[PARALLEL] All clips processed, updating results...")
             for result in results:
                 if result and isinstance(result, tuple):
                     index, data = result[0], result[1]
                     if data:
-                        clips[index]['s3_key'] = data['clip_s3_key']
-                        clips[index]['s3_url'] = s3_client.get_object_url(data['clip_s3_key']) if data['clip_s3_key'] else None
-                        clips[index]['thumbnail_s3_key'] = data['thumbnail_s3_key']
-                        clips[index]['thumbnail_url'] = s3_client.get_object_url(data['thumbnail_s3_key']) if data['thumbnail_s3_key'] else "/static/default_thumbnail.jpg"
-                        logging.info(f"[PARALLEL] ✅ Clip {index} complete - S3 URL: {clips[index].get('s3_url')}")
+                        clips[index]["s3_key"] = data["clip_s3_key"]
+                        clips[index]["s3_url"] = (
+                            s3_client.get_object_url(data["clip_s3_key"])
+                            if data["clip_s3_key"]
+                            else None
+                        )
+                        clips[index]["thumbnail_s3_key"] = data["thumbnail_s3_key"]
+                        clips[index]["thumbnail_url"] = (
+                            s3_client.get_object_url(data["thumbnail_s3_key"])
+                            if data["thumbnail_s3_key"]
+                            else "/static/default_thumbnail.jpg"
+                        )
+                        logging.info(
+                            f"[PARALLEL] ✅ Clip {index} complete - S3 URL: {clips[index].get('s3_url')}"
+                        )
                     else:
-                        logging.warning(f"[PARALLEL] ❌ Clip {index} returned None results")
-                        clips[index]['thumbnail_url'] = "/static/default_thumbnail.jpg"
+                        logging.warning(
+                            f"[PARALLEL] ❌ Clip {index} returned None results"
+                        )
+                        clips[index]["thumbnail_url"] = "/static/default_thumbnail.jpg"
                 elif isinstance(result, Exception):
                     logging.error(f"[PARALLEL] ❌ Clip raised exception: {result}")
                     import traceback
+
                     logging.error(f"[PARALLEL] Traceback: {traceback.format_exc()}")
                 else:
                     logging.warning(f"[PARALLEL] ❌ Clip returned invalid result type")
-            
+
             parallel_elapsed = time.time() - parallel_start_time
             logging.info(f"[PARALLEL] ⏱️  Total time: {parallel_elapsed:.1f}s")
-            logging.info(f"[PARALLEL] 📊 Average per clip: {parallel_elapsed/len(clips):.1f}s")
+            logging.info(
+                f"[PARALLEL] 📊 Average per clip: {parallel_elapsed / len(clips):.1f}s"
+            )
             if len(clips) > 1:
-                sequential_estimate = parallel_elapsed * len(clips) / MAX_CONCURRENT_CLIPS
-                speedup = sequential_estimate / parallel_elapsed if parallel_elapsed > 0 else 0
-                logging.info(f"[PARALLEL] 📈 Estimated speedup vs sequential: ~{speedup:.1f}x")
-            
-            logging.info(f"[PARALLEL] ✅ Parallel processing complete for all {len(clips)} clips")
+                sequential_estimate = (
+                    parallel_elapsed * len(clips) / MAX_CONCURRENT_CLIPS
+                )
+                speedup = (
+                    sequential_estimate / parallel_elapsed
+                    if parallel_elapsed > 0
+                    else 0
+                )
+                logging.info(
+                    f"[PARALLEL] 📈 Estimated speedup vs sequential: ~{speedup:.1f}x"
+                )
+
+            logging.info(
+                f"[PARALLEL] ✅ Parallel processing complete for all {len(clips)} clips"
+            )
         else:
             logging.info("No clips to process")
 
@@ -2037,45 +2070,57 @@ async def process_podcast(
         logging.info(f"S3 client available: {s3_client.available}")
         if s3_client.available:
             logging.info(f"S3 bucket: {s3_client.bucket}")
-        
+
         for i, clip in enumerate(clips):
-            logging.info(f"Validating clip {i+1}/{len(clips)}: {clip.get('id')}")
-            
+            logging.info(f"Validating clip {i + 1}/{len(clips)}: {clip.get('id')}")
+
             if "s3_url" in clip and clip["s3_url"]:
-                logging.info(f"Validating S3 URL for clip {clip.get('id')}: {clip['s3_url']}")
+                logging.info(
+                    f"Validating S3 URL for clip {clip.get('id')}: {clip['s3_url']}"
+                )
                 try:
                     assert_s3_url(clip["s3_url"], f"clip {clip.get('id')} s3_url")
                     logging.info(f"S3 URL validation passed for clip {clip.get('id')}")
                 except Exception as e:
-                    logging.error(f"S3 URL validation failed for clip {clip.get('id')}: {e}")
+                    logging.error(
+                        f"S3 URL validation failed for clip {clip.get('id')}: {e}"
+                    )
                     logging.error(f"Clip data: {clip}")
                     raise
             else:
                 logging.warning(f"No s3_url found for clip {clip.get('id')}")
-                
+
             if "thumbnail_url" in clip and clip["thumbnail_url"].startswith("http"):
-                logging.info(f"Validating thumbnail URL for clip {clip.get('id')}: {clip['thumbnail_url']}")
+                logging.info(
+                    f"Validating thumbnail URL for clip {clip.get('id')}: {clip['thumbnail_url']}"
+                )
                 try:
-                    assert_s3_url(clip["thumbnail_url"], f"clip {clip.get('id')} thumbnail_url")
-                    logging.info(f"Thumbnail URL validation passed for clip {clip.get('id')}")
+                    assert_s3_url(
+                        clip["thumbnail_url"], f"clip {clip.get('id')} thumbnail_url"
+                    )
+                    logging.info(
+                        f"Thumbnail URL validation passed for clip {clip.get('id')}"
+                    )
                 except Exception as e:
-                    logging.error(f"Thumbnail URL validation failed for clip {clip.get('id')}: {e}")
+                    logging.error(
+                        f"Thumbnail URL validation failed for clip {clip.get('id')}: {e}"
+                    )
                     logging.error(f"Clip data: {clip}")
                     raise
             else:
                 logging.info(f"No thumbnail URL to validate for clip {clip.get('id')}")
-        
+
         logging.info("S3 URL validation completed successfully")
 
         # Save clips to database using the new user video service
         logging.info("Saving clips to database using new service...")
         logging.info(f"Total clips to save: {len(clips)}")
-        
+
         try:
             # Get user_id from task
             task_data = tasks.get(task_id, {})
             user_id = task_data.get("user_id")
-            
+
             if not user_id:
                 logging.warning(f"No user_id found in task for video {video_id}")
                 # Try to get from video record in old format
@@ -2085,36 +2130,46 @@ async def process_podcast(
                 if video_record:
                     user_id = video_record.get("user_id")
                     logging.info(f"Found user_id from old video record: {user_id}")
-                
+
                 # If still not found, try to find video in new structure
                 if not user_id:
                     from services.user_video_service import get_user_video_by_video_id
+
                     try:
                         video_info = await get_user_video_by_video_id(video_id)
                         if video_info:
                             user_id = video_info.get("user_id")
-                            logging.info(f"Found user_id from new video structure: {user_id}")
+                            logging.info(
+                                f"Found user_id from new video structure: {user_id}"
+                            )
                     except Exception as e:
                         logging.warning(f"Could not find video in new structure: {e}")
-            
+
             if not user_id:
-                logging.error(f"Cannot save clips to database - no user_id available for video {video_id}")
+                logging.error(
+                    f"Cannot save clips to database - no user_id available for video {video_id}"
+                )
                 logging.info("Skipping clip saving - continuing with processing")
                 return
-            
+
             # Ensure video exists in database before processing clips
             from services.user_video_service import get_user_video
+
             existing_video = await get_user_video(user_id, video_id)
             if not existing_video:
-                logging.error(f"Video {video_id} not found in database. Skipping clip saving and processing for this video.")
+                logging.error(
+                    f"Video {video_id} not found in database. Skipping clip saving and processing for this video."
+                )
                 return
-            
+
             # Save each clip to the user's video using the new service
             clips_saved = 0
             for i, clip in enumerate(clips):
-                logging.info(f"Processing clip {i+1}/{len(clips)}: {clip.get('id', 'unknown')}")
+                logging.info(
+                    f"Processing clip {i + 1}/{len(clips)}: {clip.get('id', 'unknown')}"
+                )
                 logging.info(f"Clip data: {clip}")
-                
+
                 if clip.get("s3_url"):  # Only save clips that have S3 URLs
                     logging.info(f"Clip has S3 URL: {clip.get('s3_url')}")
                     clip_data = {
@@ -2127,33 +2182,42 @@ async def process_podcast(
                         "transcription": clip.get("transcription", ""),
                         "summary": clip.get("summary", ""),
                         "tags": clip.get("tags", []),
-                        "metadata": clip.get("metadata", {})
+                        "metadata": clip.get("metadata", {}),
                     }
-                    
+
                     logging.info(f"Prepared clip data: {clip_data}")
-                    
+
                     try:
                         # Add clip to user's video using the new service
                         clip_id = await add_clip_to_video(user_id, video_id, clip_data)
                         if clip_id:
-                            logging.info(f"✅ Saved clip {clip.get('id')} to database with ID: {clip_id}")
+                            logging.info(
+                                f"✅ Saved clip {clip.get('id')} to database with ID: {clip_id}"
+                            )
                             clips_saved += 1
                         else:
-                            logging.error(f"❌ Failed to save clip {clip.get('id')} to database")
+                            logging.error(
+                                f"❌ Failed to save clip {clip.get('id')} to database"
+                            )
                     except Exception as clip_save_error:
-                        logging.error(f"❌ Error saving clip {clip.get('id')} to database: {clip_save_error}")
+                        logging.error(
+                            f"❌ Error saving clip {clip.get('id')} to database: {clip_save_error}"
+                        )
                         import traceback
+
                         logging.error(f"Traceback: {traceback.format_exc()}")
                 else:
                     logging.warning(f"⚠️ Skipping clip {clip.get('id')} - no S3 URL")
                     logging.warning(f"Clip data: {clip}")
-            
-            logging.info(f"✅ Successfully saved {clips_saved}/{len(clips)} clips to database using new service")
-            
+
+            logging.info(
+                f"✅ Successfully saved {clips_saved}/{len(clips)} clips to database using new service"
+            )
+
         except Exception as e:
             logging.error(f"❌ Error saving clips to database: {e}", exc_info=True)
             # Don't fail the entire process if database save fails
-        
+
         # Save metadata to S3 (optional, since clips are now in S3)
         metadata = {"video_id": video_id, "clips": clips}
         logging.info(f"Processing completed with {len(clips)} clips")
@@ -2173,11 +2237,14 @@ async def process_podcast(
         # Update the video record in the database as completed
         try:
             from services.user_video_service import update_user_video
+
             processed_at = datetime.datetime.now()
             # Find a representative thumbnail for the video (first clip with a thumbnail)
             video_thumbnail_url = None
             for clip in clips:
-                if clip.get("thumbnail_url") and clip["thumbnail_url"].startswith("http"):
+                if clip.get("thumbnail_url") and clip["thumbnail_url"].startswith(
+                    "http"
+                ):
                     video_thumbnail_url = clip["thumbnail_url"]
                     break
             video_update_data = {
@@ -2190,10 +2257,12 @@ async def process_podcast(
                 await update_user_video(user_id, video_id, video_update_data)
                 logging.info(f"Updated video {video_id} in DB as completed.")
             else:
-                logging.warning(f"No user_id available to update video {video_id} in DB.")
+                logging.warning(
+                    f"No user_id available to update video {video_id} in DB."
+                )
         except Exception as e:
             logging.error(f"Error updating video {video_id} in DB as completed: {e}")
-        
+
         # Save metadata to S3 (optional, since clips are now in S3)
         metadata = {"video_id": video_id, "clips": clips}
         logging.info(f"Processing completed with {len(clips)} clips")
@@ -2209,15 +2278,11 @@ async def process_podcast(
             }
         )
         logging.info(f"Task {task_id} completed successfully with {len(clips)} clips")
-        
+
         # Create clips_info.json and upload to S3
         try:
-            clips_info = {
-                "video_id": video_id,
-                "total_clips": len(clips),
-                "clips": []
-            }
-            
+            clips_info = {"video_id": video_id, "total_clips": len(clips), "clips": []}
+
             for clip in clips:
                 clip_info = {
                     "id": clip.get("id"),
@@ -2229,24 +2294,24 @@ async def process_podcast(
                     "s3_url": clip.get("s3_url"),
                     "thumbnail_url": clip.get("thumbnail_url"),
                     "transcription": clip.get("transcription", ""),
-                    "created_at": datetime.datetime.now().isoformat()
+                    "created_at": datetime.datetime.now().isoformat(),
                 }
                 clips_info["clips"].append(clip_info)
-            
+
             # Save clips_info.json locally
             clips_info_path = clips_dir / "clips_info.json"
-            with open(clips_info_path, 'w') as f:
+            with open(clips_info_path, "w") as f:
                 json.dump(clips_info, f, indent=2)
-            
+
             # Upload clips_info.json to S3
             success, clips_info_s3_key = s3_client.upload_file_to_s3(
                 str(clips_info_path), video_id, "clips_info.json", "application/json"
             )
-            
+
             if success:
                 clips_info_s3_url = s3_client.get_object_url(clips_info_s3_key)
                 logging.info(f"clips_info.json uploaded to S3: {clips_info_s3_url}")
-                
+
                 # Clean up local clips_info.json
                 try:
                     os.unlink(clips_info_path)
@@ -2254,19 +2319,24 @@ async def process_podcast(
                     pass
             else:
                 logging.error("Failed to upload clips_info.json to S3")
-                
+
         except Exception as clips_info_error:
-            logging.error(f"Error creating/uploading clips_info.json: {clips_info_error}")
+            logging.error(
+                f"Error creating/uploading clips_info.json: {clips_info_error}"
+            )
 
         # Clean up local video_id directory after successful S3 upload
         try:
             clips_dir = output_dir / video_id
             if os.path.exists(clips_dir):
                 import shutil
+
                 shutil.rmtree(clips_dir)
                 logging.info(f"Cleaned up local video directory: {clips_dir}")
         except Exception as cleanup_error:
-            logging.warning(f"Failed to clean up local video directory {clips_dir}: {cleanup_error}")
+            logging.warning(
+                f"Failed to clean up local video directory {clips_dir}: {cleanup_error}"
+            )
 
         # If this was started from another task, update that task too
         if original_task_id and original_task_id in tasks:
@@ -2317,7 +2387,6 @@ async def generate_clip_task(
     title: Optional[str],
 ):
     try:
-        global whisper_model
         logging.info(
             f"Starting manual clip generation for task {task_id}, video {video_id}"
         )
@@ -2365,26 +2434,28 @@ async def generate_clip_task(
             success, clip_s3_key = s3_client.upload_clip_to_s3(
                 clip_path, video_id, clip_id, title
             )
-            
+
             if success:
                 clip_s3_url = s3_client.get_object_url(clip_s3_key)
                 clip["s3_key"] = clip_s3_key
                 clip["s3_url"] = clip_s3_url
                 logging.info(f"Clip uploaded to S3: {clip_s3_url}")
-                
+
                 # Clean up local clip file after successful S3 upload
                 try:
                     os.unlink(clip_path)
                     logging.info(f"Deleted local clip file: {clip_path}")
                 except Exception as cleanup_error:
-                    logging.warning(f"Failed to delete local clip file {clip_path}: {cleanup_error}")
+                    logging.warning(
+                        f"Failed to delete local clip file {clip_path}: {cleanup_error}"
+                    )
             else:
                 logging.error("Failed to upload clip to S3")
                 raise Exception("Failed to upload clip to S3")
 
             # Generate thumbnail for this clip
             thumbnail_filename = f"{clip.get('id')}_thumbnail.jpg"
-            
+
             # Create temporary thumbnail file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_thumb:
                 thumbnail_path = temp_thumb.name
@@ -2416,14 +2487,16 @@ async def generate_clip_task(
                     thumb_success, thumb_s3_key = s3_client.upload_thumbnail_to_s3(
                         thumbnail_path, video_id, clip_id
                     )
-                    
+
                     if thumb_success:
                         thumb_s3_url = s3_client.get_object_url(thumb_s3_key)
                         clip["thumbnail_s3_key"] = thumb_s3_key
                         clip["thumbnail_url"] = thumb_s3_url
                         logging.info(f"Thumbnail uploaded to S3: {thumb_s3_url}")
                     else:
-                        logging.warning("Failed to upload thumbnail to S3, using default")
+                        logging.warning(
+                            "Failed to upload thumbnail to S3, using default"
+                        )
                         clip["thumbnail_url"] = "/static/default_thumbnail.jpg"
                 else:
                     logging.warning(
@@ -2466,9 +2539,6 @@ async def generate_clip_task(
         import traceback
 
         logging.error(traceback.format_exc())
-
-
-
 
 
 @app.get("/processing-status/{video_id}")
@@ -2544,19 +2614,19 @@ async def get_processing_status(video_id: str):
 async def get_user_video_history(
     current_user: Annotated[User, Depends(get_current_user)],
     page: int = 1,
-    page_size: int = 10
+    page_size: int = 10,
 ):
     """Get user's video processing history"""
     try:
         # Use the new user video service
         result = await get_user_videos(current_user.id, page, page_size)
-        
+
         return {
             "videos": [video.dict() for video in result["videos"]],
             "total_count": result["total_count"],
             "page": result["page"],
             "page_size": result["page_size"],
-            "total_pages": result["total_pages"]
+            "total_pages": result["total_pages"],
         }
     except Exception as e:
         logging.error(f"Error getting user video history: {str(e)}")
@@ -2567,19 +2637,19 @@ async def get_user_video_history(
 async def get_user_clip_history(
     current_user: Annotated[User, Depends(get_current_user)],
     page: int = 1,
-    page_size: int = 10
+    page_size: int = 10,
 ):
     """Get user's clip history"""
     try:
         # Use the new user video service
         result = await get_user_clips(current_user.id, page, page_size)
-        
+
         return {
             "clips": [clip.dict() for clip in result["clips"]],
             "total_count": result["total_count"],
             "page": result["page"],
             "page_size": result["page_size"],
-            "total_pages": result["total_pages"]
+            "total_pages": result["total_pages"],
         }
     except Exception as e:
         logging.error(f"Error getting user clip history: {str(e)}")
@@ -2588,37 +2658,36 @@ async def get_user_clip_history(
 
 @app.get("/user/history/summary")
 async def get_user_history_summary(
-    current_user: Annotated[User, Depends(get_current_user)]
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
     """Get user's processing history summary"""
     try:
         db = get_database()
         videos_collection = db.videos
         clips_collection = db.clips
-        
+
         # Get counts
         total_videos = videos_collection.count_documents({"user_id": current_user.id})
         total_clips = clips_collection.count_documents({"user_id": current_user.id})
-        
+
         # Get recent activity (last 7 days)
         from datetime import datetime, timedelta
+
         week_ago = datetime.now() - timedelta(days=7)
-        
-        recent_videos = videos_collection.count_documents({
-            "user_id": current_user.id,
-            "created_at": {"$gte": week_ago}
-        })
-        
-        recent_clips = clips_collection.count_documents({
-            "user_id": current_user.id,
-            "created_at": {"$gte": week_ago}
-        })
-        
+
+        recent_videos = videos_collection.count_documents(
+            {"user_id": current_user.id, "created_at": {"$gte": week_ago}}
+        )
+
+        recent_clips = clips_collection.count_documents(
+            {"user_id": current_user.id, "created_at": {"$gte": week_ago}}
+        )
+
         return {
             "total_videos": total_videos,
             "total_clips": total_clips,
             "recent_videos": recent_videos,
-            "recent_clips": recent_clips
+            "recent_clips": recent_clips,
         }
     except Exception as e:
         logging.error(f"Error getting user history summary: {str(e)}")
@@ -2631,19 +2700,21 @@ async def get_clips_info(video_id: str):
     try:
         # Try to get clips_info.json from S3
         clips_info_s3_key = f"{settings.S3_UPLOAD_PREFIX}{video_id}/clips_info.json"
-        
+
         if not s3_client.available:
             raise HTTPException(status_code=501, detail="S3 not configured")
-        
+
         # Check if clips_info.json exists in S3
         try:
-            response = s3_client.s3_client.head_object(Bucket=s3_client.bucket, Key=clips_info_s3_key)
+            response = s3_client.s3_client.head_object(
+                Bucket=s3_client.bucket, Key=clips_info_s3_key
+            )
             clips_info_s3_url = s3_client.get_object_url(clips_info_s3_key)
-            
+
             return {
                 "video_id": video_id,
                 "clips_info_url": clips_info_s3_url,
-                "exists": True
+                "exists": True,
             }
         except Exception as e:
             # If clips_info.json doesn't exist, return empty response
@@ -2651,20 +2722,12 @@ async def get_clips_info(video_id: str):
                 "video_id": video_id,
                 "clips_info_url": None,
                 "exists": False,
-                "message": "clips_info.json not found in S3"
+                "message": "clips_info.json not found in S3",
             }
-            
+
     except Exception as e:
         logging.error(f"Error getting clips_info.json for video {video_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-
-
-
-
-
-
 
 
 # Run the application

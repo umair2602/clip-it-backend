@@ -6,6 +6,7 @@ import sieve
 import shutil
 import tempfile
 from config import settings
+from typing import Optional, Callable
 
 # Initialize Sieve with API key
 sieve.api_key = settings.SIEVE_API_KEY
@@ -16,7 +17,32 @@ if not sieve.api_key or sieve.api_key == "":
 else:
     logging.info(f"✅ Sieve API key configured (length: {len(sieve.api_key)} chars)")
 
-async def download_youtube_video_sieve(url: str, output_dir: Path) -> tuple:
+# Global cancellation flag for the current download
+_cancellation_flag = {"cancelled": False, "user_id": None, "video_id": None}
+
+def set_download_cancellation_context(user_id: str, video_id: str):
+    """Set the cancellation context for the download"""
+    _cancellation_flag["cancelled"] = False
+    _cancellation_flag["user_id"] = user_id
+    _cancellation_flag["video_id"] = video_id
+    logging.info(f"🔒 Download cancellation context set: user={user_id}, video={video_id}")
+
+def clear_download_cancellation_context():
+    """Clear the cancellation context"""
+    _cancellation_flag["cancelled"] = False
+    _cancellation_flag["user_id"] = None
+    _cancellation_flag["video_id"] = None
+
+def mark_download_cancelled():
+    """Mark the current download as cancelled"""
+    _cancellation_flag["cancelled"] = True
+    logging.warning(f"🛑 Download marked as cancelled")
+
+def is_download_cancelled() -> bool:
+    """Check if the current download is cancelled"""
+    return _cancellation_flag.get("cancelled", False)
+
+async def download_youtube_video_sieve(url: str, output_dir: Path, user_id: str = None, video_id: str = None) -> tuple:
     """
     Download a YouTube video using Sieve API
     
@@ -124,6 +150,11 @@ def _download_video_sieve(url: str, output_dir: Path) -> tuple:
         temp_file_path = None
         
         for output_object in output:
+            # Check for cancellation before processing each output
+            if is_download_cancelled():
+                logging.warning(f"🛑 Download cancelled during Sieve processing")
+                raise Exception("Download cancelled by user")
+            
             output_count += 1
             logging.info(f"🎯 Received output object from Sieve generator (iteration {output_count})")
             logging.info(f"📦 Processing Sieve output object #{output_count}")
@@ -140,6 +171,11 @@ def _download_video_sieve(url: str, output_dir: Path) -> tuple:
             # Second object is the file (sieve.File)
             # Get the file path from the output
             if hasattr(output_object, 'path'):
+                # Check cancellation before file download
+                if is_download_cancelled():
+                    logging.warning(f"🛑 Download cancelled before file retrieval")
+                    raise Exception("Download cancelled by user")
+                    
                 logging.info(f"   ⏳ Accessing .path property (this triggers download from Sieve)...")
                 temp_file_path = output_object.path
                 logging.info(f"   ✅ Found file path: {temp_file_path}")
