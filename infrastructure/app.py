@@ -590,6 +590,7 @@ class ClipItStack(Stack):
                     weight=1
                 )
             ],
+            security_groups=[ecs_security_group],
             enable_execute_command=True
         )
 
