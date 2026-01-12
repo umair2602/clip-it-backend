@@ -122,10 +122,10 @@ class ClipItStack(Stack):
                 description="Security group for GPU EC2 worker instances",
                 allow_all_outbound=True
             ),
-            # spot_options=ec2.LaunchTemplateSpotOptions(
-            #     request_type=ec2.SpotRequestType.ONE_TIME,
-            #     max_price=0.25
-            # ),
+            spot_options=ec2.LaunchTemplateSpotOptions(
+                request_type=ec2.SpotRequestType.ONE_TIME,
+                max_price=0.25
+            ),
             role=iam.Role(
                 self, "EC2InstanceRole",
                 assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
