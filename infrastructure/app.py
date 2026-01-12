@@ -106,12 +106,24 @@ class ClipItStack(Stack):
         # EC2 GPU INFRASTRUCTURE FOR WORKERS
         # ========================================
 
+        # Create IAM role for EC2 instances (separate from launch template)
+        ec2_instance_role = iam.Role(
+            self, "EC2InstanceRole",
+            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonEC2ContainerServiceforEC2Role"
+                ),
+                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
+            ]
+        )
+
         # Get GPU-optimized AMI
         gpu_ami = ecs.EcsOptimizedImage.amazon_linux2(
             hardware_type=ecs.AmiHardwareType.GPU
         )
 
-        # Launch Template for Spot GPU instances
+        # Launch Template for GPU instances (On-Demand)
         spot_launch_template = ec2.LaunchTemplate(
             self, "GPUSpotLaunchTemplate",
             instance_type=ec2.InstanceType("g4dn.xlarge"),
@@ -122,20 +134,7 @@ class ClipItStack(Stack):
                 description="Security group for GPU EC2 worker instances",
                 allow_all_outbound=True
             ),
-            spot_options=ec2.LaunchTemplateSpotOptions(
-                request_type=ec2.SpotRequestType.ONE_TIME,
-                max_price=0.25
-            ),
-            role=iam.Role(
-                self, "EC2InstanceRole",
-                assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
-                managed_policies=[
-                    iam.ManagedPolicy.from_aws_managed_policy_name(
-                        "service-role/AmazonEC2ContainerServiceforEC2Role"
-                    ),
-                    iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
-                ]
-            ),
+            role=ec2_instance_role,
             user_data=ec2.UserData.for_linux()
         )
 
