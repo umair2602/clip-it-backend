@@ -28,7 +28,19 @@ class ClipItStack(Stack):
             max_azs=2,
             nat_gateways=0,  # Not needed since GPU worker uses PUBLIC subnet
             enable_dns_hostnames=True,
-            enable_dns_support=True
+            enable_dns_support=True,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24
+                ),
+                ec2.SubnetConfiguration(
+                    name="Private",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,  # No NAT needed
+                    cidr_mask=24
+                )
+            ]
         )
 
         # Create S3 bucket for file storage
@@ -43,7 +55,7 @@ class ClipItStack(Stack):
         redis_subnet_group = elasticache.CfnSubnetGroup(
             self, "RedisSubnetGroup",
             description="Subnet group for Redis cluster",
-            subnet_ids=[subnet.subnet_id for subnet in vpc.private_subnets]
+            subnet_ids=[subnet.subnet_id for subnet in vpc.isolated_subnets]
         )
 
         redis_security_group = ec2.SecurityGroup(
