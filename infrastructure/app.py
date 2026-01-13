@@ -26,7 +26,7 @@ class ClipItStack(Stack):
         vpc = ec2.Vpc(
             self, "ClipItVPC",
             max_azs=2,
-            nat_gateways=1,
+            nat_gateways=0,  # Not needed since GPU worker uses PUBLIC subnet
             enable_dns_hostnames=True,
             enable_dns_support=True
         )
@@ -135,13 +135,41 @@ class ClipItStack(Stack):
                 allow_all_outbound=True
             ),
             role=ec2_instance_role,
-            user_data=ec2.UserData.for_linux()
+            user_data=ec2.UserData.for_linux(),
+            require_imdsv2=True
         )
 
         spot_launch_template.user_data.add_commands(
+            # Enable detailed logging
+            "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1",
+            "set -x",  # Print all commands
+            "echo '=== GPU Worker Instance Setup Started ==='",
+            "date",
+            
+            # Configure ECS
+            f"echo 'Configuring ECS cluster: {cluster.cluster_name}'",
             f"echo ECS_CLUSTER={cluster.cluster_name} >> /etc/ecs/ecs.config",
             "echo ECS_ENABLE_GPU_SUPPORT=true >> /etc/ecs/ecs.config",
-            "systemctl restart ecs"
+            "echo ECS_AVAILABLE_LOGGING_DRIVERS='[\"json-file\",\"awslogs\"]' >> /etc/ecs/ecs.config",
+            
+            # Verify configuration
+            "echo '=== ECS Configuration ==='",
+            "cat /etc/ecs/ecs.config",
+            
+            # Check GPU
+            "echo '=== GPU Check ==='",
+            "nvidia-smi || echo 'nvidia-smi failed'",
+            
+            # Restart ECS agent
+            "echo '=== Restarting ECS Agent ==='",
+            "systemctl restart ecs",
+            "sleep 5",
+            "systemctl status ecs",
+            
+            # Final status
+            "echo '=== Setup Complete ==='",
+            "date",
+            "echo 'Logs available at: /var/log/user-data.log and /var/log/ecs/ecs-init.log'"
         )
 
         # Auto Scaling Group for 1 Spot Worker
@@ -152,7 +180,8 @@ class ClipItStack(Stack):
             min_capacity=1,
             max_capacity=1,
             desired_capacity=1,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            associate_public_ip_address=True  # CRITICAL: Ensure instances get public IPs
         )
 
         # Capacity Provider
