@@ -32,13 +32,11 @@ class ClipItStack(Stack):
         )
 
         # Create S3 bucket for file storage
-        s3_bucket = s3.Bucket(
+        # Import existing S3 bucket (created outside stack or from previous deployment)
+        bucket_name = f"clip-it-storage-{self.account}-{self.region}"
+        s3_bucket = s3.Bucket.from_bucket_name(
             self, "ClipItStorage",
-            bucket_name=f"clip-it-storage-{self.account}-{self.region}",
-            versioned=True,
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            removal_policy=cdk.RemovalPolicy.RETAIN
+            bucket_name=bucket_name
         )
 
         # Create ElastiCache Redis cluster
@@ -77,29 +75,15 @@ class ClipItStack(Stack):
             cluster_name="clip-it-cluster"
         )
 
-        # Create ECR repositories
-        web_repo = ecr.Repository(
+        # Import existing ECR repositories (created outside stack or from previous deployment)
+        web_repo = ecr.Repository.from_repository_name(
             self, "WebRepository",
-            repository_name="clip-it-web",
-            image_scan_on_push=True,
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    max_image_count=10,
-                    rule_priority=1
-                )
-            ]
+            repository_name="clip-it-web"
         )
 
-        worker_repo = ecr.Repository(
+        worker_repo = ecr.Repository.from_repository_name(
             self, "WorkerRepository",
-            repository_name="clip-it-worker",
-            image_scan_on_push=True,
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    max_image_count=10,
-                    rule_priority=1
-                )
-            ]
+            repository_name="clip-it-worker"
         )
 
         # ========================================
