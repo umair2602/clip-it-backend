@@ -123,20 +123,25 @@ class ClipItStack(Stack):
             hardware_type=ecs.AmiHardwareType.GPU
         )
 
+        # Security group for GPU worker instances
+        worker_sg = ec2.SecurityGroup(
+            self, "WorkerEC2SecurityGroup",
+            vpc=vpc,
+            description="Security group for GPU EC2 worker instances",
+            allow_all_outbound=True
+        )
+
         # Launch Template for GPU instances (On-Demand)
         spot_launch_template = ec2.LaunchTemplate(
             self, "GPUSpotLaunchTemplate",
             instance_type=ec2.InstanceType("g4dn.xlarge"),
             machine_image=gpu_ami,
-            security_group=ec2.SecurityGroup(
-                self, "WorkerEC2SecurityGroup",
-                vpc=vpc,
-                description="Security group for GPU EC2 worker instances",
-                allow_all_outbound=True
-            ),
             role=ec2_instance_role,
             user_data=ec2.UserData.for_linux(),
-            require_imdsv2=True
+            require_imdsv2=True,
+            # Associate public IP for ECS connectivity
+            associate_public_ip_address=True,
+            security_group=worker_sg
         )
 
         spot_launch_template.user_data.add_commands(
@@ -180,8 +185,7 @@ class ClipItStack(Stack):
             min_capacity=1,
             max_capacity=1,
             desired_capacity=1,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-            associate_public_ip_address=True  # CRITICAL: Ensure instances get public IPs
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
 
         # Capacity Provider
