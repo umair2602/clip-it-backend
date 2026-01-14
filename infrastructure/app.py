@@ -140,9 +140,23 @@ class ClipItStack(Stack):
         )
 
         spot_launch_template.user_data.add_commands(
+            "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1",
+            "set -x",
+            "echo '=== GPU Worker Instance Setup Started ==='",
+            "date",
             f"echo ECS_CLUSTER={cluster.cluster_name} >> /etc/ecs/ecs.config",
             "echo ECS_ENABLE_GPU_SUPPORT=true >> /etc/ecs/ecs.config",
-            "systemctl restart ecs"
+            "echo ECS_AVAILABLE_LOGGING_DRIVERS='[\"json-file\",\"awslogs\"]' >> /etc/ecs/ecs.config",
+            "echo '=== ECS Configuration ==='",
+            "cat /etc/ecs/ecs.config",
+            "echo '=== GPU Check ==='",
+            "nvidia-smi || echo 'nvidia-smi failed'",
+            "echo '=== Restarting ECS Agent ==='",
+            "systemctl restart ecs",
+            "sleep 5",
+            "systemctl status ecs",
+            "echo '=== Setup Complete ==='",
+            "date"
         )
 
         # Auto Scaling Group for 1 Spot Worker
@@ -153,7 +167,7 @@ class ClipItStack(Stack):
             min_capacity=1,
             max_capacity=1,
             desired_capacity=1,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
 
         # Capacity Provider
