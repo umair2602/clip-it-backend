@@ -26,26 +26,36 @@ class ClipItStack(Stack):
         vpc = ec2.Vpc(
             self, "ClipItVPC",
             max_azs=2,
-            nat_gateways=1,
+            nat_gateways=0,  # Not needed since GPU worker uses PUBLIC subnet
             enable_dns_hostnames=True,
-            enable_dns_support=True
+            enable_dns_support=True,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24
+                ),
+                ec2.SubnetConfiguration(
+                    name="Private",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,  # No NAT needed
+                    cidr_mask=24
+                )
+            ]
         )
 
         # Create S3 bucket for file storage
-        s3_bucket = s3.Bucket(
+        # Import existing S3 bucket (created outside stack or from previous deployment)
+        bucket_name = f"clip-it-storage-{self.account}-{self.region}"
+        s3_bucket = s3.Bucket.from_bucket_name(
             self, "ClipItStorage",
-            bucket_name=f"clip-it-storage-{self.account}-{self.region}",
-            versioned=True,
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            removal_policy=cdk.RemovalPolicy.RETAIN
+            bucket_name=bucket_name
         )
 
         # Create ElastiCache Redis cluster
         redis_subnet_group = elasticache.CfnSubnetGroup(
             self, "RedisSubnetGroup",
             description="Subnet group for Redis cluster",
-            subnet_ids=[subnet.subnet_id for subnet in vpc.private_subnets]
+            subnet_ids=[subnet.subnet_id for subnet in vpc.isolated_subnets]
         )
 
         redis_security_group = ec2.SecurityGroup(
@@ -77,66 +87,57 @@ class ClipItStack(Stack):
             cluster_name="clip-it-cluster"
         )
 
-        # Create ECR repositories
-        web_repo = ecr.Repository(
+        # Import existing ECR repositories (created outside stack or from previous deployment)
+        web_repo = ecr.Repository.from_repository_name(
             self, "WebRepository",
-            repository_name="clip-it-web",
-            image_scan_on_push=True,
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    max_image_count=10,
-                    rule_priority=1
-                )
-            ]
+            repository_name="clip-it-web"
         )
 
-        worker_repo = ecr.Repository(
+        worker_repo = ecr.Repository.from_repository_name(
             self, "WorkerRepository",
-            repository_name="clip-it-worker",
-            image_scan_on_push=True,
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    max_image_count=10,
-                    rule_priority=1
-                )
-            ]
+            repository_name="clip-it-worker"
         )
 
         # ========================================
         # EC2 GPU INFRASTRUCTURE FOR WORKERS
         # ========================================
 
+        # Create IAM role for EC2 instances (separate from launch template)
+        ec2_instance_role = iam.Role(
+            self, "EC2InstanceRole",
+            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonEC2ContainerServiceforEC2Role"
+                ),
+                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
+            ]
+        )
+
         # Get GPU-optimized AMI
         gpu_ami = ecs.EcsOptimizedImage.amazon_linux2(
             hardware_type=ecs.AmiHardwareType.GPU
         )
 
-        # Launch Template for Spot GPU instances
+        # Security group for GPU worker instances
+        worker_sg = ec2.SecurityGroup(
+            self, "WorkerEC2SecurityGroup",
+            vpc=vpc,
+            description="Security group for GPU EC2 worker instances",
+            allow_all_outbound=True
+        )
+
+        # Launch Template for GPU instances (On-Demand)
         spot_launch_template = ec2.LaunchTemplate(
             self, "GPUSpotLaunchTemplate",
             instance_type=ec2.InstanceType("g4dn.xlarge"),
             machine_image=gpu_ami,
-            security_group=ec2.SecurityGroup(
-                self, "WorkerEC2SecurityGroup",
-                vpc=vpc,
-                description="Security group for GPU EC2 worker instances",
-                allow_all_outbound=True
-            ),
-            # spot_options=ec2.LaunchTemplateSpotOptions(
-            #     request_type=ec2.SpotRequestType.ONE_TIME,
-            #     max_price=0.25
-            # ),
-            role=iam.Role(
-                self, "EC2InstanceRole",
-                assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
-                managed_policies=[
-                    iam.ManagedPolicy.from_aws_managed_policy_name(
-                        "service-role/AmazonEC2ContainerServiceforEC2Role"
-                    ),
-                    iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
-                ]
-            ),
-            user_data=ec2.UserData.for_linux()
+            role=ec2_instance_role,
+            user_data=ec2.UserData.for_linux(),
+            require_imdsv2=True,
+            # Associate public IP for ECS connectivity
+            associate_public_ip_address=True,
+            security_group=worker_sg
         )
 
         spot_launch_template.user_data.add_commands(

@@ -61,17 +61,11 @@ jobs:
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         echo "AWS Account ID: $AWS_ACCOUNT_ID"
         
-        # Check if CDK is properly bootstrapped by checking SSM parameter
-        echo "🔍 Checking CDK bootstrap status..."
-        if aws ssm get-parameter --name "/cdk-bootstrap/hnb659fds/version" --region $AWS_DEFAULT_REGION >/dev/null 2>&1; then
-          echo "✅ CDK already bootstrapped for this region"
-        else
-          echo "🔧 Bootstrapping CDK..."
-          cdk bootstrap --require-approval never || {
-            echo "⚠️ Bootstrap failed, trying to force bootstrap..."
-            cdk bootstrap --force --require-approval never
-          }
-        fi
+        # Always update CDK bootstrap to latest version
+        echo "🔧 Updating CDK bootstrap to latest version..."
+        cdk bootstrap aws://$AWS_ACCOUNT_ID/$AWS_DEFAULT_REGION --force --require-approval never || {
+          echo "⚠️ Bootstrap update failed, continuing with existing bootstrap..."
+        }
         
         # Get SSL certificate ARN from SSM (if available)
         echo "🔍 Checking for SSL certificate..."
