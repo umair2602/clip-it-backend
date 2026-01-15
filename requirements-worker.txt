@@ -14,6 +14,7 @@ Pillow>=10.0.0
 charset-normalizer>=3.0.0  # Pure Python charset detection (replaces cchardet which fails on Python 3.11+)
 pytube>=15.0.0
 pytubefix>=6.0.0
+sievedata
 sieve-sdk
 yt-dlp>=2024.0.0
 redis>=5.0.0
