@@ -12,7 +12,7 @@ env:
   ECR_REPOSITORY_WEB: clip-it-web
   ECR_REPOSITORY_WORKER: clip-it-worker
   ECS_SERVICE_WEB: clip-it-web-service
-  ECS_SERVICE_WORKER: clip-it-worker-service
+  ECS_SERVICE_WORKER: clip-it-gpu-worker-service
   ECS_CLUSTER: clip-it-cluster
   ECS_TASK_DEFINITION_WEB: clip-it-web-task
   ECS_TASK_DEFINITION_WORKER: clip-it-worker-task
