@@ -1,7 +1,7 @@
 # Multi-stage build for web application
 FROM python:3.11-slim AS base
 
-# Install minimal system dependencies (including g++ for building C extensions like cchardet)
+# Install minimal system dependencies (including build tools for C extensions like cchardet)
 RUN apt-get update && apt-get install -y \
     curl \
     ffmpeg \
@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     libxrender1 \
     libfontconfig1 \
     g++ \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
