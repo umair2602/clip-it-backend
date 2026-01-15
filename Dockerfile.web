@@ -20,9 +20,10 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy requirements and install Python dependencies
+# Note: charset-normalizer replaces cchardet (which doesn't compile on Python 3.11+)
 COPY requirements-web.txt requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt --exclude cchardet && \
     pip cache purge && \
     rm -rf /root/.cache/pip
 
