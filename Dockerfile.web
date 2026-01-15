@@ -21,11 +21,14 @@ WORKDIR /app
 
 # Copy requirements and install Python dependencies
 # Note: charset-normalizer replaces cchardet (which doesn't compile on Python 3.11+)
+# We use a constraints file to block cchardet installation
 COPY requirements-web.txt requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt --exclude cchardet && \
+    echo "cchardet==99.99.99" > /tmp/constraints.txt && \
+    pip install --no-cache-dir -r requirements.txt -c /tmp/constraints.txt || \
+    pip install --no-cache-dir -r requirements.txt && \
     pip cache purge && \
-    rm -rf /root/.cache/pip
+    rm -rf /root/.cache/pip /tmp/constraints.txt
 
 # Copy application code
 COPY . .
