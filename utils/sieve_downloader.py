@@ -20,7 +20,6 @@ from typing import Optional, Callable
 # ============================================================================
 # SIEVE DISABLED - The sievedata package is not installing correctly
 # ============================================================================
-logging.warning("⚠️  Sieve module is DISABLED - sievedata package dependency not resolving")
 
 # Global cancellation flag for the current download (kept for compatibility)
 _cancellation_flag = {"cancelled": False, "user_id": None, "video_id": None}
