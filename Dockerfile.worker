@@ -21,10 +21,10 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements-worker.txt requirements.txt
 
-# Install Python dependencies in stages to reduce space usage
-# Note: charset-normalizer replaces cchardet (which doesn't compile on Python 3.11+)
+# Install Python dependencies in stages
+# UPDATED: Changed index-url from 'cpu' to 'cu118' to enable GPU support on AWS g4dn instances
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 && \
     echo "cchardet==99.99.99" > /tmp/constraints.txt && \
     pip install --no-cache-dir -r requirements.txt -c /tmp/constraints.txt || \
     pip install --no-cache-dir -r requirements.txt && \
