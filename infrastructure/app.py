@@ -608,7 +608,7 @@ class ClipItStack(Stack):
             enable_execute_command=True,
             # Allow stopping old task before new one starts (required for single GPU)
             min_healthy_percent=0,
-            max_healthy_percent=100
+            max_healthy_percent=200
         )
 
 
