@@ -605,7 +605,10 @@ class ClipItStack(Stack):
                 )
             ],
             security_groups=[ecs_security_group],
-            enable_execute_command=True
+            enable_execute_command=True,
+            # Allow stopping old task before new one starts (required for single GPU)
+            min_healthy_percent=0,
+            max_healthy_percent=100
         )
 
 
