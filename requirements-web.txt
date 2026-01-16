@@ -27,7 +27,7 @@ email-validator
 s3transfer>=0.10.0
 httpx>=0.25.0
 ffmpeg-python>=0.2.0
-sievedata  # Sieve AI video processing API (Python client)
+# sievedata  # DISABLED - dependency not resolving (TODO: re-enable when fixed)
 pytube>=15.0.0
 pytubefix>=6.0.0
 yt-dlp>=2024.0.0
