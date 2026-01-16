@@ -65,7 +65,7 @@ from utils.s3_validator import (
     sanitize_urls_for_response,
     assert_response_urls,
 )
-from utils.sieve_downloader import download_youtube_video_sieve
+# from utils.sieve_downloader import download_youtube_video_sieve  # Disabled - sieve dependency not resolving
 
 # Import YouTube downloader (both original and new Sieve version)
 from utils.youtube_downloader import download_youtube_video
@@ -1375,28 +1375,30 @@ async def process_youtube_download_local(
         file_path, title, video_info = None, None, None
         max_retries = 3
 
-        # Tier 1: Try Sieve API (fastest, requires valid API key)
-        for attempt in range(1, max_retries + 1):
-            try:
-                logging.info(
-                    f"Task {task_id}: [Tier 1] Attempt {attempt} to download with Sieve service"
-                )
-                file_path, title, video_info = await download_youtube_video_sieve(
-                    url, video_dir
-                )
-                if file_path and title:
-                    logging.info(f"Task {task_id}: ✅ Sieve download successful")
-                    break
-            except Exception as sieve_error:
-                logging.warning(
-                    f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}"
-                )
-                if attempt == max_retries:
-                    logging.error(
-                        f"Task {task_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix."
-                    )
-                    break
-                await asyncio.sleep(5)
+        # Tier 1: Try Sieve API - DISABLED due to sieve dependency not resolving
+        # TODO: Re-enable when sievedata package is fixed
+        # for attempt in range(1, max_retries + 1):
+        #     try:
+        #         logging.info(
+        #             f"Task {task_id}: [Tier 1] Attempt {attempt} to download with Sieve service"
+        #         )
+        #         file_path, title, video_info = await download_youtube_video_sieve(
+        #             url, video_dir
+        #         )
+        #         if file_path and title:
+        #             logging.info(f"Task {task_id}: ✅ Sieve download successful")
+        #             break
+        #     except Exception as sieve_error:
+        #         logging.warning(
+        #             f"Task {task_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}"
+        #         )
+        #         if attempt == max_retries:
+        #             logging.error(
+        #                 f"Task {task_id}: All {max_retries} Sieve attempts failed. Falling back to pytubefix."
+        #             )
+        #             break
+        #         await asyncio.sleep(5)
+        logging.info(f"Task {task_id}: Sieve disabled - using pytubefix as primary downloader")
 
         # Tier 2: Fallback to pytubefix if Sieve failed
         if not file_path or not title:
