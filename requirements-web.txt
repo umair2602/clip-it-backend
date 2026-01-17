@@ -8,6 +8,7 @@ boto3>=1.34.0
 Pillow>=10.0.0
 opencv-python>=4.8.0
 openai>=1.0.0
+charset-normalizer>=3.0.0  # Pure Python charset detection (replaces cchardet which fails on Python 3.11+)
 assemblyai>=0.17.0
 openai-whisper>=20231117
 torch>=2.0.0
@@ -26,7 +27,7 @@ email-validator
 s3transfer>=0.10.0
 httpx>=0.25.0
 ffmpeg-python>=0.2.0
-sievedata
+# sievedata  # DISABLED - dependency not resolving (TODO: re-enable when fixed)
 pytube>=15.0.0
 pytubefix>=6.0.0
 yt-dlp>=2024.0.0

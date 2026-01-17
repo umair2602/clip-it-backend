@@ -606,8 +606,9 @@ class ClipItStack(Stack):
             ],
             security_groups=[ecs_security_group],
             enable_execute_command=True,
-            min_healthy_percent=0,  # Allow stopping old task before starting new one during deployments
-            max_healthy_percent=100  # Only run 1 task at a time (no extra tasks during deployment)
+            # Allow stopping old task before new one starts (required for single GPU)
+            min_healthy_percent=0,
+            max_healthy_percent=200
         )
 
 

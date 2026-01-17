@@ -2,8 +2,7 @@
 openai>=1.0.0
 assemblyai>=0.17.0
 openai-whisper>=20231117
-torch>=2.0.0+cu118
---extra-index-url https://download.pytorch.org/whl/cu118
+# torch is installed separately in Dockerfile to control CPU/GPU version
 opencv-python>=4.8.0
 protobuf<5.0.0  # Pin for MediaPipe compatibility
 mediapipe>=0.10.7,<0.10.22  # Pin to legacy solutions API (0.10.22+ changed API)
@@ -11,10 +10,11 @@ numpy>=1.24.0
 pydantic[email]>=2.0.0
 python-dotenv>=1.0.0
 boto3>=1.34.0
-Pillow>=10.0.0
+Pillow>=10.0.0 
+charset-normalizer>=3.0.0  # Pure Python charset detection (replaces cchardet which fails on Python 3.11+)
 pytube>=15.0.0
 pytubefix>=6.0.0
-sievedata
+# sievedata  # DISABLED - dependency not resolving (TODO: re-enable when fixed)
 yt-dlp>=2024.0.0
 redis>=5.0.0
 celery[redis]>=5.3.0
