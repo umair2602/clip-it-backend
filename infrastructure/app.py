@@ -596,7 +596,7 @@ class ClipItStack(Stack):
             self, "WorkerService",
             cluster=cluster,
             task_definition=worker_task_definition,
-            desired_count=1,
+            desired_count=0,  # Start with 0 tasks (scale up when needed)
             service_name="clip-it-gpu-worker-service",
             capacity_provider_strategies=[
                 ecs.CapacityProviderStrategy(
