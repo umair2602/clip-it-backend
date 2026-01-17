@@ -167,7 +167,7 @@ class ClipItStack(Stack):
             launch_template=spot_launch_template,
             min_capacity=1,
             max_capacity=1,
-            desired_capacity=1,
+            desired_capacity=0,  # Start at 0 to save costs when not in use
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
 
@@ -605,7 +605,9 @@ class ClipItStack(Stack):
                 )
             ],
             security_groups=[ecs_security_group],
-            enable_execute_command=True
+            enable_execute_command=True,
+            min_healthy_percent=0,  # Allow stopping old task before starting new one during deployments
+            max_healthy_percent=100  # Only run 1 task at a time (no extra tasks during deployment)
         )
 
 
