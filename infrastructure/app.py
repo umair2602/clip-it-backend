@@ -126,6 +126,13 @@ class ClipItStack(Stack):
             description="Security group for GPU EC2 worker instances",
             allow_all_outbound=True
         )
+        
+        # Allow SSH from specific IP for debugging (temporary)
+        worker_sg.add_ingress_rule(
+            ec2.Peer.ipv4("154.57.223.208/32"),
+            ec2.Port.tcp(22),
+            "Allow SSH for debugging"
+        )
 
         # Launch Template for GPU instances (On-Demand)
 
@@ -161,7 +168,8 @@ class ClipItStack(Stack):
             user_data=gpu_user_data,
             require_imdsv2=True,
             associate_public_ip_address=True,
-            security_group=worker_sg
+            security_group=worker_sg,
+            key_name="clip-it-gpu-debug"  # SSH key for debugging
         )
 
         # Auto Scaling Group for 1 Spot Worker
