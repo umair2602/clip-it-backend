@@ -225,16 +225,25 @@ jobs:
         container-name: ${{ env.CONTAINER_NAME_WORKER }}
         image: ${{ steps.build-worker-image.outputs.image }}
 
-    - name: Start ECS Services
+    - name: Start ECS Services and Scale ASG
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
       run: |
         echo "🚀 Starting ECS services..."
+        
+        # Explicitly scale up GPU ASG to 1 to speed up deployment
+        # The ASG name contains a random string, so we find it by prefix
+        ASG_NAME=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, 'ClipItStack-GPUWorkerASG')].AutoScalingGroupName" --output text)
+        if [ ! -z "$ASG_NAME" ]; then
+          echo "📈 Scaling up ASG: $ASG_NAME"
+          aws autoscaling set-desired-capacity --auto-scaling-group-name "$ASG_NAME" --desired-capacity 1
+        fi
+
         aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WEB }} --desired-count 1
         aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WORKER }} --desired-count 1
-        echo "✅ ECS services started"
+        echo "✅ ECS services started and ASG scaling requested"
 
     - name: Deploy Amazon ECS task definition (web)
       env:
@@ -259,6 +268,7 @@ jobs:
         service: ${{ env.ECS_SERVICE_WORKER }}
         cluster: ${{ env.ECS_CLUSTER }}
         wait-for-service-stability: true
+        wait-for-minutes: 20  # Increase stability timeout for GPU initialization
 
     - name: Notify deployment status
       if: always()

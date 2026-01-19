@@ -172,12 +172,13 @@ class ClipItStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
 
-        # Capacity Provider
+        # Capacity Provider for GPU ASG
         gpu_capacity_provider = ecs.AsgCapacityProvider(
             self, "GPUCapacityProvider",
             auto_scaling_group=gpu_asg,
-            enable_managed_termination_protection=False,
-            enable_managed_scaling=False
+            enable_managed_termination_protection=False, # Keeping this disabled to avoid complexity with scale-to-zero
+            enable_managed_scaling=True,
+            target_capacity_percent=100
         )
         cluster.add_asg_capacity_provider(gpu_capacity_provider)
 
