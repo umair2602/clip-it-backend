@@ -950,6 +950,11 @@ async def process_video_job(job_id: str, job_data: dict):
         job_queue.release_job_lock(job_id)
         if original_job_id:
             job_queue.release_job_lock(original_job_id)
+        
+        # Delete the completed job from Redis to prevent accumulation
+        job_queue.delete_job(job_id)
+        if original_job_id:
+            job_queue.delete_job(original_job_id)
 
     except ProcessingCancelledException as e:
         logger.warning(f"Processing cancelled for job {job_id}: {str(e)}")
@@ -976,6 +981,11 @@ async def process_video_job(job_id: str, job_data: dict):
                     logger.info(f"🗑️ Cleaned up cancelled output directory: {video_output_dir}")
             except Exception as cleanup_error:
                 logger.warning(f"⚠️ Failed to clean up cancelled files: {cleanup_error}")
+        
+        # Delete cancelled job from Redis
+        job_queue.delete_job(job_id)
+        if original_job_id:
+            job_queue.delete_job(original_job_id)
     
     # Also catch ProcessingCancelledException from video_processing module
     except Exception as e:
@@ -1049,6 +1059,11 @@ async def process_video_job(job_id: str, job_data: dict):
         job_queue.release_job_lock(job_id)
         if original_job_id:
             job_queue.release_job_lock(original_job_id)
+        
+        # Delete failed job from Redis
+        job_queue.delete_job(job_id)
+        if original_job_id:
+            job_queue.delete_job(original_job_id)
 
 
 async def process_manual_clip_job(job_id: str, job_data: dict):
@@ -1433,6 +1448,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
             
             # Release lock on successful completion
             job_queue.release_job_lock(job_id)
+            # Delete completed job from Redis
+            job_queue.delete_job(job_id)
             
         finally:
             # Stop the cancellation monitor
@@ -1451,6 +1468,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         )
         # Release lock on cancellation
         job_queue.release_job_lock(job_id)
+        # Delete cancelled job from Redis
+        job_queue.delete_job(job_id)
         logger.info(f"✅ Gracefully stopped uploaded video processing for cancelled video {video_id or 'unknown'}")
         
     except Exception as e:
@@ -1474,6 +1493,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         )
         # Release lock on error
         job_queue.release_job_lock(job_id)
+        # Delete failed job from Redis
+        job_queue.delete_job(job_id)
         
     finally:
         # Clean up temporary file

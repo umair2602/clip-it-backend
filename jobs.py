@@ -146,6 +146,15 @@ class JobQueue:
             self.redis_client.lpush("job_queue", job_id)
             logger.info(f"Job {job_id} requeued for retry")
 
+    def delete_job(self, job_id: str):
+        """Delete a completed/cancelled job from Redis to prevent accumulation"""
+        if self.redis_client:
+            # Delete the job hash
+            self.redis_client.delete(f"job:{job_id}")
+            # Delete any lock (just in case)
+            self.redis_client.delete(f"job:lock:{job_id}")
+            logger.info(f"Job {job_id} deleted from Redis")
+
     def recover_stuck_jobs(self):
         """Find jobs in 'processing' state and put them back in queue (for worker startup)"""
         if self.redis_client:
