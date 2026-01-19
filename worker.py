@@ -141,13 +141,12 @@ async def check_if_cancelled(user_id: str, video_id: str) -> bool:
                 else:
                     logger.warning(f"⚠️ Video {video_id} failed but not due to cancellation: {error_msg}")
         else:
-            logger.warning("No GPU detected. Using CPU for transcription")
-
-        whisper_model = load_model(model_size="tiny")
-        logger.info("Worker initialized successfully.")
+            logger.warning(f"⚠️ Video {video_id} not found for cancellation check")
+            
+        return False  # Not cancelled
         
-        # Recover any jobs stuck from a previous crash or Spot interruption
-        job_queue.recover_stuck_jobs()
+    except ProcessingCancelledException:
+        raise  # Re-raise cancellation exception
     except Exception as e:
         logger.warning(f"Error checking cancellation status: {e}")
         return False
@@ -157,6 +156,29 @@ async def initialize_worker():
     """Initialize the worker - verify AssemblyAI API key is configured"""
     try:
         logger.info("🚀 Initializing worker with AssemblyAI...")
+        
+        # Check GPU availability and log status
+        try:
+            import subprocess
+            # Check for NVIDIA GPU
+            nvidia_result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if nvidia_result.returncode == 0 and nvidia_result.stdout.strip():
+                gpu_info = nvidia_result.stdout.strip()
+                logger.info(f"🎮 GPU DETECTED: {gpu_info}")
+                logger.info("✅ Hardware acceleration (NVENC) will be used for video encoding")
+            else:
+                logger.warning("⚠️ No NVIDIA GPU detected - using CPU for video processing")
+        except FileNotFoundError:
+            logger.warning("⚠️ nvidia-smi not found - no NVIDIA GPU available, using CPU")
+        except subprocess.TimeoutExpired:
+            logger.warning("⚠️ GPU check timed out - assuming no GPU available")
+        except Exception as e:
+            logger.warning(f"⚠️ GPU detection error: {e} - using CPU")
         
         # Verify AssemblyAI API key is configured
         from config import settings
