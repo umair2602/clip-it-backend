@@ -166,6 +166,7 @@ class ClipItStack(Stack):
             self, "GPUWorkerASG",
             vpc=vpc,
             launch_template=spot_launch_template,
+            role=ec2_instance_role, # Explicitly associate role with ASG to ensure it propagates
             min_capacity=0,  # Allow scaling down to 0 when not processing videos
             max_capacity=1,
             desired_capacity=0,  # Start at 0 to save costs when not in use

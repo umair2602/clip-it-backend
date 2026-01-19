@@ -268,7 +268,7 @@ jobs:
         service: ${{ env.ECS_SERVICE_WORKER }}
         cluster: ${{ env.ECS_CLUSTER }}
         wait-for-service-stability: true
-        wait-for-minutes: 20  # Increase stability timeout for GPU initialization
+        wait-for-minutes: 30  # Further increase stability timeout for GPU driver/image pulls
 
     - name: Notify deployment status
       if: always()
