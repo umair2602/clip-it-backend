@@ -127,10 +127,10 @@ class ClipItStack(Stack):
             allow_all_outbound=True
         )
 
-        # Create Launch Template for GPU Worker
-        # We use a Launch Template so we can specify the GPU AMI and UserData
+        # Launch Template for GPU instances (On-Demand)
+
         spot_launch_template = ec2.LaunchTemplate(
-            self, "GPUWorkerLaunchTemplate",
+            self, "GPUSpotLaunchTemplate",
             instance_type=ec2.InstanceType("g4dn.xlarge"),
             machine_image=gpu_ami,
             role=ec2_instance_role,
