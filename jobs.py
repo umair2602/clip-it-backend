@@ -92,6 +92,20 @@ class JobQueue:
                 
             job_id = result[1]
             
+            # Check if job still exists and hasn't been cancelled
+            job = self.get_job(job_id)
+            if not job:
+                logger.info(f"Job {job_id} no longer exists, skipping")
+                return None
+            
+            # Check if job was cancelled
+            job_status = job.get("status", "")
+            if job_status in ["cancelled", "error", "completed"]:
+                logger.info(f"Job {job_id} already {job_status}, deleting from Redis")
+                self.redis_client.delete(f"job:{job_id}")
+                self.redis_client.delete(f"job:lock:{job_id}")
+                return None
+            
             # Try to acquire lock for this job (prevents duplicate processing)
             lock_key = f"job:lock:{job_id}"
             lock_acquired = self.redis_client.set(
@@ -111,10 +125,10 @@ class JobQueue:
                 })
                 return job_id
             else:
-                # Another worker got this job, put it back and try again
+                # Job is already locked by another worker - do NOT requeue!
+                # The other worker is already processing it.
                 lock_owner = self.redis_client.get(lock_key)
-                logger.warning(f"Job {job_id} already locked by worker {lock_owner}, requeueing...")
-                self.redis_client.lpush("job_queue", job_id)
+                logger.debug(f"Job {job_id} is being processed by worker {lock_owner}, skipping")
                 return None
         else:
             # For memory storage, just return None (no queuing in development)
@@ -145,6 +159,15 @@ class JobQueue:
             self.release_job_lock(job_id)
             self.redis_client.lpush("job_queue", job_id)
             logger.info(f"Job {job_id} requeued for retry")
+
+    def delete_job(self, job_id: str):
+        """Delete a completed/cancelled job from Redis to prevent accumulation"""
+        if self.redis_client:
+            # Delete the job hash
+            self.redis_client.delete(f"job:{job_id}")
+            # Delete any lock (just in case)
+            self.redis_client.delete(f"job:lock:{job_id}")
+            logger.info(f"Job {job_id} deleted from Redis")
 
     def recover_stuck_jobs(self):
         """Find jobs in 'processing' state and put them back in queue (for worker startup)"""
