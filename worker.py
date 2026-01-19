@@ -1731,11 +1731,15 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
 
 
 async def worker_main():
-    """Main worker loop"""
+    """Main worker loop - supports concurrent job processing"""
     logger.info("Starting worker...")
 
     # Initialize worker
     await initialize_worker()
+    
+    # Configure max concurrent jobs (default 3 for GPU memory management)
+    max_concurrent_jobs = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+    logger.info(f"🚀 Worker configured for {max_concurrent_jobs} concurrent jobs")
 
     logger.info("Worker ready, waiting for jobs...")
     
@@ -1743,46 +1747,19 @@ async def worker_main():
     import time
     last_cleanup_time = time.time()
     cleanup_interval = 3600  # Run cleanup every hour
-
-    while True:
-        try:
-            # Periodic cleanup of old files
-            current_time = time.time()
-            if current_time - last_cleanup_time > cleanup_interval:
-                logger.info("🧹 Running periodic cleanup of old files...")
-                await cleanup_old_files(max_age_hours=24)  # Clean files older than 24 hours
-                last_cleanup_time = current_time
-            
-            # Get next job from queue
-            job_id = job_queue.get_next_job()
-
-            if job_id:
-                # Track active job for signal handling
-                global current_active_job_id
-                current_active_job_id = job_id
+    
+    # Semaphore to limit concurrent jobs
+    job_semaphore = asyncio.Semaphore(max_concurrent_jobs)
+    
+    # Track active job tasks
+    active_tasks = set()
+    
+    async def process_job_with_semaphore(job_id: str, job_type: str, job_data: dict):
+        """Process a job with semaphore for concurrency control"""
+        async with job_semaphore:
+            try:
+                logger.info(f"🎬 Starting job {job_id} of type {job_type} (active jobs: {max_concurrent_jobs - job_semaphore._value + 1}/{max_concurrent_jobs})")
                 
-                # Get job details
-
-                job = job_queue.get_job(job_id)
-                if not job:
-                    logger.warning(f"Job {job_id} not found")
-                    continue
-
-                job_type = job.get("type")
-                job_data_str = job.get("data", "{}")
-
-                # Parse job data if it's a string
-                if isinstance(job_data_str, str):
-                    try:
-                        job_data = json.loads(job_data_str)
-                    except json.JSONDecodeError:
-                        logger.error(f"Invalid job data for job {job_id}")
-                        continue
-                else:
-                    job_data = job_data_str
-
-                logger.info(f"Processing job {job_id} of type {job_type}")
-
                 # Process job based on type
                 if job_type == "youtube_download":
                     await process_youtube_download_job(job_id, job_data)
@@ -1802,13 +1779,72 @@ async def worker_main():
                         job_id,
                         {"status": "error", "message": f"Unknown job type: {job_type}"},
                     )
+                    job_queue.delete_job(job_id)
+                    
+                logger.info(f"✅ Job {job_id} finished (active jobs: {max_concurrent_jobs - job_semaphore._value}/{max_concurrent_jobs})")
                 
-                # Clear active job tracker after processing
-                current_active_job_id = None
-            else:
+            except Exception as e:
+                logger.error(f"Error processing job {job_id}: {str(e)}", exc_info=True)
 
-                # No job available, sleep for a bit
-                await asyncio.sleep(5)
+    while True:
+        try:
+            # Periodic cleanup of old files
+            current_time = time.time()
+            if current_time - last_cleanup_time > cleanup_interval:
+                logger.info("🧹 Running periodic cleanup of old files...")
+                await cleanup_old_files(max_age_hours=24)  # Clean files older than 24 hours
+                last_cleanup_time = current_time
+            
+            # Clean up completed tasks
+            completed_tasks = {t for t in active_tasks if t.done()}
+            for task in completed_tasks:
+                try:
+                    # Get any exceptions from completed tasks
+                    exc = task.exception() if not task.cancelled() else None
+                    if exc:
+                        logger.error(f"Task exception: {exc}")
+                except:
+                    pass
+            active_tasks -= completed_tasks
+            
+            # Check if we have capacity for more jobs
+            if job_semaphore._value > 0:
+                # Get next job from queue (non-blocking)
+                job_id = job_queue.get_next_job()
+
+                if job_id:
+                    # Get job details
+                    job = job_queue.get_job(job_id)
+                    if not job:
+                        logger.warning(f"Job {job_id} not found")
+                        continue
+
+                    job_type = job.get("type")
+                    job_data_str = job.get("data", "{}")
+
+                    # Parse job data if it's a string
+                    if isinstance(job_data_str, str):
+                        try:
+                            job_data = json.loads(job_data_str)
+                        except json.JSONDecodeError:
+                            logger.error(f"Invalid job data for job {job_id}")
+                            continue
+                    else:
+                        job_data = job_data_str
+
+                    # Create async task for the job
+                    task = asyncio.create_task(
+                        process_job_with_semaphore(job_id, job_type, job_data)
+                    )
+                    active_tasks.add(task)
+                    
+                    logger.info(f"📋 Queued job {job_id} (total active: {len(active_tasks)})")
+                else:
+                    # No job available, sleep for a bit
+                    await asyncio.sleep(2)
+            else:
+                # At max capacity, wait a bit before checking again
+                await asyncio.sleep(1)
 
         except Exception as e:
             logger.error(f"Error in worker main loop: {str(e)}", exc_info=True)

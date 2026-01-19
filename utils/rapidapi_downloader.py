@@ -119,72 +119,113 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
             'x-rapidapi-key': api_key
         }
         
+        last_error = None
+        
         # Try each format until one works
-        for format_config in format_options:
-            try:
-                params = {
-                    'url': url,
-                    'no_merge': 'false',
-                    'allow_extended_duration': 'true',
-                    **format_config
-                }
-                
-                logger.info(f"📋 RapidAPI request parameters:")
-                logger.info(f"   Format: {format_config.get('format')}")
-                logger.info(f"   URL: {url}")
-                
-                # Make async request
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(api_url, params=params, headers=headers, timeout=30) as response:
-                        logger.info(f"📡 RapidAPI response status: {response.status}")
-                        
-                        if response.status == 200:
-                            # Parse response
-                            data = await response.json()
-                            logger.info(f"✅ RapidAPI response received for format {format_config.get('format')}")
+        for format_idx, format_config in enumerate(format_options):
+            # Add delay between format attempts to avoid rate limiting
+            if format_idx > 0:
+                delay = 2 * format_idx  # 2s, 4s, 6s delays
+                logger.info(f"⏳ Waiting {delay}s before trying next format...")
+                await asyncio.sleep(delay)
+            
+            # Retry each format up to 2 times
+            for retry in range(2):
+                try:
+                    if retry > 0:
+                        wait_time = 3 * retry  # 3s backoff for retry
+                        logger.info(f"🔄 Retry {retry + 1}/2 for format {format_config.get('format')} after {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    
+                    params = {
+                        'url': url,
+                        'no_merge': 'false',
+                        'allow_extended_duration': 'true',
+                        **format_config
+                    }
+                    
+                    logger.info(f"📋 RapidAPI request parameters:")
+                    logger.info(f"   Format: {format_config.get('format')}")
+                    logger.info(f"   URL: {url}")
+                    
+                    # Make async request with longer timeout
+                    timeout = aiohttp.ClientTimeout(total=60, connect=30)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.get(api_url, params=params, headers=headers) as response:
+                            logger.info(f"📡 RapidAPI response status: {response.status}")
                             
-                            # This API returns HTML content, not direct download links
-                            # We need to use the progress_url to get the actual download link
-                            if data.get('success') and 'progress_url' in data:
-                                progress_url = data['progress_url']
-                                logger.info(f"📡 Polling progress URL to get download link: {progress_url}")
+                            if response.status == 200:
+                                # Parse response
+                                data = await response.json()
+                                logger.info(f"✅ RapidAPI response received for format {format_config.get('format')}")
                                 
-                                # Poll the progress URL to get the actual download link
-                                download_url = await _poll_progress_url(progress_url, api_key)
-                                
-                                if download_url:
-                                    logger.info(f"✅ Found download URL with format {format_config.get('format')}: {download_url[:100]}...")
-                                    return {
-                                        'video_url': download_url,
-                                        'title': data.get('title', 'Unknown'),
-                                        'duration': data.get('info', {}).get('duration'),
-                                        'thumbnail': data.get('info', {}).get('thumbnail'),
-                                        'channel': data.get('info', {}).get('channel') or data.get('info', {}).get('uploader')
-                                    }
+                                # This API returns HTML content, not direct download links
+                                # We need to use the progress_url to get the actual download link
+                                if data.get('success') and 'progress_url' in data:
+                                    progress_url = data['progress_url']
+                                    logger.info(f"📡 Polling progress URL to get download link: {progress_url}")
+                                    
+                                    # Poll the progress URL to get the actual download link
+                                    download_url = await _poll_progress_url(progress_url, api_key)
+                                    
+                                    if download_url:
+                                        logger.info(f"✅ Found download URL with format {format_config.get('format')}: {download_url[:100]}...")
+                                        return {
+                                            'video_url': download_url,
+                                            'title': data.get('title', 'Unknown'),
+                                            'duration': data.get('info', {}).get('duration'),
+                                            'thumbnail': data.get('info', {}).get('thumbnail'),
+                                            'channel': data.get('info', {}).get('channel') or data.get('info', {}).get('uploader')
+                                        }
+                                    else:
+                                        logger.warning(f"⚠️ Format {format_config.get('format')}: Failed to get download URL from progress endpoint")
                                 else:
-                                    logger.warning(f"⚠️ Format {format_config.get('format')}: Failed to get download URL from progress endpoint")
+                                    logger.warning(f"⚠️ Format {format_config.get('format')}: No progress_url in response")
+                                    logger.warning(f"   Response keys: {list(data.keys())}")
+                                    if data.get('error'):
+                                        logger.warning(f"   API error: {data.get('error')}")
+                                    
+                            elif response.status == 429:
+                                # Rate limited - wait longer
+                                logger.warning(f"⚠️ Rate limited (429)! Waiting 10s before retry...")
+                                await asyncio.sleep(10)
+                                continue
                             else:
-                                logger.warning(f"⚠️ Format {format_config.get('format')}: No progress_url in response")
-                                logger.warning(f"   Response keys: {list(data.keys())}")
-                        else:
-                            error_text = await response.text()
-                            logger.warning(f"⚠️ Format {format_config.get('format')} returned {response.status}: {error_text[:200]}")
-                            # Try next format
-                            continue
-                            
-            except Exception as format_error:
-                logger.warning(f"⚠️ Error trying format {format_config.get('format')}: {str(format_error)}")
-                continue
+                                error_text = await response.text()
+                                logger.warning(f"⚠️ Format {format_config.get('format')} returned {response.status}: {error_text[:200]}")
+                                # Don't retry on 4xx errors (except 429), just try next format
+                                if 400 <= response.status < 500 and response.status != 429:
+                                    break
+                                            
+                except aiohttp.ClientTimeout:
+                    logger.warning(f"⚠️ Timeout trying format {format_config.get('format')} (attempt {retry + 1}/2)")
+                    last_error = "Request timeout"
+                    continue
+                except aiohttp.ClientConnectionError as e:
+                    logger.warning(f"⚠️ Connection error trying format {format_config.get('format')}: {type(e).__name__}")
+                    last_error = f"Connection error: {type(e).__name__}"
+                    continue
+                except Exception as format_error:
+                    error_type = type(format_error).__name__
+                    error_msg = str(format_error) or "No error message"
+                    logger.warning(f"⚠️ Error trying format {format_config.get('format')}: [{error_type}] {error_msg}")
+                    last_error = f"{error_type}: {error_msg}"
+                    continue
+                
+                # If we got here without continuing, break out of retry loop
+                break
         
         # If all formats failed
         logger.error(f"❌ All format options failed for RapidAPI download")
+        if last_error:
+            logger.error(f"   Last error: {last_error}")
         return None
                     
     except asyncio.TimeoutError:
-        logger.error(f"❌ RapidAPI request timed out after 30 seconds")
+        logger.error(f"❌ RapidAPI request timed out after 60 seconds")
         return None
     except Exception as e:
-        logger.error(f"❌ Error getting download info from RapidAPI: {str(e)}")
+        logger.error(f"❌ Error getting download info from RapidAPI: [{type(e).__name__}] {str(e)}")
         logger.exception("Full stack trace:")
         return None
 
