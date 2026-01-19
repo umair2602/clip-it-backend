@@ -1304,20 +1304,36 @@ async def process_single_clip_async(
 
 
 async def process_uploaded_video_job(job_id: str, job_data: dict):
-    """Process uploaded video from S3"""
+    """Process uploaded video from S3 - matches YouTube download flow"""
+    video_id = None
+    user_id = None
+    local_path = None
+    monitor_task = None
+    processing_cancelled = False
+    
     try:
         video_id = job_data.get("video_id")
         s3_key = job_data.get("s3_key")
         user_id = job_data.get("user_id")
+        target_clip_duration = job_data.get("target_clip_duration", 60)
 
         logger.info(f"Processing uploaded video job {job_id} for video {video_id}")
         logger.info(f"   Job ID (task_id): {job_id}")
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   S3 Key: {s3_key}")
+        logger.info(f"   User ID: {user_id}")
+        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
 
         # Check if cancelled before starting
         if user_id and video_id:
             await check_if_cancelled(user_id, video_id)
+
+        # Update MongoDB video status (matching YouTube flow)
+        if user_id:
+            await update_user_video(user_id, video_id, {
+                "status": "downloading",
+                "updated_at": utc_now()
+            })
 
         # Update job status
         job_queue.update_job(
@@ -1329,50 +1345,103 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
             },
         )
 
-        # Create temporary file for processing
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
-            local_path = temp_file.name
+        # Create a background task to periodically check for cancellation (matching YouTube flow)
+        async def cancellation_monitor():
+            """Background task to monitor for cancellation during processing"""
+            nonlocal processing_cancelled
+            while not processing_cancelled:
+                await asyncio.sleep(2)  # Check every 2 seconds
+                try:
+                    from services.user_video_service import get_user_video
+                    video = await get_user_video(user_id, video_id)
+                    if video and video.status == "failed":
+                        error_msg = video.error_message or ""
+                        if "cancelled" in error_msg.lower():
+                            logger.warning(f"🛑 Cancellation detected during upload processing for video {video_id}")
+                            processing_cancelled = True
+                            return
+                except Exception as e:
+                    logger.debug(f"Cancellation check error: {e}")
 
-        # Download from S3
-        success = s3_client.download_from_s3(s3_key, local_path)
+        # Start cancellation monitor
+        monitor_task = asyncio.create_task(cancellation_monitor()) if user_id and video_id else None
 
-        if not success:
-            raise Exception("Failed to download file from S3")
+        try:
+            # Create temporary file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+                local_path = temp_file.name
 
-        # Check if cancelled immediately after S3 download
-        if user_id and video_id:
-            await check_if_cancelled(user_id, video_id)
+            # Download from S3
+            success = s3_client.download_from_s3(s3_key, local_path)
 
-        # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "processing",
-                "progress": "10",
-                "message": "File downloaded, starting processing...",
-            },
-        )
+            if not success:
+                raise Exception("Failed to download file from S3")
 
-        # Process the video using the same pipeline as process_video_job
-        await process_video_job(job_id, {
-            "video_id": video_id,
-            "file_path": local_path,
-            "user_id": user_id
-        })
-        
-        # Release lock on successful completion (already handled in process_video_job)
+            # Check if cancelled immediately after S3 download
+            if user_id and video_id:
+                await check_if_cancelled(user_id, video_id)
+            if processing_cancelled:
+                raise ProcessingCancelledException("Processing cancelled by user")
+
+            # Update MongoDB status
+            if user_id:
+                await update_user_video(user_id, video_id, {
+                    "status": "processing",
+                    "updated_at": utc_now()
+                })
+
+            # Update job status
+            job_queue.update_job(
+                job_id,
+                {
+                    "status": "processing",
+                    "progress": "10",
+                    "message": "File downloaded, starting processing...",
+                },
+            )
+
+            # Process the video using the same pipeline as process_video_job
+            await process_video_job(job_id, {
+                "video_id": video_id,
+                "file_path": local_path,
+                "user_id": user_id,
+                "target_clip_duration": target_clip_duration
+            })
+            
+            # Release lock on successful completion
+            job_queue.release_job_lock(job_id)
+            
+        finally:
+            # Stop the cancellation monitor
+            processing_cancelled = True
+            if monitor_task:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
 
     except ProcessingCancelledException as e:
         logger.warning(f"Uploaded video processing cancelled for job {job_id}: {str(e)}")
         job_queue.update_job(
             job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
         )
-        # Status already set to failed in DB by cancel endpoint
-        logger.info(f"✅ Gracefully stopped uploaded video processing for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
+        # Release lock on cancellation
+        job_queue.release_job_lock(job_id)
+        logger.info(f"✅ Gracefully stopped uploaded video processing for cancelled video {video_id or 'unknown'}")
         
     except Exception as e:
         logger.error(f"Error in uploaded video job {job_id}: {str(e)}", exc_info=True)
+        
+        # Update MongoDB video status to failed
+        if user_id and video_id:
+            await update_user_video(user_id, video_id, {
+                "status": "failed",
+                "error_message": str(e),
+                "updated_at": utc_now()
+            })
+        
         job_queue.update_job(
             job_id,
             {
@@ -1383,10 +1452,11 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         )
         # Release lock on error
         job_queue.release_job_lock(job_id)
+        
     finally:
         # Clean up temporary file
         try:
-            if 'local_path' in locals() and os.path.exists(local_path):
+            if local_path and os.path.exists(local_path):
                 os.unlink(local_path)
         except:
             pass

@@ -119,6 +119,20 @@ class JobQueue:
         else:
             # For memory storage, just return None (no queuing in development)
             return None
+
+    def release_job_lock(self, job_id: str):
+        """Release the distributed lock for a job"""
+        if self.redis_client:
+            lock_key = f"job:lock:{job_id}"
+            # Only delete the lock if we own it
+            current_owner = self.redis_client.get(lock_key)
+            if current_owner == self.worker_id:
+                self.redis_client.delete(lock_key)
+                logger.info(f"Worker {self.worker_id} released lock for job {job_id}")
+            elif current_owner:
+                logger.warning(f"Cannot release lock for job {job_id} - owned by {current_owner}")
+            else:
+                logger.debug(f"No lock to release for job {job_id}")
     
     def requeue_job(self, job_id: str):
         """Requeue a job (e.g., on failure or interruption) and release lock"""
