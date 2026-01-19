@@ -129,19 +129,9 @@ class ClipItStack(Stack):
 
         # Launch Template for GPU instances (On-Demand)
 
-        spot_launch_template = ec2.LaunchTemplate(
-            self, "GPUSpotLaunchTemplate",
-            instance_type=ec2.InstanceType("g4dn.xlarge"),
-            machine_image=gpu_ami,
-            role=ec2_instance_role,
-            user_data=ec2.UserData.for_linux(),
-            require_imdsv2=True,
-            # Associate public IP for ECS connectivity
-            associate_public_ip_address=True,
-            security_group=worker_sg
-        )
-
-        spot_launch_template.user_data.add_commands(
+        # Prepare UserData first to ensure it's captured in the LaunchTemplate
+        gpu_user_data = ec2.UserData.for_linux()
+        gpu_user_data.add_commands(
             "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1",
             "set -x",
             "echo '=== GPU Worker Instance Setup Started ==='",
@@ -159,6 +149,19 @@ class ClipItStack(Stack):
             "systemctl status ecs",
             "echo '=== Setup Complete ==='",
             "date"
+        )
+
+        # Launch Template for GPU instances
+        # We use a unique ID to ensure updates are picked up correctly
+        spot_launch_template = ec2.LaunchTemplate(
+            self, "GPUWorkerLaunchTemplateV2", # Changed ID to force recreation/update check
+            instance_type=ec2.InstanceType("g4dn.xlarge"),
+            machine_image=gpu_ami,
+            role=ec2_instance_role,
+            user_data=gpu_user_data,
+            require_imdsv2=True,
+            associate_public_ip_address=True,
+            security_group=worker_sg
         )
 
         # Auto Scaling Group for 1 Spot Worker
