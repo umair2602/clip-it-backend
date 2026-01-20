@@ -297,6 +297,12 @@ class ClipItStack(Stack):
                     parameter_name="/clip-it/rapidapi-youtube-key"
                 )
             ),
+            "ZYLA_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "ZylaAPIKeyRef",
+                    parameter_name="/clip-it/zyla-api-key"
+                )
+            ),
             "MONGODB_URL": ecs.Secret.from_ssm_parameter(
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "MongoDBURLRef",

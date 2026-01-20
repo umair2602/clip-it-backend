@@ -197,7 +197,7 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
                                 if 400 <= response.status < 500 and response.status != 429:
                                     break
                                             
-                except aiohttp.ClientTimeout:
+                except asyncio.TimeoutError:
                     logger.warning(f"⚠️ Timeout trying format {format_config.get('format')} (attempt {retry + 1}/2)")
                     last_error = "Request timeout"
                     continue
