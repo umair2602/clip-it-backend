@@ -181,6 +181,10 @@ async def initialize_worker():
         except Exception as e:
             logger.warning(f"⚠️ GPU detection error: {e} - using CPU")
         
+        # Network connectivity diagnostics
+        logger.info("🌐 Running network connectivity diagnostics...")
+        await run_network_diagnostics()
+        
         # Verify AssemblyAI API key is configured
         from config import settings
         if not settings.ASSEMBLYAI_API_KEY:
@@ -192,6 +196,72 @@ async def initialize_worker():
     except Exception as e:
         logger.error(f"❌ Error initializing worker: {str(e)}", exc_info=True)
         raise
+
+
+async def run_network_diagnostics():
+    """Run network connectivity diagnostics and log results."""
+    import socket
+    import aiohttp
+    
+    diagnostics = []
+    
+    # Test 1: DNS Resolution
+    try:
+        logger.info("   [1/5] Testing DNS resolution...")
+        ip = socket.gethostbyname("google.com")
+        diagnostics.append(f"✅ DNS resolution: google.com -> {ip}")
+        logger.info(f"   ✅ DNS resolution: google.com -> {ip}")
+    except Exception as e:
+        diagnostics.append(f"❌ DNS resolution failed: {e}")
+        logger.error(f"   ❌ DNS resolution failed: {e}")
+    
+    # Test 2: MongoDB DNS
+    try:
+        logger.info("   [2/5] Testing MongoDB DNS resolution...")
+        ip = socket.gethostbyname("ac-2fb6zry-shard-00-00.76hczqd.mongodb.net")
+        diagnostics.append(f"✅ MongoDB DNS: resolved to {ip}")
+        logger.info(f"   ✅ MongoDB DNS: resolved to {ip}")
+    except Exception as e:
+        diagnostics.append(f"❌ MongoDB DNS failed: {e}")
+        logger.error(f"   ❌ MongoDB DNS failed: {e}")
+    
+    # Test 3: HTTPS to Google (basic internet)
+    try:
+        logger.info("   [3/5] Testing HTTPS connectivity (google.com)...")
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://www.google.com", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                diagnostics.append(f"✅ HTTPS to Google: status {resp.status}")
+                logger.info(f"   ✅ HTTPS to Google: status {resp.status}")
+    except Exception as e:
+        diagnostics.append(f"❌ HTTPS to Google failed: {type(e).__name__}: {e}")
+        logger.error(f"   ❌ HTTPS to Google failed: {type(e).__name__}: {e}")
+    
+    # Test 4: RapidAPI endpoint
+    try:
+        logger.info("   [4/5] Testing RapidAPI connectivity...")
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://youtube-media-downloader.p.rapidapi.com/", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                diagnostics.append(f"✅ RapidAPI endpoint: status {resp.status}")
+                logger.info(f"   ✅ RapidAPI endpoint: status {resp.status}")
+    except Exception as e:
+        diagnostics.append(f"❌ RapidAPI endpoint failed: {type(e).__name__}: {e}")
+        logger.error(f"   ❌ RapidAPI endpoint failed: {type(e).__name__}: {e}")
+    
+    # Test 5: ZylaLabs endpoint
+    try:
+        logger.info("   [5/5] Testing ZylaLabs connectivity...")
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://zylalabs.com/", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                diagnostics.append(f"✅ ZylaLabs endpoint: status {resp.status}")
+                logger.info(f"   ✅ ZylaLabs endpoint: status {resp.status}")
+    except Exception as e:
+        diagnostics.append(f"❌ ZylaLabs endpoint failed: {type(e).__name__}: {e}")
+        logger.error(f"   ❌ ZylaLabs endpoint failed: {type(e).__name__}: {e}")
+    
+    # Summary
+    logger.info("🌐 Network diagnostics complete:")
+    for d in diagnostics:
+        logger.info(f"   {d}")
 
 
 

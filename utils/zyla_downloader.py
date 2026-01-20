@@ -77,7 +77,7 @@ async def download_youtube_video_zyla(
         logger.info(f"📡 Requesting download info from ZylaLabs...")
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=120)) as response:
+            async with session.get(api_url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=180)) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     logger.error(f"❌ ZylaLabs API error: {response.status} - {error_text[:200]}")
