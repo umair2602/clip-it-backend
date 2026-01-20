@@ -19,6 +19,7 @@ from services.video_processing import generate_thumbnail, process_video, create_
 from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
 from utils.s3_storage import s3_client
 from utils.rapidapi_downloader import download_youtube_video_rapidapi
+from utils.zyla_downloader import download_youtube_video_zyla
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video
 from logging_config import setup_logging
@@ -260,69 +261,50 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
         if user_id and video_id:
             set_download_cancellation_context(user_id, video_id)
 
-        # Download the video with retry mechanism
+        # Download the video (ZylaLabs first, RapidAPI fallback)
         file_path, title, video_info = None, None, None
-        max_retries = 15
         
         # Start cancellation monitor
         monitor_task = asyncio.create_task(cancellation_monitor()) if user_id and video_id else None
         
         try:
-            for attempt in range(1, max_retries + 1):
-                # Check for cancellation before each attempt
-                if user_id and video_id:
-                    await check_if_cancelled(user_id, video_id)
-                
-                try:
-                    logger.info(f"Job {job_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
-                    file_path, title, video_info = await download_youtube_video_sieve(
-                        url, video_dir
-                    )
-                    if file_path and title:
-                        logger.info(f"Job {job_id}: ✅ Sieve download successful")
-                        break  # Success
-                except Exception as sieve_error:
-                    error_msg = str(sieve_error)
-                    if "cancelled" in error_msg.lower():
-                        logger.warning(f"Job {job_id}: Download cancelled by user")
-                        raise ProcessingCancelledException("Download cancelled by user")
-                    logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {error_msg}")
-                    if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All {max_retries} attempts failed.")
-                        break
-                    await asyncio.sleep(5)  # Wait before retrying
+            # Check for cancellation before download
+            if user_id and video_id:
+                await check_if_cancelled(user_id, video_id)
+            
+            # Tier 0: ZylaLabs (PRIMARY)
+            try:
+                logger.info(f"Job {job_id}: [ZylaLabs] Attempting download (PRIMARY)...")
+                file_path, title, video_info = await download_youtube_video_zyla(url, video_dir)
+                if file_path and title:
+                    logger.info(f"Job {job_id}: ✅ ZylaLabs download successful")
+            except Exception as zyla_error:
+                error_msg = str(zyla_error)
+                if "cancelled" in error_msg.lower():
+                    raise ProcessingCancelledException("Download cancelled by user")
+                logger.warning(f"Job {job_id}: ZylaLabs download failed: {error_msg}")
+            
+            # Check for cancellation
+            if user_id and video_id:
+                await check_if_cancelled(user_id, video_id)
                     
-                # Check for cancellation after each attempt
-                if user_id and video_id:
-                    await check_if_cancelled(user_id, video_id)
-                    
-            # If still not successful, try direct downloader as fallback (with retries)
+            # Tier 1: RapidAPI fallback (if ZylaLabs fails)
             if not file_path or not title:
-                for attempt in range(1, max_retries + 1):
-                    # Check for cancellation before each attempt
-                    if user_id and video_id:
-                        await check_if_cancelled(user_id, video_id)
+                logger.info(f"Job {job_id}: ZylaLabs failed, trying RapidAPI fallback...")
+                try:
+                    logger.info(f"Job {job_id}: [RapidAPI] Attempting download...")
+                    file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
+                    if file_path and title:
+                        logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
+                except Exception as rapidapi_error:
+                    error_msg = str(rapidapi_error)
+                    if "cancelled" in error_msg.lower():
+                        raise ProcessingCancelledException("Download cancelled by user")
+                    logger.warning(f"Job {job_id}: RapidAPI download failed: {error_msg}")
                         
-                    try:
-                        logger.info(f"Job {job_id}: Attempt {attempt} to download with direct downloader as fallback")
-                        file_path, title, video_info = await download_youtube_video(
-                            url, video_dir
-                        )
-                        if file_path and title:
-                            break  # Success
-                    except Exception as fallback_error:
-                        error_msg = str(fallback_error)
-                        if "cancelled" in error_msg.lower():
-                            raise ProcessingCancelledException("Download cancelled by user")
-                        logger.warning(f"Job {job_id}: Direct download failed (attempt {attempt}): {error_msg}")
-                        if attempt == max_retries:
-                            logger.error(f"Job {job_id}: All {max_retries} fallback attempts failed.")
-                            break
-                        await asyncio.sleep(5)  # Wait before retrying
-                        
-                    # Check for cancellation after each attempt
-                    if user_id and video_id:
-                        await check_if_cancelled(user_id, video_id)
+            # NOTE: Other fallback methods (Sieve, pytubefix) commented out
+            # if not file_path or not title:
+            #     ...
         finally:
             # Stop the cancellation monitor and clear context
             download_cancelled = True
@@ -336,7 +318,7 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
 
         if not file_path or not title:
             raise Exception(
-                f"Failed to download YouTube video after {max_retries} attempts with both Sieve and direct methods"
+                f"Failed to download YouTube video after trying RapidAPI and ZylaLabs."
             )
 
         # Check if cancelled immediately after download
@@ -1541,76 +1523,36 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         video_dir = upload_dir / video_id
         video_dir.mkdir(exist_ok=True)
 
-        # Four-tier download fallback system (TIER 0 is RapidAPI - highest priority)
+        # Download the video (ZylaLabs first, RapidAPI fallback)
         file_path, title, video_info = None, None, None
-        max_retries = 3
 
-        # TIER 0: Try RapidAPI YouTube Downloader (PRIMARY METHOD)
-        for attempt in range(1, max_retries + 1):
+        # Tier 0: ZylaLabs (PRIMARY)
+        try:
+            logger.info(f"Job {job_id}: [ZylaLabs] Attempting download (PRIMARY)...")
+            file_path, title, video_info = await download_youtube_video_zyla(url, video_dir)
+            if file_path and title:
+                logger.info(f"Job {job_id}: ✅ ZylaLabs download successful")
+        except Exception as zyla_error:
+            logger.warning(f"Job {job_id}: ZylaLabs download failed: {str(zyla_error)}")
+
+        # Tier 1: RapidAPI fallback (if ZylaLabs fails)
+        if not file_path or not title:
+            logger.info(f"Job {job_id}: ZylaLabs failed, trying RapidAPI fallback...")
             try:
-                logger.info(f"Job {job_id}: [TIER 0] Attempt {attempt} to download with RapidAPI service (PRIMARY)")
+                logger.info(f"Job {job_id}: [RapidAPI] Attempting download...")
                 file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
                 if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful (TIER 0)")
-                    break
+                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
             except Exception as rapidapi_error:
-                logger.warning(f"Job {job_id}: RapidAPI download failed (attempt {attempt}): {str(rapidapi_error)}")
-                if attempt == max_retries:
-                    logger.error(f"Job {job_id}: All {max_retries} RapidAPI attempts failed. Falling back to Tier 1 (Sieve).")
-                    break
-                await asyncio.sleep(3)
+                logger.warning(f"Job {job_id}: RapidAPI download failed: {str(rapidapi_error)}")
 
-        # Tier 1: Try Sieve API (fallback if RapidAPI fails)
-        if not file_path or not title:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    logger.info(f"Job {job_id}: [Tier 1] Attempt {attempt} to download with Sieve service")
-                    file_path, title, video_info = await download_youtube_video_sieve(url, video_dir)
-                    if file_path and title:
-                        logger.info(f"Job {job_id}: ✅ Sieve download successful")
-                        break
-                except Exception as sieve_error:
-                    logger.warning(f"Job {job_id}: Sieve download failed (attempt {attempt}): {str(sieve_error)}")
-                    if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All {max_retries} Sieve attempts failed. Falling back to Tier 2 (yt-dlp).")
-                        break
-                    await asyncio.sleep(5)
-
-        # Tier 2: Fallback to yt-dlp if Sieve failed (more robust on cloud servers)
-        if not file_path or not title:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    from utils.ytdlp_downloader import download_youtube_video_ytdlp
-                    logger.info(f"Job {job_id}: [Tier 2] Attempt {attempt} to download with yt-dlp")
-                    file_path, title, video_info = await download_youtube_video_ytdlp(url, video_dir)
-                    if file_path and title:
-                        logger.info(f"Job {job_id}: ✅ yt-dlp download successful")
-                        break
-                except Exception as ytdlp_error:
-                    logger.warning(f"Job {job_id}: yt-dlp download failed (attempt {attempt}): {str(ytdlp_error)}")
-                    if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All {max_retries} yt-dlp attempts failed. Falling back to pytubefix.")
-                        break
-                    await asyncio.sleep(5)
-
-        # Tier 3: Final fallback to pytubefix (often blocked on cloud servers)
-        if not file_path or not title:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    logger.info(f"Job {job_id}: [Tier 3] Attempt {attempt} to download with pytubefix")
-                    file_path, title, video_info = await download_youtube_video(url, video_dir)
-                    if file_path and title:
-                        logger.info(f"Job {job_id}: ✅ pytubefix download successful")
-                        break
-                except Exception as pytubefix_error:
-                    logger.warning(f"Job {job_id}: pytubefix download failed (attempt {attempt}): {str(pytubefix_error)}")
-                    if attempt == max_retries:
-                        logger.error(f"Job {job_id}: All download methods failed.")
-                        break
-                    await asyncio.sleep(5)
+        # NOTE: Other fallback methods (Sieve, yt-dlp, pytubefix) commented out
+        # # Tier 2: Try Sieve API
+        # if not file_path or not title:
+        #     ...
 
         if not file_path or not title:
-            raise Exception("Failed to download YouTube video after trying all methods (RapidAPI, Sieve, yt-dlp, pytubefix)")
+            raise Exception("Failed to download YouTube video after trying ZylaLabs and RapidAPI.")
 
         logger.info(f"Job {job_id}: Download completed successfully: {file_path}")
 
