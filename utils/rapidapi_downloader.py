@@ -148,8 +148,8 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
                     logger.info(f"   Format: {format_config.get('format')}")
                     logger.info(f"   URL: {url}")
                     
-                    # Make async request with longer timeout
-                    timeout = aiohttp.ClientTimeout(total=60, connect=30)
+                    # Make async request with longer timeout for AWS deployment
+                    timeout = aiohttp.ClientTimeout(total=120, connect=60)
                     async with aiohttp.ClientSession(timeout=timeout) as session:
                         async with session.get(api_url, params=params, headers=headers) as response:
                             logger.info(f"📡 RapidAPI response status: {response.status}")
