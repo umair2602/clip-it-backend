@@ -46,6 +46,7 @@ jobs:
       run: npm install -g aws-cdk
 
     - name: Deploy Infrastructure
+      if: ${{ vars.SKIP_INFRA_DEPLOY != 'true' }}
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -158,6 +159,12 @@ jobs:
           fi
         done
 
+    - name: Skip Infrastructure (already deployed)
+      if: ${{ vars.SKIP_INFRA_DEPLOY == 'true' }}
+      run: |
+        echo "⏭️ Skipping infrastructure deployment (SKIP_INFRA_DEPLOY=true)"
+        echo "📦 Infrastructure already exists, deploying container images only..."
+
     - name: Login to Amazon ECR
       id: login-ecr
       env:
@@ -233,7 +240,8 @@ jobs:
       run: |
         echo "🚀 Starting ECS services..."
         
-        # Explicitly scale up GPU ASG to 1 to speed up deployment
+        # Scale up GPU ASG to 1 for the worker
+        # Note: The worker uses scale-to-zero architecture - it starts at 0 and scales up when jobs arrive
         # The ASG name contains a random string, so we find it by prefix
         ASG_NAME=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, 'ClipItStack-GPUWorkerASG')].AutoScalingGroupName" --output text)
         if [ ! -z "$ASG_NAME" ]; then
@@ -241,9 +249,13 @@ jobs:
           aws autoscaling set-desired-capacity --auto-scaling-group-name "$ASG_NAME" --desired-capacity 1
         fi
 
+        # Start web service (always-on)
         aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WEB }} --desired-count 1
-        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WORKER }} --desired-count 1
-        echo "✅ ECS services started and ASG scaling requested"
+        
+        # Worker uses scale-to-zero: keep at 0 during deployment, scale up manually or via triggers when needed
+        # This avoids the 45-minute timeout waiting for the 4.5GB image to pull
+        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WORKER }} --desired-count 0
+        echo "✅ ECS web service started. Worker service task definition updated (scale-to-zero mode)."
 
     - name: Deploy Amazon ECS task definition (web)
       env:
@@ -267,8 +279,10 @@ jobs:
         task-definition: ${{ steps.task-def-worker.outputs.task-definition }}
         service: ${{ env.ECS_SERVICE_WORKER }}
         cluster: ${{ env.ECS_CLUSTER }}
-        wait-for-service-stability: false  # Worker scales from 0, no need to wait
-        wait-for-minutes: 45  # Extended timeout for GPU worker (pulls 4.5GB image)
+        # Don't wait for worker stability - it uses scale-to-zero architecture
+        # The service stays at 0 tasks until manually scaled or triggered by job queue
+        # This prevents the 45-minute timeout waiting for 4.5GB image pull
+        wait-for-service-stability: false
 
     - name: Notify deployment status
       if: always()
