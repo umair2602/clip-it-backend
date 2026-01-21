@@ -622,10 +622,10 @@ class ClipItStack(Stack):
         )
 
         worker_service = ecs.Ec2Service(
-            self, "WorkerService",
+            self, "GPUWorkerService",
             cluster=cluster,
-            task_definition=worker_task_definition,
-            desired_count=0,  # Start with 0 tasks (scale up when needed)
+            task_definition=worker_task_definition, # Assuming worker_task_definition is the correct variable name
+            desired_count=0,  # Start at 0, auto-scale when jobs arrive (true scale-to-zero)
             service_name="clip-it-gpu-worker-service",
             capacity_provider_strategies=[
                 ecs.CapacityProviderStrategy(

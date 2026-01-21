@@ -267,7 +267,7 @@ jobs:
         task-definition: ${{ steps.task-def-worker.outputs.task-definition }}
         service: ${{ env.ECS_SERVICE_WORKER }}
         cluster: ${{ env.ECS_CLUSTER }}
-        wait-for-service-stability: true
+        wait-for-service-stability: false  # Worker scales from 0, no need to wait
         wait-for-minutes: 45  # Extended timeout for GPU worker (pulls 4.5GB image)
 
     - name: Notify deployment status
