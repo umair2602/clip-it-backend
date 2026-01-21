@@ -473,11 +473,14 @@ class ClipItStack(Stack):
         )
 
         # Worker service task definition (EC2 for GPU)
+        # Using BRIDGE network mode so the task shares the EC2 instance's network
+        # This allows the container to use the instance's public IP for outbound internet access
+        # (AWS_VPC mode would require a NAT Gateway for internet access from public subnets)
         worker_task_definition = ecs.Ec2TaskDefinition(
             self, "WorkerTaskDefinition",
             execution_role=task_execution_role,
             task_role=task_role,
-            network_mode=ecs.NetworkMode.AWS_VPC,
+            network_mode=ecs.NetworkMode.BRIDGE,
             family="clip-it-worker-task"
         )
 
@@ -630,7 +633,8 @@ class ClipItStack(Stack):
                     weight=1
                 )
             ],
-            security_groups=[ecs_security_group],
+            # Note: No security_groups needed with BRIDGE network mode
+            # The task uses the EC2 instance's security group (worker_sg) which has allow_all_outbound=True
             enable_execute_command=True,
             # Allow stopping old task before new one starts (required for single GPU)
             min_healthy_percent=0,
