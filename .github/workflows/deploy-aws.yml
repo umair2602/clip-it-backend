@@ -252,10 +252,10 @@ jobs:
         # Start web service (always-on)
         aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WEB }} --desired-count 1
         
-        # Worker uses scale-to-zero: keep at 0 during deployment, scale up manually or via triggers when needed
-        # This avoids the 45-minute timeout waiting for the 4.5GB image to pull
-        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WORKER }} --desired-count 0
-        echo "✅ ECS web service started. Worker service task definition updated (scale-to-zero mode)."
+        # Keep worker running during and after deployment
+        # Note: GPU worker stays at 1 task. For true scale-to-zero, set to 0 and scale up manually when jobs arrive.
+        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE_WORKER }} --desired-count 1
+        echo "✅ ECS services started. Worker will run continuously."
 
     - name: Deploy Amazon ECS task definition (web)
       env:
