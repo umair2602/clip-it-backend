@@ -46,7 +46,7 @@ jobs:
       run: npm install -g aws-cdk
 
     - name: Deploy Infrastructure
-      if: false  # TEMPORARILY DISABLED - CloudFormation has resource conflict. Set to: ${{ vars.SKIP_INFRA_DEPLOY != 'true' }} when fixed
+      if: true  # Re-enabled to deploy TIKTOK_SCOPES fix
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
