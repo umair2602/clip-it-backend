@@ -283,7 +283,7 @@ class ClipItStack(Stack):
             "JWT_ALGORITHM": "HS256",
             "JWT_ACCESS_TOKEN_EXPIRE_MINUTES": "180",
             "JWT_REFRESH_TOKEN_EXPIRE_DAYS": "10",
-            "TIKTOK_SCOPES": "user.info.basic,user.info.profile,video.publish,video.upload",
+            "TIKTOK_SCOPES": "user.info.basic,video.publish,video.upload",
             "TIKTOK_API_BASE": "https://open.tiktokapis.com/v2",
             "TIKTOK_AUTH_BASE": "https://www.tiktok.com/v2",
             "MIN_CLIP_DURATION": "15",
