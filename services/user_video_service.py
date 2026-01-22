@@ -340,14 +340,38 @@ async def add_clip_to_video(user_id: str, video_id: str, clip_data: Dict[str, An
         logger.info(f"Created clip model with ID: {clip.id}")
         logger.info(f"Clip dict: {clip.dict()}")
         
-        # Add clip to video's clips array, but only if it doesn't already exist
-        # We use start_time and end_time as a simple way to identify duplicate clips on retry
+        # Add clip to video's clips array
+        # First, check if a clip with the same start_time and end_time already exists
+        existing_clip = users_collection.find_one({
+            "_id": ObjectId(user_id),
+            "videos": {
+                "$elemMatch": {
+                    "id": video_id,
+                    "clips": {
+                        "$elemMatch": {
+                            "start_time": clip.start_time,
+                            "end_time": clip.end_time
+                        }
+                    }
+                }
+            }
+        })
+        
+        if existing_clip:
+            logger.info(f"⏭️ Clip with start_time={clip.start_time} and end_time={clip.end_time} already exists, skipping")
+            # Return existing clip ID (find it in the document)
+            for video in existing_clip.get('videos', []):
+                if video.get('id') == video_id:
+                    for existing in video.get('clips', []):
+                        if existing.get('start_time') == clip.start_time and existing.get('end_time') == clip.end_time:
+                            return existing.get('id')
+            return None
+        
+        # Now push the new clip
         result = users_collection.update_one(
             {
                 "_id": ObjectId(user_id),
-                "videos.id": video_id,
-                "videos.clips.start_time": {"$ne": clip.start_time},
-                "videos.clips.end_time": {"$ne": clip.end_time}
+                "videos.id": video_id
             },
             {
                 "$push": {"videos.$.clips": clip.dict()},

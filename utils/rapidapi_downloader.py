@@ -269,7 +269,7 @@ async def _poll_progress_url(progress_url: str, api_key: str, max_attempts: int 
                                 logger.info(f"✅ Download URL ready after {attempt + 1} attempts")
                                 return url
                         
-                        logger.info(f"⏳ Progress check {attempt + 1}/{max_attempts}: {progress_data.get('progress', 'N/A')}%")
+                        logger.debug(f"⏳ Progress check {attempt + 1}/{max_attempts}: {progress_data.get('progress', 'N/A')}%")
                     else:
                         logger.warning(f"⚠️ Progress URL returned status {response.status}")
             
@@ -323,10 +323,10 @@ async def _download_file(url: str, output_dir: Path, title: str) -> Optional[str
                         f.write(chunk)
                         downloaded += len(chunk)
                         
-                        # Log progress every 10MB
-                        if downloaded % (10 * 1024 * 1024) < chunk_size:
+                        # Log progress every 100MB (reduced logging)
+                        if downloaded % (100 * 1024 * 1024) < chunk_size:
                             progress = (downloaded / file_size * 100) if file_size > 0 else 0
-                            logger.info(f"   Progress: {downloaded / (1024*1024):.1f} MB ({progress:.1f}%)")
+                            logger.debug(f"   Progress: {downloaded / (1024*1024):.1f} MB ({progress:.1f}%)")
                 
                 logger.info(f"✅ Download complete: {file_path}")
                 return str(file_path)
