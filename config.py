@@ -168,7 +168,7 @@ class Settings:
         get_secret(
             "/clip-it/tiktok-scopes",
             "TIKTOK_SCOPES",
-            "user.info.basic,user.info.profile,video.publish,video.upload",
+            "user.info.basic,video.publish,video.upload",
         )
     )
     TIKTOK_API_BASE = clean_env_value(
