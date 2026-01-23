@@ -46,7 +46,7 @@ jobs:
       run: npm install -g aws-cdk
 
     - name: Deploy Infrastructure
-      if: false  # DISABLED - CloudFormation has resource conflict. Use AWS CLI to update task definitions instead.
+      if: true  # ENABLED - CDK ID fix applied (WorkerService instead of GPUWorkerService)
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

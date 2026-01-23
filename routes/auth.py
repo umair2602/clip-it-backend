@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from models.user import UserCreate, UserLogin, User, Token, RefreshTokenRequest
+from models.user import UserCreate, UserLogin, User, Token, RefreshTokenRequest, ForgotPasswordRequest, ResetPasswordRequest, VerifyResetTokenRequest
 from services.auth import auth_service
 
 logger = logging.getLogger(__name__)
@@ -202,3 +202,163 @@ async def verify_token_endpoint(current_user: Annotated[User, Depends(get_curren
     Returns success message if token is valid.
     """
     return {"message": "Token is valid", "user_id": current_user.id, "username": current_user.username}
+
+
+@router.post("/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest):
+    """
+    Request a password reset email.
+    
+    - **email**: User's email address
+    
+    Sends a password reset link to the user's email if the account exists.
+    Always returns success to prevent email enumeration attacks.
+    """
+    try:
+        # Import email service here to avoid circular imports
+        from services.email_service import email_service
+        
+        # Find user by email
+        user = await auth_service.get_user_by_email(request.email.lower())
+        
+        if user:
+            # Generate reset token
+            reset_token = auth_service.create_password_reset_token(
+                user_id=str(user.id),
+                email=user.email
+            )
+            
+            # Send reset email
+            email_sent = await email_service.send_password_reset_email(
+                to_email=user.email,
+                username=user.username,
+                reset_token=reset_token
+            )
+            
+            if email_sent:
+                logger.info(f"Password reset email sent to {request.email}")
+            else:
+                logger.error(f"Failed to send password reset email to {request.email}")
+        else:
+            # Log but don't reveal that user doesn't exist
+            logger.info(f"Password reset requested for non-existent email: {request.email}")
+        
+        # Always return success to prevent email enumeration
+        return {
+            "message": "If an account with that email exists, we've sent a password reset link."
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in forgot password: {str(e)}", exc_info=True)
+        # Still return success to prevent information leakage
+        return {
+            "message": "If an account with that email exists, we've sent a password reset link."
+        }
+
+
+@router.post("/verify-reset-token")
+async def verify_reset_token(request: VerifyResetTokenRequest):
+    """
+    Verify if a password reset token is valid.
+    
+    - **token**: Password reset token from email
+    
+    Returns whether the token is valid and not expired.
+    """
+    try:
+        token_data = auth_service.verify_password_reset_token(request.token)
+        
+        if token_data is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token"
+            )
+        
+        # Verify user still exists
+        user = await auth_service.get_user_by_id(token_data["user_id"])
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset token"
+            )
+        
+        return {
+            "valid": True,
+            "email": token_data["email"],
+            "message": "Token is valid"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying reset token: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
+        )
+
+
+@router.post("/reset-password")
+async def reset_password(request: ResetPasswordRequest):
+    """
+    Reset user's password using the reset token.
+    
+    - **token**: Password reset token from email
+    - **new_password**: New password (min 6 characters)
+    
+    Returns success message on successful password reset.
+    """
+    try:
+        # Import email service here to avoid circular imports
+        from services.email_service import email_service
+        
+        # Verify the token
+        token_data = auth_service.verify_password_reset_token(request.token)
+        
+        if token_data is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token"
+            )
+        
+        # Verify user exists
+        user = await auth_service.get_user_by_id(token_data["user_id"])
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset token"
+            )
+        
+        # Update the password
+        success = await auth_service.update_user_password(
+            user_id=token_data["user_id"],
+            new_password=request.new_password
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update password"
+            )
+        
+        # Send confirmation email
+        await email_service.send_password_changed_confirmation(
+            to_email=user.email,
+            username=user.username
+        )
+        
+        logger.info(f"Password reset successful for user {user.username}")
+        
+        return {
+            "message": "Password has been reset successfully. You can now sign in with your new password."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resetting password: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password"
+        )
+
