@@ -204,6 +204,76 @@ class AuthService:
             created_at=user.created_at,
             updated_at=user.updated_at
         )
+    
+    @staticmethod
+    def create_password_reset_token(user_id: str, email: str) -> str:
+        """Create a JWT token for password reset (expires in 1 hour)"""
+        to_encode = {
+            "sub": user_id,
+            "email": email,
+            "type": "password_reset"
+        }
+        expire = datetime.utcnow() + timedelta(hours=1)
+        to_encode.update({"exp": expire})
+        encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+        return encoded_jwt
+    
+    @staticmethod
+    def verify_password_reset_token(token: str) -> Optional[dict]:
+        """Verify and decode a password reset token"""
+        try:
+            payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            
+            # Check token type
+            if payload.get("type") != "password_reset":
+                logger.warning("Invalid token type for password reset")
+                return None
+            
+            user_id: str = payload.get("sub")
+            email: str = payload.get("email")
+            
+            if user_id is None or email is None:
+                logger.warning("Missing user_id or email in reset token")
+                return None
+            
+            return {"user_id": user_id, "email": email}
+        except JWTError as e:
+            logger.error(f"JWT error verifying reset token: {str(e)}")
+            return None
+    
+    @staticmethod
+    async def update_user_password(user_id: str, new_password: str) -> bool:
+        """Update user's password"""
+        try:
+            users_collection = get_users_collection()
+            
+            # Validate ObjectId before querying
+            if not ObjectId.is_valid(user_id):
+                logger.error(f"Invalid user_id format: {user_id}")
+                return False
+            
+            hashed_password = AuthService.get_password_hash(new_password)
+            
+            result = users_collection.update_one(
+                {"_id": ObjectId(user_id)},
+                {
+                    "$set": {
+                        "hashed_password": hashed_password,
+                        "updated_at": datetime.now(timezone.utc)
+                    }
+                }
+            )
+            
+            if result.modified_count > 0:
+                logger.info(f"Password updated successfully for user {user_id}")
+                return True
+            else:
+                logger.warning(f"No user found with id {user_id} to update password")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error updating user password: {str(e)}", exc_info=True)
+            return False
 
 
 # Create global auth service instance

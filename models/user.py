@@ -207,3 +207,30 @@ class UserLogin(BaseModel):
 class RefreshTokenRequest(BaseModel):
     """Refresh token request model"""
     refresh_token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Forgot password request model"""
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset password request model"""
+    token: str
+    new_password: str = Field(..., min_length=6, max_length=100)
+    
+    @field_validator('new_password')
+    @classmethod
+    def validate_password(cls, v):
+        """Validate password"""
+        if not v:
+            raise ValueError("Password is required")
+        if len(v.strip()) < 6:
+            raise ValueError("Password must be at least 6 characters long")
+        return v.strip()
+
+
+class VerifyResetTokenRequest(BaseModel):
+    """Verify reset token request model"""
+    token: str
+
