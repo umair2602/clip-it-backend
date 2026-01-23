@@ -55,3 +55,6 @@ scipy>=1.11.0
 # TalkNet ASD (Active Speaker Detection)
 gdown>=4.7.0
 python_speech_features>=0.6.0
+
+# Email service (Resend) for password reset
+resend>=2.0.0
