@@ -1,44 +1,27 @@
 # Multi-stage build for worker application with NVIDIA GPU support
-# Uses NVIDIA CUDA base image for FFmpeg NVENC hardware acceleration
+# Stage 1: Build FFmpeg with NVENC support
+# Stage 2: Final runtime image (smaller)
 
-FROM nvidia/cuda:11.8.0-devel-ubuntu22.04 AS base
+# ============================================
+# STAGE 1: Build FFmpeg with NVENC
+# ============================================
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04 AS ffmpeg-builder
 
-# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.11 and essential system dependencies
-RUN apt-get update && apt-get install -y \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3-pip \
-    # System dependencies for OpenCV and video processing
-    libsm6 \
-    libxext6 \
-    libfontconfig1 \
-    libxrender1 \
-    libgl1 \
-    libglib2.0-0 \
-    # Build tools
-    g++ \
-    wget \
-    xz-utils \
+# Install FFmpeg build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    # Audio processing
-    libsndfile1 \
-    # FFmpeg dependencies
+    wget \
     nasm \
     yasm \
     pkg-config \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    libx264-dev \
+    libx265-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install FFmpeg with NVENC support
-# Use the official NVIDIA-compatible approach: compile with nv-codec-headers
-RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
+# Install nv-codec-headers for NVENC
+RUN git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
     && cd /tmp/nv-codec-headers \
     && make install \
     && rm -rf /tmp/nv-codec-headers
@@ -52,19 +35,64 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.tar.xz \
         --enable-cuvid \
         --enable-nvenc \
         --enable-nonfree \
-        --enable-libnpp \
+        --enable-gpl \
+        --enable-libx264 \
+        --enable-libx265 \
         --extra-cflags=-I/usr/local/cuda/include \
         --extra-ldflags=-L/usr/local/cuda/lib64 \
         --disable-doc \
         --disable-debug \
-        --enable-gpl \
+        --disable-static \
+        --enable-shared \
     && make -j$(nproc) \
     && make install \
-    && cd .. \
-    && rm -rf ffmpeg-6.1* \
-    && ldconfig \
-    && ffmpeg -version \
-    && ffmpeg -encoders 2>/dev/null | grep nvenc || echo "NVENC check complete"
+    && ldconfig
+
+# ============================================
+# STAGE 2: Final runtime image
+# ============================================
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 AS final
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Copy FFmpeg binaries and libraries from builder stage
+COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+COPY --from=ffmpeg-builder /usr/local/lib/libav* /usr/local/lib/
+COPY --from=ffmpeg-builder /usr/local/lib/libsw* /usr/local/lib/
+COPY --from=ffmpeg-builder /usr/local/lib/libpostproc* /usr/local/lib/
+
+# Install Python 3.11 and essential system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    # System dependencies for OpenCV and video processing
+    libsm6 \
+    libxext6 \
+    libfontconfig1 \
+    libxrender1 \
+    libgl1 \
+    libglib2.0-0 \
+    # Build tools for pip packages
+    g++ \
+    # FFmpeg runtime dependencies
+    libx264-163 \
+    libx265-199 \
+    # Audio processing
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Update library cache
+RUN ldconfig
+
+# Verify FFmpeg installation
+RUN ffmpeg -version && ffmpeg -encoders 2>/dev/null | grep -E "nvenc|cuda" || echo "Note: NVENC available at runtime with GPU"
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -80,14 +108,15 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements-worker.txt requirements.txt
 
-# Install Python dependencies
-# PyTorch with CUDA 11.8 support for GPU acceleration (TalkNet, etc.)
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 && \
-    echo "cchardet==99.99.99" > /tmp/constraints.txt && \
-    pip install --no-cache-dir -r requirements.txt -c /tmp/constraints.txt || \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip cache purge && \
-    rm -rf /root/.cache/pip /tmp/constraints.txt
+# Install PyTorch with CUDA 11.8 support (separate step for caching)
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 \
+    && rm -rf /root/.cache/pip /tmp/*
+
+# Install other requirements
+RUN echo "cchardet==99.99.99" > /tmp/constraints.txt \
+    && pip install --no-cache-dir -r requirements.txt -c /tmp/constraints.txt || pip install --no-cache-dir -r requirements.txt \
+    && pip cache purge \
+    && rm -rf /root/.cache/pip /tmp/*
 
 # Copy application code
 COPY . .
@@ -103,6 +132,7 @@ USER appuser
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 ENV PATH="/usr/local/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
 
 # Health check for worker
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
