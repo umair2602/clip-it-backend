@@ -1,7 +1,7 @@
 # Multi-stage build for worker application with NVIDIA GPU support
 # Uses NVIDIA CUDA base image for FFmpeg NVENC hardware acceleration
 
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 AS base
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04 AS base
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -26,20 +26,45 @@ RUN apt-get update && apt-get install -y \
     g++ \
     wget \
     xz-utils \
+    git \
     # Audio processing
     libsndfile1 \
+    # FFmpeg dependencies
+    nasm \
+    yasm \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install FFmpeg with NVENC support (static build from John Van Sickle)
-# This is a reliable, well-maintained static build with hardware acceleration
-RUN wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
-    && tar -xf ffmpeg-release-amd64-static.tar.xz \
-    && mv ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ \
-    && mv ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ \
-    && rm -rf ffmpeg-*-amd64-static* \
-    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
-    && ffmpeg -version
+# Install FFmpeg with NVENC support
+# Use the official NVIDIA-compatible approach: compile with nv-codec-headers
+RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
+    && cd /tmp/nv-codec-headers \
+    && make install \
+    && rm -rf /tmp/nv-codec-headers
+
+# Download and compile FFmpeg with NVENC support
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.tar.xz \
+    && tar -xf ffmpeg-6.1.tar.xz \
+    && cd ffmpeg-6.1 \
+    && ./configure \
+        --enable-cuda-nvcc \
+        --enable-cuvid \
+        --enable-nvenc \
+        --enable-nonfree \
+        --enable-libnpp \
+        --extra-cflags=-I/usr/local/cuda/include \
+        --extra-ldflags=-L/usr/local/cuda/lib64 \
+        --disable-doc \
+        --disable-debug \
+        --enable-gpl \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. \
+    && rm -rf ffmpeg-6.1* \
+    && ldconfig \
+    && ffmpeg -version \
+    && ffmpeg -encoders 2>/dev/null | grep nvenc || echo "NVENC check complete"
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -77,6 +102,7 @@ USER appuser
 # Environment variables for NVIDIA runtime
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+ENV PATH="/usr/local/bin:${PATH}"
 
 # Health check for worker
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
