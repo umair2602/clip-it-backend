@@ -1317,27 +1317,66 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         
         # Check if we got a valid output
         if os.path.exists(temp_output) and os.path.getsize(temp_output) > 0:
-            logger.info(f"      ✅ Dynamic cropping complete, re-encoding with h264...")
+            logger.info(f"      ✅ Dynamic cropping complete, re-encoding with GPU (NVENC)...")
             
-            # Re-encode with h264 and audio using ffmpeg
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i", temp_output,
-                "-i", temp_path,  # Original for audio
-                "-map", "0:v",  # Video from temp_output
-                "-map", "1:a?",  # Audio from original (if exists)
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                output_path
-            ]
+            # Re-encode with h264 and audio using ffmpeg - try GPU first, fallback to CPU
+            hw_accel_cmd = get_hardware_acceleration_cmd()
+            use_gpu = hw_accel_cmd and "cuda" in " ".join(hw_accel_cmd)
             
-            subprocess.run(cmd, check=True, capture_output=True)
+            if use_gpu:
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-hwaccel", "cuda",
+                    "-i", temp_output,
+                    "-i", temp_path,  # Original for audio
+                    "-map", "0:v",  # Video from temp_output
+                    "-map", "1:a?",  # Audio from original (if exists)
+                    "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p4",  # NVENC preset (p1=fastest, p7=quality)
+                    "-rc", "constqp",
+                    "-qp", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    output_path
+                ]
+                logger.info(f"      🚀 Using NVENC GPU encoding")
+            else:
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i", temp_output,
+                    "-i", temp_path,  # Original for audio
+                    "-map", "0:v",  # Video from temp_output
+                    "-map", "1:a?",  # Audio from original (if exists)
+                    "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    output_path
+                ]
+                logger.info(f"      💻 Using CPU (libx264) encoding - no GPU detected")
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError as nvenc_error:
+                if use_gpu:
+                    logger.warning(f"      ⚠️ NVENC encoding failed, falling back to CPU: {nvenc_error}")
+                    cmd = [
+                        "ffmpeg", "-y", "-i", temp_output, "-i", temp_path,
+                        "-map", "0:v", "-map", "1:a?",
+                        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+                    ]
+                    subprocess.run(cmd, check=True, capture_output=True)
+                else:
+                    raise
             
             # Clean up temp file
             if os.path.exists(temp_output):
@@ -1353,8 +1392,17 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
             from collections import Counter
             dominant_crop_x = Counter(keyframe_crop_x).most_common(1)[0][0] if keyframe_crop_x else (input_w - crop_w) // 2
             filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
-            cmd = ["ffmpeg", "-y", "-i", temp_path, "-vf", filter_str, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
-            subprocess.run(cmd, check=True, capture_output=True)
+            hw_fb = get_hardware_acceleration_cmd()
+            if hw_fb and "cuda" in " ".join(hw_fb):
+                cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-i", temp_path, "-vf", filter_str, "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "constqp", "-qp", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
+            else:
+                cmd = ["ffmpeg", "-y", "-i", temp_path, "-vf", filter_str, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                # Fallback to CPU if GPU fails
+                cmd = ["ffmpeg", "-y", "-i", temp_path, "-vf", filter_str, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
+                subprocess.run(cmd, check=True, capture_output=True)
             logger.info(f"      ✅ Static fallback crop completed")
             
     else:
@@ -1363,22 +1411,40 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         logger.info(f"      📍 Using static crop at X={crop_x}")
         filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
         
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", temp_path,
-            "-vf", filter_str,
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            output_path
-        ]
+        # Use GPU encoding if available
+        hw_single = get_hardware_acceleration_cmd()
+        use_gpu_single = hw_single and "cuda" in " ".join(hw_single)
         
-        logger.info(f"      Crop filter: {filter_str}")
-        subprocess.run(cmd, check=True)
+        if use_gpu_single:
+            cmd = [
+                "ffmpeg", "-y", "-hwaccel", "cuda",
+                "-i", temp_path, "-vf", filter_str,
+                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "constqp", "-qp", "23",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+            ]
+            logger.info(f"      🚀 Crop filter (GPU): {filter_str}")
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", temp_path, "-vf", filter_str,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+            ]
+            logger.info(f"      💻 Crop filter (CPU): {filter_str}")
+        
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as single_error:
+            if use_gpu_single:
+                logger.warning(f"      ⚠️ GPU encoding failed, falling back to CPU: {single_error}")
+                cmd = [
+                    "ffmpeg", "-y", "-i", temp_path, "-vf", filter_str,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+                ]
+                subprocess.run(cmd, check=True)
+            else:
+                raise
         logger.info(f"      ✅ Crop applied successfully")
     
     # Check if we're using full width (no cropping needed)
@@ -1397,22 +1463,40 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
             # Video is taller than 9:16 - add horizontal padding (left/right black bars)
             scale_filter = f"scale=-1:1920,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
         
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", temp_path,
-            "-vf", scale_filter,
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            output_path
-        ]
+        # Use GPU encoding if available for full-width processing
+        hw_full = get_hardware_acceleration_cmd()
+        use_gpu_full = hw_full and "cuda" in " ".join(hw_full)
         
-        logger.info(f"      Scale + pad filter: {scale_filter}")
-        subprocess.run(cmd, check=True)
+        if use_gpu_full:
+            cmd = [
+                "ffmpeg", "-y", "-hwaccel", "cuda",
+                "-i", temp_path, "-vf", scale_filter,
+                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "constqp", "-qp", "23",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+            ]
+            logger.info(f"      🚀 Scale + pad filter (GPU): {scale_filter}")
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", temp_path, "-vf", scale_filter,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+            ]
+            logger.info(f"      💻 Scale + pad filter (CPU): {scale_filter}")
+        
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as full_error:
+            if use_gpu_full:
+                logger.warning(f"      ⚠️ GPU encoding failed for full-frame, falling back to CPU: {full_error}")
+                cmd = [
+                    "ffmpeg", "-y", "-i", temp_path, "-vf", scale_filter,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
+                ]
+                subprocess.run(cmd, check=True)
+            else:
+                raise
         logger.info(f"      ✅ Full frame processed with padding")
 # async def create_clip(
 #     video_path: str, output_dir: str, start_time: float, end_time: float, clip_id: str
