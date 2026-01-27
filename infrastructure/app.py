@@ -291,7 +291,10 @@ class ClipItStack(Stack):
             "MAX_CLIPS_PER_EPISODE": "10",
             "OUTPUT_WIDTH": "1080",
             "OUTPUT_HEIGHT": "1920",
-            "SPEAKER_DIARIZATION_ENABLED": "false"
+            "SPEAKER_DIARIZATION_ENABLED": "false",
+            # Email service configuration
+            "RESEND_FROM_EMAIL": "Klipz <noreply@klipz.ai>",
+            "FRONTEND_URL": "https://klipz.ai"
         }
         
         # Secrets from SSM (sensitive values)
@@ -446,6 +449,13 @@ class ClipItStack(Stack):
                 ssm.StringParameter.from_secure_string_parameter_attributes(
                     self, "InstaAppScopeRef",
                     parameter_name="/clip-it/insta-app-scope"
+                )
+            ),
+            # Email service (Resend) for password reset
+            "RESEND_API_KEY": ecs.Secret.from_ssm_parameter(
+                ssm.StringParameter.from_secure_string_parameter_attributes(
+                    self, "ResendAPIKeyRef",
+                    parameter_name="/clip-it/resend-api-key"
                 )
             ),
         }
@@ -622,7 +632,7 @@ class ClipItStack(Stack):
         )
 
         worker_service = ecs.Ec2Service(
-            self, "GPUWorkerService",
+            self, "WorkerService",  # Changed from GPUWorkerService to match existing CloudFormation resource
             cluster=cluster,
             task_definition=worker_task_definition, # Assuming worker_task_definition is the correct variable name
             desired_count=0,  # Start at 0, auto-scale when jobs arrive (true scale-to-zero)
