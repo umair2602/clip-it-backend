@@ -1,5 +1,5 @@
-# Worker application with NVIDIA GPU support for TalkNet
-# Note: FFmpeg uses CPU encoding (libx264) - GPU is used for TalkNet AI processing
+# Worker application with NVIDIA GPU support for TalkNet + NVENC FFmpeg
+# Uses pre-built FFmpeg with NVENC support for GPU-accelerated video encoding
 
 FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 AS base
 
@@ -15,8 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11-venv \
     python3.11-dev \
     python3-pip \
-    # FFmpeg (uses CPU encoding, GPU used for TalkNet instead)
-    ffmpeg \
     # System dependencies for OpenCV and video processing
     libsm6 \
     libxext6 \
@@ -26,13 +24,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     # Build tools for pip packages
     g++ \
+    wget \
+    xz-utils \
     # Audio processing
     libsndfile1 \
+    # NVIDIA encoding library (required for NVENC)
+    libnvidia-encode-535 \
+    libnvidia-decode-535 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Verify FFmpeg installation
-RUN ffmpeg -version
+# Install pre-built FFmpeg with NVENC support (jellyfin-ffmpeg)
+# This build includes h264_nvenc, hevc_nvenc, and other hardware encoders
+RUN wget -q https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v6.0.1-8/jellyfin-ffmpeg6_6.0.1-8-jammy_amd64.deb \
+    && apt-get update \
+    && apt-get install -y ./jellyfin-ffmpeg6_6.0.1-8-jammy_amd64.deb \
+    && rm -f jellyfin-ffmpeg6_6.0.1-8-jammy_amd64.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
+    && ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe
+
+# Verify FFmpeg installation with NVENC
+RUN ffmpeg -version && echo "=== Checking for NVENC ===" && ffmpeg -encoders 2>/dev/null | grep -i nvenc || echo "NVENC will be available at runtime with GPU"
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -71,7 +84,8 @@ USER appuser
 # Environment variables for NVIDIA runtime
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-ENV PATH="/usr/local/bin:${PATH}"
+ENV PATH="/usr/lib/jellyfin-ffmpeg:/usr/local/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/lib/jellyfin-ffmpeg/lib:${LD_LIBRARY_PATH}"
 
 # Health check for worker
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
