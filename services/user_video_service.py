@@ -256,6 +256,10 @@ async def get_user_videos(user_id: str, page: int = 1, page_size: int = 10) -> D
             return {"videos": [], "total_count": 0, "page": page, "page_size": page_size, "total_pages": 0}
         
         videos = user.get('videos', [])
+        
+        # Sort videos by created_at descending (newest first)
+        videos = sorted(videos, key=lambda v: v.get('created_at', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        
         total_count = len(videos)
         
         # Apply pagination
