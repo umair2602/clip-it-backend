@@ -184,9 +184,9 @@ class ClipItStack(Stack):
             self, "GPUWorkerASG",
             vpc=vpc,
             launch_template=spot_launch_template,
-            min_capacity=0,  # Allow scaling down to 0 when not processing videos
+            min_capacity=1,  # Always keep 1 instance running (24/7)
             max_capacity=1,
-            desired_capacity=0,  # Start at 0 to save costs when not in use
+            desired_capacity=1,  # Always running for 24/7 availability
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
 
