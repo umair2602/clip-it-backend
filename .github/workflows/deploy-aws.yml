@@ -46,7 +46,7 @@ jobs:
       run: npm install -g aws-cdk
 
     - name: Deploy Infrastructure
-      if: false  # DISABLED - Only need to rebuild Docker image with resend package
+      if: true  # ENABLED - Deploying ASG changes for 24/7 worker
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
