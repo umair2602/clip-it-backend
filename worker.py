@@ -19,7 +19,6 @@ from services.video_processing import generate_thumbnail, process_video, create_
 from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
 from utils.s3_storage import s3_client
 from utils.rapidapi_downloader import download_youtube_video_rapidapi
-from utils.zyla_downloader import download_youtube_video_zyla
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video
 from logging_config import setup_logging
@@ -331,7 +330,7 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
         if user_id and video_id:
             set_download_cancellation_context(user_id, video_id)
 
-        # Download the video (ZylaLabs first, RapidAPI fallback)
+        # Download the video (RapidAPI)
         file_path, title, video_info = None, None, None
         
         # Start cancellation monitor
@@ -342,39 +341,21 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
             if user_id and video_id:
                 await check_if_cancelled(user_id, video_id)
             
-            # Tier 0: ZylaLabs (PRIMARY)
+            # PRIMARY: RapidAPI download
             try:
-                logger.info(f"Job {job_id}: [ZylaLabs] Attempting download (PRIMARY)...")
-                file_path, title, video_info = await download_youtube_video_zyla(url, video_dir)
+                logger.info(f"Job {job_id}: [RapidAPI] Attempting download (PRIMARY)...")
+                file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
                 if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ ZylaLabs download successful")
-            except Exception as zyla_error:
-                error_msg = str(zyla_error)
+                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
+            except Exception as rapidapi_error:
+                error_msg = str(rapidapi_error)
                 if "cancelled" in error_msg.lower():
                     raise ProcessingCancelledException("Download cancelled by user")
-                logger.warning(f"Job {job_id}: ZylaLabs download failed: {error_msg}")
+                logger.warning(f"Job {job_id}: RapidAPI download failed: {error_msg}")
             
             # Check for cancellation
             if user_id and video_id:
                 await check_if_cancelled(user_id, video_id)
-                    
-            # Tier 1: RapidAPI fallback (if ZylaLabs fails)
-            if not file_path or not title:
-                logger.info(f"Job {job_id}: ZylaLabs failed, trying RapidAPI fallback...")
-                try:
-                    logger.info(f"Job {job_id}: [RapidAPI] Attempting download...")
-                    file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
-                    if file_path and title:
-                        logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
-                except Exception as rapidapi_error:
-                    error_msg = str(rapidapi_error)
-                    if "cancelled" in error_msg.lower():
-                        raise ProcessingCancelledException("Download cancelled by user")
-                    logger.warning(f"Job {job_id}: RapidAPI download failed: {error_msg}")
-                        
-            # NOTE: Other fallback methods (Sieve, pytubefix) commented out
-            # if not file_path or not title:
-            #     ...
         finally:
             # Stop the cancellation monitor and clear context
             download_cancelled = True
@@ -387,9 +368,7 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
             clear_download_cancellation_context()
 
         if not file_path or not title:
-            raise Exception(
-                f"Failed to download YouTube video after trying RapidAPI and ZylaLabs."
-            )
+            raise Exception("Failed to download YouTube video using RapidAPI.")
 
         # Check if cancelled immediately after download
         logger.info(f"Job {job_id}: 🔍 Checking for cancellation after download...")
@@ -1593,36 +1572,20 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         video_dir = upload_dir / video_id
         video_dir.mkdir(exist_ok=True)
 
-        # Download the video (ZylaLabs first, RapidAPI fallback)
+        # Download the video (RapidAPI)
         file_path, title, video_info = None, None, None
 
-        # Tier 0: ZylaLabs (PRIMARY)
+        # PRIMARY: RapidAPI download
         try:
-            logger.info(f"Job {job_id}: [ZylaLabs] Attempting download (PRIMARY)...")
-            file_path, title, video_info = await download_youtube_video_zyla(url, video_dir)
+            logger.info(f"Job {job_id}: [RapidAPI] Attempting download (PRIMARY)...")
+            file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
             if file_path and title:
-                logger.info(f"Job {job_id}: ✅ ZylaLabs download successful")
-        except Exception as zyla_error:
-            logger.warning(f"Job {job_id}: ZylaLabs download failed: {str(zyla_error)}")
-
-        # Tier 1: RapidAPI fallback (if ZylaLabs fails)
-        if not file_path or not title:
-            logger.info(f"Job {job_id}: ZylaLabs failed, trying RapidAPI fallback...")
-            try:
-                logger.info(f"Job {job_id}: [RapidAPI] Attempting download...")
-                file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
-                if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
-            except Exception as rapidapi_error:
-                logger.warning(f"Job {job_id}: RapidAPI download failed: {str(rapidapi_error)}")
-
-        # NOTE: Other fallback methods (Sieve, yt-dlp, pytubefix) commented out
-        # # Tier 2: Try Sieve API
-        # if not file_path or not title:
-        #     ...
+                logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
+        except Exception as rapidapi_error:
+            logger.warning(f"Job {job_id}: RapidAPI download failed: {str(rapidapi_error)}")
 
         if not file_path or not title:
-            raise Exception("Failed to download YouTube video after trying ZylaLabs and RapidAPI.")
+            raise Exception("Failed to download YouTube video using RapidAPI.")
 
         logger.info(f"Job {job_id}: Download completed successfully: {file_path}")
 
