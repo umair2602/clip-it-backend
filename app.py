@@ -70,6 +70,9 @@ from utils.s3_validator import (
 # Import YouTube downloader (both original and new Sieve version)
 from utils.youtube_downloader import download_youtube_video
 
+# Import progress tracker
+from progress_tracker import ProgressTracker, PipelineStage
+
 # Import authentication routes
 from routes.auth import router as auth_router, get_current_user
 
@@ -266,6 +269,9 @@ app = FastAPI(
     description="API for AI-powered podcast clipping with user authentication",
     version="1.0.0",
 )
+
+# Initialize progress tracker (will be used in endpoints)
+# Note: job_queue is imported locally in functions, so we'll initialize progress_tracker there too
 
 # Include authentication routes
 app.include_router(auth_router)
@@ -482,6 +488,12 @@ async def health_check():
     return {"status": "ok"}
 
 
+@app.get("/api/stages")
+async def get_pipeline_stages():
+    """Get all defined pipeline stages and their progress percentages"""
+    return ProgressTracker.get_all_stages()
+
+
 @app.get("/heartbeat")
 async def heartbeat():
     """Enhanced heartbeat endpoint that provides system status information
@@ -673,6 +685,7 @@ async def upload_video(
 
 
 @app.get("/status/{task_id}")
+@app.get("/api/status/{task_id}")  # Alias for frontend consistency
 async def get_status(task_id: str):
     """Get task status from Redis job queue, in-memory tasks, or MongoDB video document
 
@@ -834,9 +847,23 @@ async def get_status(task_id: str):
 
         video_status = video_info.get("status", "downloading")
 
+        # Use progress tracker to get progress percentage (read-only, don't update)
+        from jobs import job_queue
+        progress_tracker = ProgressTracker(job_queue)
+        
+        # Get progress percentage from the stage mapping without updating
+        try:
+            # Map video status to PipelineStage to get progress percentage
+            stage = PipelineStage(video_status)
+            progress_percentage = progress_tracker.STAGE_PROGRESS.get(stage, 10)
+        except ValueError:
+            # If status not recognized, use default
+            progress_percentage = 10
+            logger.warning(f"Unrecognized video status: {video_status}, using default progress 10%")
+
         task_status = {
             "status": status_map.get(video_status, "downloading"),
-            "progress": get_progress_from_status(video_status),
+            "progress": progress_percentage,
             "message": get_message_from_status(
                 video_status, video_info.get("error_message")
             ),
@@ -911,34 +938,6 @@ async def get_status(task_id: str):
         logging.error(f"Error getting task status for {task_id}: {str(e)}")
         logging.exception("Full traceback:")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-def get_progress_from_status(status: str) -> int:
-    """Map video status to progress percentage - aligned with actual pipeline steps"""
-    progress_map = {
-        # Step 1: Downloading YouTube video
-        "queued": 5,  # Job queued
-        "downloading": 10,  # Downloading YouTube video
-        "downloaded": 15,  # Download complete
-        "uploading": 18,  # Uploading to storage
-        # Step 2: Transcribing
-        "processing_started": 20,  # Starting processing
-        "transcribing": 30,  # Transcribing audio with AssemblyAI
-        # Step 3: Finding interesting content
-        "analyzing": 50,  # AI analyzing content for best moments
-        # Step 4: Generating clips
-        "processing": 70,  # Creating video clips with FFmpeg
-        # Step 5: Clips download/upload (final stages)
-        "uploading_clips": 90,  # Uploading clips to S3
-        # Step 6: Finished
-        "completed": 100,  # All done!
-        # Error states
-        "failed": 0,
-        "error": 0,
-        "timeout": 0,
-        "stuck": 0,
-    }
-    return progress_map.get(status, 0)
 
 
 def get_message_from_status(status: str, error_message: str = None) -> str:
@@ -1302,7 +1301,7 @@ async def download_from_youtube(
         # Immediately create the embedded user video with process_task_id set
         video_data = {
             "id": video_id,
-            "title": f"YouTube Video {video_id}",
+            "title": "YouTube Video",
             "description": "Video submitted for processing",
             "status": "downloading",
             "video_type": "youtube",

@@ -8,8 +8,10 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from jobs import job_queue
+from progress_tracker import ProgressTracker, PipelineStage
 from services.content_analysis import analyze_content
 
 # Import services
@@ -19,7 +21,6 @@ from services.video_processing import generate_thumbnail, process_video, create_
 from services.user_video_service import update_user_video, get_user_video_by_video_id, add_clip_to_video, utc_now
 from utils.s3_storage import s3_client
 from utils.rapidapi_downloader import download_youtube_video_rapidapi
-from utils.zyla_downloader import download_youtube_video_zyla
 from utils.sieve_downloader import download_youtube_video_sieve
 from utils.youtube_downloader import download_youtube_video
 from logging_config import setup_logging
@@ -37,8 +38,13 @@ output_dir.mkdir(exist_ok=True)
 
 # Note: Removed Whisper model - now using AssemblyAI cloud service
 
+# Initialize progress tracker
+progress_tracker = ProgressTracker(job_queue)
+
 # Global tracker for the current job being processed (for signal handling)
 current_active_job_id = None
+
+
 
 
 def handle_interruption(signo, frame):
@@ -286,15 +292,9 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                 "updated_at": utc_now()
             })
 
-        # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloading",
-                "progress": "10",
-                "message": "Downloading video from YouTube...",
-            },
-        )
+        # Update job status - start at 5% (auto-increments sequentially)
+        progress_tracker.update_progress(job_id, PipelineStage.DOWNLOADING)
+        job_queue.update_job(job_id, {"message": "Downloading video from YouTube..."})
 
         # Create video directory
         video_dir = upload_dir / video_id
@@ -327,11 +327,12 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                 except Exception as e:
                     logger.debug(f"Cancellation check error: {e}")
         
+        
         # Set cancellation context
         if user_id and video_id:
             set_download_cancellation_context(user_id, video_id)
 
-        # Download the video (ZylaLabs first, RapidAPI fallback)
+        # Download the video (RapidAPI)
         file_path, title, video_info = None, None, None
         
         # Start cancellation monitor
@@ -342,41 +343,23 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
             if user_id and video_id:
                 await check_if_cancelled(user_id, video_id)
             
-            # Tier 0: ZylaLabs (PRIMARY)
+            # PRIMARY: RapidAPI download
             try:
-                logger.info(f"Job {job_id}: [ZylaLabs] Attempting download (PRIMARY)...")
-                file_path, title, video_info = await download_youtube_video_zyla(url, video_dir)
+                logger.info(f"Job {job_id}: [RapidAPI] Attempting download (PRIMARY)...")
+                file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
                 if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ ZylaLabs download successful")
-            except Exception as zyla_error:
-                error_msg = str(zyla_error)
+                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
+            except Exception as rapidapi_error:
+                error_msg = str(rapidapi_error)
                 if "cancelled" in error_msg.lower():
                     raise ProcessingCancelledException("Download cancelled by user")
-                logger.warning(f"Job {job_id}: ZylaLabs download failed: {error_msg}")
+                logger.warning(f"Job {job_id}: RapidAPI download failed: {error_msg}")
             
             # Check for cancellation
             if user_id and video_id:
                 await check_if_cancelled(user_id, video_id)
-                    
-            # Tier 1: RapidAPI fallback (if ZylaLabs fails)
-            if not file_path or not title:
-                logger.info(f"Job {job_id}: ZylaLabs failed, trying RapidAPI fallback...")
-                try:
-                    logger.info(f"Job {job_id}: [RapidAPI] Attempting download...")
-                    file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
-                    if file_path and title:
-                        logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
-                except Exception as rapidapi_error:
-                    error_msg = str(rapidapi_error)
-                    if "cancelled" in error_msg.lower():
-                        raise ProcessingCancelledException("Download cancelled by user")
-                    logger.warning(f"Job {job_id}: RapidAPI download failed: {error_msg}")
-                        
-            # NOTE: Other fallback methods (Sieve, pytubefix) commented out
-            # if not file_path or not title:
-            #     ...
         finally:
-            # Stop the cancellation monitor and clear context
+            # Stop the cancellation monitor
             download_cancelled = True
             if monitor_task:
                 monitor_task.cancel()
@@ -387,9 +370,7 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
             clear_download_cancellation_context()
 
         if not file_path or not title:
-            raise Exception(
-                f"Failed to download YouTube video after trying RapidAPI and ZylaLabs."
-            )
+            raise Exception("Failed to download YouTube video using RapidAPI.")
 
         # Check if cancelled immediately after download
         logger.info(f"Job {job_id}: 🔍 Checking for cancellation after download...")
@@ -409,12 +390,8 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
             })
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloaded",
-                "progress": "100",
-                "message": "YouTube video downloaded successfully",
+        progress_tracker.update_progress(job_id, PipelineStage.DOWNLOADED)
+        job_queue.update_job(job_id, {"message": "YouTube video downloaded successfully",
                 "video_info": json.dumps(
                     {
                         "video_id": video_id,
@@ -494,8 +471,8 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
 
     except ProcessingCancelledException as e:
         logger.warning(f"YouTube download cancelled for job {job_id}: {str(e)}")
-        job_queue.update_job(
-            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        progress_tracker.update_progress(job_id, PipelineStage.CANCELLED)
+        job_queue.update_job(job_id, {"message": str(e)}
         )
         # Status already set to failed in DB by cancel endpoint
         logger.info(f"✅ Gracefully stopped YouTube download for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
@@ -522,12 +499,8 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
             except Exception as cleanup_error:
                 logger.warning(f"⚠️  Failed to clean up directory after download error: {cleanup_error}")
         
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "error",
-                "progress": "0",
-                "message": f"Error processing YouTube download: {str(e)}",
+        progress_tracker.update_progress(job_id, PipelineStage.ERROR)
+        job_queue.update_job(job_id, {"message": f"Error processing YouTube download: {str(e)}",
             },
         )
         
@@ -574,26 +547,9 @@ async def process_video_job(job_id: str, job_data: dict):
                 "updated_at": utc_now()
             })
 
-        # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "transcribing",
-                "progress": "30",
-                "message": "Transcribing audio",
-            },
-        )
-
-        # Also update original job if it exists
-        if original_job_id:
-            job_queue.update_job(
-                original_job_id,
-                {
-                    "status": "transcribing",
-                    "progress": "30",
-                    "message": "Transcribing audio",
-                },
-            )
+        # Update job status - start at 25% (auto-increments sequentially)
+        progress_tracker.update_progress(job_id, PipelineStage.TRANSCRIBING, original_job_id=original_job_id)
+        job_queue.update_job(job_id, {"message": "Scanning audio for content"})
 
         # Check if file exists
         if not os.path.exists(file_path):
@@ -602,6 +558,7 @@ async def process_video_job(job_id: str, job_data: dict):
         # ⏱️ STEP 1: TRANSCRIPTION
         step_start = time.time()
         logger.info("📝 STEP 1: Starting transcription (AssemblyAI + Speaker Diarization)...")
+        
         
         # AssemblyAI handles transcription in the cloud - no local model needed
         try:
@@ -624,6 +581,8 @@ async def process_video_job(job_id: str, job_data: dict):
         except Exception as e:
             logger.error(f"Transcription error: {str(e)}", exc_info=True)
             raise
+        finally:
+            pass
         
         if not transcript:
             raise ValueError("Transcription returned None")
@@ -654,25 +613,15 @@ async def process_video_job(job_id: str, job_data: dict):
                 "updated_at": utc_now()
             })
 
-        # Update job status
-        job_queue.update_job(
-            job_id, {"status": "analyzing", "progress": "50", "message": "Analyzing content"},
-        )
-
-        if original_job_id:
-            job_queue.update_job(
-                original_job_id,
-                {
-                    "status": "analyzing",
-                    "progress": "50",
-                    "message": "Analyzing content",
-                },
-            )
+        # Update job status - jump to 50% (auto-increments sequentially)
+        progress_tracker.update_progress(job_id, PipelineStage.ANALYZING, original_job_id=original_job_id)
+        job_queue.update_job(job_id, {"message": "Analyzing content"})
 
         # ⏱️ STEP 2: AI CONTENT ANALYSIS
         step_start = time.time()
         logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
         logger.info(f"   Target clip duration: {target_clip_duration}s")
+        
         
         segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
         
@@ -708,25 +657,9 @@ async def process_video_job(job_id: str, job_data: dict):
                 "updated_at": utc_now()
             })
 
-        # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "processing",
-                "progress": "70",
-                "message": "Processing video clips",
-            },
-        )
-
-        if original_job_id:
-            job_queue.update_job(
-                original_job_id,
-                {
-                    "status": "processing",
-                    "progress": "70",
-                    "message": "Processing video clips",
-                },
-            )
+        # Update job status - jump to 70% (auto-increments sequentially)
+        progress_tracker.update_progress(job_id, PipelineStage.PROCESSING, original_job_id=original_job_id)
+        job_queue.update_job(job_id, {"message": "Processing video clips"})
 
         # Create output directory
         clips_dir = output_dir / video_id
@@ -735,6 +668,7 @@ async def process_video_job(job_id: str, job_data: dict):
         # ⏱️ STEP 3: VIDEO PROCESSING
         step_start = time.time()
         logger.info("🎬 STEP 3: Starting video clip creation (FFmpeg processing)...")
+        
         
         # Set cancellation context for nested processing functions
         from services.video_processing import set_cancellation_context, clear_cancellation_context
@@ -779,7 +713,7 @@ async def process_video_job(job_id: str, job_data: dict):
             job_queue.update_job(
                 job_id,
                 {
-                    "progress": "75",
+                    "progress": 75,
                     "message": f"Uploading {len(clips)} clips to S3 in parallel...",
                 },
             )
@@ -788,7 +722,7 @@ async def process_video_job(job_id: str, job_data: dict):
                 job_queue.update_job(
                     original_job_id,
                     {
-                        "progress": "75",
+                        "progress": 75,
                         "message": f"Uploading {len(clips)} clips to S3 in parallel...",
                     },
                 )
@@ -933,23 +867,15 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info("="*70)
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "completed",
-                "progress": "100",
-                "message": "Processing completed",
+        progress_tracker.update_progress(job_id, PipelineStage.COMPLETED)
+        job_queue.update_job(job_id, {"message": "Processing completed",
                 "clips": json.dumps(clips),
             },
         )
 
         if original_job_id:
-            job_queue.update_job(
-                original_job_id,
-                {
-                    "status": "completed",
-                    "progress": "100",
-                    "message": "Processing completed",
+            progress_tracker.update_progress(original_job_id, PipelineStage.COMPLETED)
+            job_queue.update_job(original_job_id, {"message": "Processing completed",
                     "clips": json.dumps(clips),
                 },
             )
@@ -1010,14 +936,12 @@ async def process_video_job(job_id: str, job_data: dict):
 
     except ProcessingCancelledException as e:
         logger.warning(f"Processing cancelled for job {job_id}: {str(e)}")
-        job_queue.update_job(
-            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        progress_tracker.update_progress(job_id, PipelineStage.CANCELLED)
+        job_queue.update_job(job_id, {"message": str(e)}
         )
         if original_job_id:
-            job_queue.update_job(
-                original_job_id,
-                {"status": "cancelled", "progress": "0", "message": str(e)},
-            )
+            progress_tracker.update_progress(original_job_id, PipelineStage.CANCELLED)
+            job_queue.update_job(original_job_id, {"message": str(e)})
         # Status already set to failed in DB by cancel endpoint
         logger.info(f"✅ Gracefully stopped processing for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
         # Clean up any partial files
@@ -1045,14 +969,11 @@ async def process_video_job(job_id: str, job_data: dict):
         from services.video_processing import ProcessingCancelledException as VPCancelledException
         if isinstance(e, VPCancelledException):
             logger.warning(f"Processing cancelled (from video_processing) for job {job_id}: {str(e)}")
-            job_queue.update_job(
-                job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
-            )
+            progress_tracker.update_progress(job_id, PipelineStage.CANCELLED)
+            job_queue.update_job(job_id, {"message": str(e)})
             if original_job_id:
-                job_queue.update_job(
-                    original_job_id,
-                    {"status": "cancelled", "progress": "0", "message": str(e)},
-                )
+                progress_tracker.update_progress(original_job_id, PipelineStage.CANCELLED)
+                job_queue.update_job(original_job_id, {"message": str(e)})
             logger.info(f"✅ Gracefully stopped processing for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
             # Clean up any partial files
             if 'video_id' in locals():
@@ -1068,15 +989,13 @@ async def process_video_job(job_id: str, job_data: dict):
             return
         
         logger.error(f"Error in video processing job {job_id}: {str(e)}", exc_info=True)
-        job_queue.update_job(
-            job_id, {"status": "error", "progress": "0", "message": f"Error: {str(e)}"}
+        progress_tracker.update_progress(job_id, PipelineStage.ERROR)
+        job_queue.update_job(job_id, {"message": f"Error: {str(e)}"}
         )
 
         if original_job_id:
-            job_queue.update_job(
-                original_job_id,
-                {"status": "error", "progress": "0", "message": f"Error: {str(e)}"},
-            )
+            progress_tracker.update_progress(original_job_id, PipelineStage.ERROR)
+            job_queue.update_job(original_job_id, {"message": f"Error: {str(e)}"})
         # Update video status to failed in DB
         if 'video_id' in locals():
             # Fetch user_id if not already available
@@ -1129,11 +1048,9 @@ async def process_manual_clip_job(job_id: str, job_data: dict):
 
         logger.info(f"Processing manual clip job {job_id} for video {video_id}")
 
-        # Update job status
-        job_queue.update_job(
-            job_id,
-            {"status": "processing", "progress": "20", "message": "Processing clip"},
-        )
+        # Update job status using progress tracker
+        progress_tracker.update_progress_explicit(job_id, "processing", 20)
+        job_queue.update_job(job_id, {"message": "Processing clip"})
 
         # Create output directory
         clips_dir = output_dir / video_id
@@ -1192,12 +1109,8 @@ async def process_manual_clip_job(job_id: str, job_data: dict):
             clip["thumbnail_url"] = "/static/default_thumbnail.jpg"
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "completed",
-                "progress": "100",
-                "message": "Clip generated successfully",
+        progress_tracker.update_progress(job_id, PipelineStage.COMPLETED)
+        job_queue.update_job(job_id, {"message": "Clip generated successfully",
                 "clip": json.dumps(clip),
             },
         )
@@ -1206,8 +1119,8 @@ async def process_manual_clip_job(job_id: str, job_data: dict):
 
     except Exception as e:
         logger.error(f"Error in manual clip job {job_id}: {str(e)}", exc_info=True)
-        job_queue.update_job(
-            job_id, {"status": "error", "progress": "0", "message": f"Error: {str(e)}"}
+        progress_tracker.update_progress(job_id, PipelineStage.ERROR)
+        job_queue.update_job(job_id, {"message": f"Error: {str(e)}"}
         )
 
 
@@ -1221,14 +1134,8 @@ async def process_s3_download_job(job_id: str, job_data: dict):
         logger.info(f"Processing S3 download job {job_id} for video {video_id}")
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloading",
-                "progress": "5",
-                "message": "Downloading file from S3...",
-            },
-        )
+        progress_tracker.update_progress_explicit(job_id, "downloading", 5)
+        job_queue.update_job(job_id, {"message": "Downloading file from S3..."})
 
         # Download from S3
         success = s3_client.download_from_s3(s3_key, local_path)
@@ -1237,26 +1144,16 @@ async def process_s3_download_job(job_id: str, job_data: dict):
             raise Exception("Failed to download file from S3")
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloaded",
-                "progress": "10",
-                "message": "File downloaded from S3, starting processing",
-            },
-        )
+        progress_tracker.update_progress_explicit(job_id, "downloaded", 10)
+        job_queue.update_job(job_id, {"message": "File downloaded from S3, starting processing"})
 
         # Now process the video like a regular processing job
         await process_video_job(job_id, {"video_id": video_id, "file_path": local_path})
 
     except Exception as e:
         logger.error(f"Error in S3 download job {job_id}: {str(e)}", exc_info=True)
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "error",
-                "progress": "0",
-                "message": f"Error downloading from S3: {str(e)}",
+        progress_tracker.update_progress(job_id, PipelineStage.ERROR)
+        job_queue.update_job(job_id, {"message": f"Error downloading from S3: {str(e)}",
             },
         )
 
@@ -1425,14 +1322,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
             })
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloading",
-                "progress": "5",
-                "message": "Downloading file from S3...",
-            },
-        )
+        progress_tracker.update_progress_explicit(job_id, "downloading", 5)
+        job_queue.update_job(job_id, {"message": "Downloading file from S3..."})
 
         # Create a background task to periodically check for cancellation (matching YouTube flow)
         async def cancellation_monitor():
@@ -1481,14 +1372,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
                 })
 
             # Update job status
-            job_queue.update_job(
-                job_id,
-                {
-                    "status": "processing",
-                    "progress": "10",
-                    "message": "File downloaded, starting processing...",
-                },
-            )
+            progress_tracker.update_progress_explicit(job_id, "processing", 10)
+            job_queue.update_job(job_id, {"message": "File downloaded, starting processing..."})
 
             # Process the video using the same pipeline as process_video_job
             await process_video_job(job_id, {
@@ -1515,8 +1400,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
 
     except ProcessingCancelledException as e:
         logger.warning(f"Uploaded video processing cancelled for job {job_id}: {str(e)}")
-        job_queue.update_job(
-            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        progress_tracker.update_progress(job_id, PipelineStage.CANCELLED)
+        job_queue.update_job(job_id, {"message": str(e)}
         )
         # Release lock on cancellation
         job_queue.release_job_lock(job_id)
@@ -1535,12 +1420,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
                 "updated_at": utc_now()
             })
         
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "error",
-                "progress": "0",
-                "message": f"Error processing uploaded video: {str(e)}",
+        progress_tracker.update_progress(job_id, PipelineStage.ERROR)
+        job_queue.update_job(job_id, {"message": f"Error processing uploaded video: {str(e)}",
             },
         )
         # Release lock on error
@@ -1580,49 +1461,27 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
             })
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloading",
-                "progress": "10",
-                "message": "Downloading video from YouTube...",
-            },
-        )
+        progress_tracker.update_progress(job_id, PipelineStage.DOWNLOADING)
+        job_queue.update_job(job_id, {"message": "Downloading video from YouTube..."})
 
         # Create video directory
         video_dir = upload_dir / video_id
         video_dir.mkdir(exist_ok=True)
 
-        # Download the video (ZylaLabs first, RapidAPI fallback)
+        # Download the video (RapidAPI)
         file_path, title, video_info = None, None, None
 
-        # Tier 0: ZylaLabs (PRIMARY)
+        # PRIMARY: RapidAPI download
         try:
-            logger.info(f"Job {job_id}: [ZylaLabs] Attempting download (PRIMARY)...")
-            file_path, title, video_info = await download_youtube_video_zyla(url, video_dir)
+            logger.info(f"Job {job_id}: [RapidAPI] Attempting download (PRIMARY)...")
+            file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
             if file_path and title:
-                logger.info(f"Job {job_id}: ✅ ZylaLabs download successful")
-        except Exception as zyla_error:
-            logger.warning(f"Job {job_id}: ZylaLabs download failed: {str(zyla_error)}")
-
-        # Tier 1: RapidAPI fallback (if ZylaLabs fails)
-        if not file_path or not title:
-            logger.info(f"Job {job_id}: ZylaLabs failed, trying RapidAPI fallback...")
-            try:
-                logger.info(f"Job {job_id}: [RapidAPI] Attempting download...")
-                file_path, title, video_info = await download_youtube_video_rapidapi(url, video_dir)
-                if file_path and title:
-                    logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
-            except Exception as rapidapi_error:
-                logger.warning(f"Job {job_id}: RapidAPI download failed: {str(rapidapi_error)}")
-
-        # NOTE: Other fallback methods (Sieve, yt-dlp, pytubefix) commented out
-        # # Tier 2: Try Sieve API
-        # if not file_path or not title:
-        #     ...
+                logger.info(f"Job {job_id}: ✅ RapidAPI download successful")
+        except Exception as rapidapi_error:
+            logger.warning(f"Job {job_id}: RapidAPI download failed: {str(rapidapi_error)}")
 
         if not file_path or not title:
-            raise Exception("Failed to download YouTube video after trying ZylaLabs and RapidAPI.")
+            raise Exception("Failed to download YouTube video using RapidAPI.")
 
         logger.info(f"Job {job_id}: Download completed successfully: {file_path}")
 
@@ -1649,12 +1508,8 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
             })
 
         # Update job status
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "downloaded",
-                "progress": "100",
-                "message": "YouTube video downloaded successfully",
+        progress_tracker.update_progress(job_id, PipelineStage.DOWNLOADED)
+        job_queue.update_job(job_id, {"message": "YouTube video downloaded successfully",
             },
         )
 
@@ -1688,8 +1543,8 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
 
     except ProcessingCancelledException as e:
         logger.warning(f"YouTube download cancelled for job {job_id}: {str(e)}")
-        job_queue.update_job(
-            job_id, {"status": "cancelled", "progress": "0", "message": str(e)}
+        progress_tracker.update_progress(job_id, PipelineStage.CANCELLED)
+        job_queue.update_job(job_id, {"message": str(e)}
         )
         # Status already set to failed in DB by cancel endpoint
         logger.info(f"✅ Gracefully stopped YouTube download for cancelled video {video_id if 'video_id' in locals() else 'unknown'}")
@@ -1719,12 +1574,8 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                 "updated_at": utc_now()
             })
 
-        job_queue.update_job(
-            job_id,
-            {
-                "status": "error",
-                "progress": "0",
-                "message": f"Error: {str(e)}",
+        progress_tracker.update_progress(job_id, PipelineStage.ERROR)
+        job_queue.update_job(job_id, {"message": f"Error: {str(e)}",
             },
         )
 
