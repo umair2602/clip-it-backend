@@ -623,19 +623,11 @@ async def process_video_job(job_id: str, job_data: dict):
         logger.info(f"   Target clip duration: {target_clip_duration}s")
         
         
-        try:
-            segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
-            
-            # Check if cancelled immediately after analysis
-            if user_id:
-                await check_if_cancelled(user_id, video_id)
-        finally:
-            # Stop the progress simulation
-            progress_task.cancel()
-            try:
-                await progress_task
-            except asyncio.CancelledError:
-                pass
+        segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
+        
+        # Check if cancelled immediately after analysis
+        if user_id:
+            await check_if_cancelled(user_id, video_id)
         
         if not segments:
             logger.warning(
