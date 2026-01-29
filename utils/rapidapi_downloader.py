@@ -106,12 +106,12 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
         # RapidAPI endpoint
         api_url = "https://youtube-info-download-api.p.rapidapi.com/ajax/download.php"
         
-        # Try multiple format options in order of preference (highest quality first)
+        # Try multiple format options (720p and 360p are fastest for clips)
         format_options = [
-            {'format': '1080', 'add_info': '1'},  # Try 1080p quality (HIGHEST)
-            {'format': '720', 'add_info': '1'},   # Try 720p quality
-            {'format': '480', 'add_info': '1'},   # Try 480p quality
+            {'format': '720', 'add_info': '1'},   # Try 720p quality (Fastest priority)
             {'format': '360', 'add_info': '1'},   # Try 360p quality
+            {'format': '1080', 'add_info': '1'},  # Try 1080p if others fail
+            {'format': '480', 'add_info': '1'},   # Fallback
         ]
         
         headers = {
@@ -123,9 +123,9 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
         
         # Try each format until one works
         for format_idx, format_config in enumerate(format_options):
-            # Add delay between format attempts to avoid rate limiting
+            # Reduced delay between format attempts
             if format_idx > 0:
-                delay = 2 * format_idx  # 2s, 4s, 6s delays
+                delay = format_idx  # 1s, 2s, 3s delays (halved)
                 logger.info(f"⏳ Waiting {delay}s before trying next format...")
                 await asyncio.sleep(delay)
             
@@ -133,13 +133,13 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
             for retry in range(2):
                 try:
                     if retry > 0:
-                        wait_time = 3 * retry  # 3s backoff for retry
+                        wait_time = 1 * retry  # 1s backoff (reduced from 3s)
                         logger.info(f"🔄 Retry {retry + 1}/2 for format {format_config.get('format')} after {wait_time}s...")
                         await asyncio.sleep(wait_time)
                     
                     params = {
                         'url': url,
-                        'no_merge': 'false',
+                        'no_merge': 'true', # Using no_merge:true for faster direct streams
                         'allow_extended_duration': 'true',
                         **format_config
                     }
@@ -250,7 +250,7 @@ async def _poll_progress_url(progress_url: str, api_key: str, max_attempts: int 
         
         async with aiohttp.ClientSession() as session:
             for attempt in range(max_attempts):
-                await asyncio.sleep(2)  # Wait 2 seconds between polls
+                await asyncio.sleep(1)  # Wait 1 second between polls (reduced from 2)
                 
                 async with session.get(progress_url, headers=headers, timeout=10) as response:
                     if response.status == 200:
