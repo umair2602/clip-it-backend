@@ -78,13 +78,13 @@ class ProgressTracker:
     
     # Expected durations for each stage in seconds (for auto-increment)
     STAGE_DURATIONS: Dict[PipelineStage, int] = {
-        PipelineStage.DOWNLOADING: 30,  # Faster progress (0% to 35% in 30s)
-        PipelineStage.TRANSCRIBING: 120, # Reduced transcription duration
-        PipelineStage.ANALYZING: 45,
-        PipelineStage.PROCESSING: 100,
-        PipelineStage.UPLOADING_CLIPS: 30,
-        PipelineStage.POSTING_TIKTOK: 20,
-        PipelineStage.POSTING_INSTAGRAM: 20,
+        PipelineStage.DOWNLOADING: 30,
+        PipelineStage.TRANSCRIBING: 20,
+        PipelineStage.ANALYZING: 30,
+        PipelineStage.PROCESSING: 60,
+        PipelineStage.UPLOADING_CLIPS: 20,
+        PipelineStage.POSTING_TIKTOK: 14,
+        PipelineStage.POSTING_INSTAGRAM: 14,
     }
     
     def __init__(self, job_manager):
