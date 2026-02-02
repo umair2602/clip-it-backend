@@ -273,5 +273,154 @@ If you did not make this change, please contact our support team immediately at 
             return False
 
 
+    @staticmethod
+    async def send_welcome_email(
+        to_email: str,
+        username: str,
+        first_name: str
+    ) -> bool:
+        """
+        Send welcome email to newly registered user.
+        
+        Args:
+            to_email: User's email address
+            username: User's username
+            first_name: User's first name for personalization
+            
+        Returns:
+            True if email was sent successfully, False otherwise
+        """
+        if not EmailService.is_configured():
+            logger.error("Email service not configured - cannot send welcome email")
+            return False
+        
+        login_link = f"{FRONTEND_URL}/sign-in"
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Welcome to Klipz!</title>
+        </head>
+        <body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f5;">
+            <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                <tr>
+                    <td align="center" style="padding: 40px 0;">
+                        <table role="presentation" style="width: 600px; max-width: 100%; border-collapse: collapse; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                            <!-- Header -->
+                            <tr>
+                                <td style="padding: 40px 40px 20px 40px; text-align: center; background: linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%); border-radius: 12px 12px 0 0;">
+                                    <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700;">Klipz</h1>
+                                </td>
+                            </tr>
+                            
+                            <!-- Content -->
+                            <tr>
+                                <td style="padding: 40px;">
+                                    <div style="text-align: center; margin-bottom: 20px;">
+                                        <span style="display: inline-block; width: 60px; height: 60px; background-color: #EDE9FE; border-radius: 50%; line-height: 60px; font-size: 30px;">🎉</span>
+                                    </div>
+                                    <h2 style="margin: 0 0 20px 0; color: #18181b; font-size: 24px; font-weight: 600; text-align: center;">Welcome to Klipz!</h2>
+                                    <p style="margin: 0 0 20px 0; color: #52525b; font-size: 16px; line-height: 1.6;">
+                                        Hi {first_name},
+                                    </p>
+                                    <p style="margin: 0 0 20px 0; color: #52525b; font-size: 16px; line-height: 1.6;">
+                                        Thank you for creating your Klipz account! We're excited to have you on board.
+                                    </p>
+                                    <p style="margin: 0 0 20px 0; color: #52525b; font-size: 16px; line-height: 1.6;">
+                                        With Klipz, you can easily create stunning video clips powered by AI. Here's what you can do:
+                                    </p>
+                                    <ul style="margin: 0 0 20px 0; padding-left: 20px; color: #52525b; font-size: 16px; line-height: 1.8;">
+                                        <li>Upload your videos and let AI find the best moments</li>
+                                        <li>Automatically generate engaging clips for social media</li>
+                                        <li>Share directly to TikTok, YouTube, and more</li>
+                                    </ul>
+                                    
+                                    <!-- CTA Button -->
+                                    <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                                        <tr>
+                                            <td align="center" style="padding: 20px 0;">
+                                                <a href="{login_link}" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%); color: #ffffff; text-decoration: none; font-size: 16px; font-weight: 600; border-radius: 8px; box-shadow: 0 4px 14px rgba(139, 92, 246, 0.4);">
+                                                    Get Started
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                    
+                                    <div style="margin-top: 30px; padding: 20px; background-color: #f4f4f5; border-radius: 8px;">
+                                        <p style="margin: 0 0 10px 0; color: #52525b; font-size: 14px; font-weight: 600;">
+                                            Your Account Details:
+                                        </p>
+                                        <p style="margin: 0; color: #71717a; font-size: 14px;">
+                                            Username: <strong>{username}</strong><br>
+                                            Email: <strong>{to_email}</strong>
+                                        </p>
+                                    </div>
+                                </td>
+                            </tr>
+                            
+                            <!-- Footer -->
+                            <tr>
+                                <td style="padding: 30px 40px; border-top: 1px solid #e4e4e7; text-align: center;">
+                                    <p style="margin: 0; color: #a1a1aa; font-size: 13px;">
+                                        © 2024 Klipz. All rights reserved.
+                                    </p>
+                                    <p style="margin: 10px 0 0 0; color: #a1a1aa; font-size: 13px;">
+                                        Questions? Contact us at support@klipz.ai
+                                    </p>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+        
+        text_content = f"""
+Welcome to Klipz!
+
+Hi {first_name},
+
+Thank you for creating your Klipz account! We're excited to have you on board.
+
+With Klipz, you can easily create stunning video clips powered by AI. Here's what you can do:
+
+- Upload your videos and let AI find the best moments
+- Automatically generate engaging clips for social media
+- Share directly to TikTok, YouTube, and more
+
+Get started here: {login_link}
+
+Your Account Details:
+Username: {username}
+Email: {to_email}
+
+---
+© 2024 Klipz. All rights reserved.
+Questions? Contact us at support@klipz.ai
+        """
+        
+        try:
+            params: resend.Emails.SendParams = {
+                "from": RESEND_FROM_EMAIL,
+                "to": [to_email],
+                "subject": "Welcome to Klipz! 🎉",
+                "html": html_content,
+                "text": text_content,
+            }
+            
+            email_response = resend.Emails.send(params)
+            logger.info(f"Welcome email sent successfully to {to_email}, id: {email_response.get('id')}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to send welcome email to {to_email}: {str(e)}")
+            return False
+
+
 # Create global email service instance
 email_service = EmailService()

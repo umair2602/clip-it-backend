@@ -14,6 +14,7 @@ from pymongo.errors import DuplicateKeyError
 from config import settings
 from database.connection import get_users_collection
 from models.user import TokenData, User, UserCreate, UserInDB
+from services.email_service import email_service
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,16 @@ class AuthService:
             # Insert user
             result = users_collection.insert_one(user_doc)
             user_doc["_id"] = str(result.inserted_id)  # Convert ObjectId to string
+
+            # Send welcome email (don't block registration if email fails)
+            try:
+                await email_service.send_welcome_email(
+                    to_email=user_create.email,
+                    username=user_create.username,
+                    first_name=user_create.first_name
+                )
+            except Exception as email_error:
+                logger.warning(f"Failed to send welcome email to {user_create.email}: {str(email_error)}")
 
             return UserInDB(**user_doc)
 
