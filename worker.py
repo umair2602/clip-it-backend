@@ -13,6 +13,8 @@ from typing import Optional
 from jobs import job_queue
 from progress_tracker import ProgressTracker, PipelineStage
 from services.content_analysis import analyze_content
+from services.email_service import email_service
+from services.auth import auth_service
 
 # Import services
 # Using AssemblyAI for better speaker diarization and sentence boundaries
@@ -896,6 +898,25 @@ async def process_video_job(job_id: str, job_data: dict):
                 "clip_thumbnail_url": video_thumbnail_url,
                 # Optionally add s3_url, etc. if you have them
             })
+            
+            # Send job completed email notification
+            try:
+                user = await auth_service.get_user_by_id(user_id)
+                if user and user.email:
+                    # Get video info for the title
+                    video_info = await get_user_video_by_video_id(video_id)
+                    video_title = video_info.get("title", "Your Video") if video_info else "Your Video"
+                    
+                    await email_service.send_job_completed_email(
+                        to_email=user.email,
+                        first_name=user.first_name or user.username,
+                        video_title=video_title,
+                        clips_count=len(clips),
+                        video_id=video_id
+                    )
+                    logger.info(f"📧 Job completion email sent to {user.email}")
+            except Exception as email_error:
+                logger.warning(f"Failed to send job completion email: {str(email_error)}")
 
         # Clean up all local files immediately after successful processing
         # (Don't wait 24 hours - original videos aren't needed after clips are generated)
