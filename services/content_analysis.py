@@ -145,12 +145,28 @@ async def identify_engaging_segments_from_text(
 
     # Enhanced prompt that leverages AssemblyAI's perfect sentence boundaries
     prompt = f"""
+🚨🚨🚨 ABSOLUTE MANDATORY REQUIREMENT 🚨🚨🚨
+
+EVERY SINGLE CLIP MUST BE BETWEEN {min_duration} AND {max_duration} SECONDS.
+NO EXCEPTIONS. NO CLIPS OUTSIDE THIS RANGE WILL BE ACCEPTED.
+
+IF A CLIP IS {min_duration - 1} SECONDS, IT WILL BE REJECTED.
+IF A CLIP IS {max_duration + 1} SECONDS, IT WILL BE REJECTED.
+
+You MUST calculate: end_time - start_time for EVERY clip.
+If the result is < {min_duration} OR > {max_duration}, DO NOT INCLUDE IT.
+
+BETTER TO RETURN FEWER CLIPS THAN TO VIOLATE THE DURATION RANGE.
+
+═══════════════════════════════════════════════════════════════
+
 You are an expert AI specialized in extracting viral-worthy video clips from speaker-diarized transcripts. You have been given a PERFECTLY FORMATTED transcript where each line represents a complete sentence with precise timestamps and speaker labels:
 
 FORMAT: [START_TIME - END_TIME] SPEAKER_X: complete sentence
 
 VIDEO DURATION: ~{total_minutes} minutes
 TARGET: Generate {target_min}-{target_max} exceptional clips (quality over quantity)
+DURATION REQUIREMENT: EVERY clip MUST be {min_duration}-{max_duration} seconds (ABSOLUTE RULE)
 
 ═══════════════════════════════════════════════════════════════
 🎯 CRITICAL BOUNDARY RULES (MUST FOLLOW):
@@ -233,16 +249,28 @@ STEP 4: APPLY BOUNDARIES
 ⚙️ TECHNICAL REQUIREMENTS:
 ═══════════════════════════════════════════════════════════════
 
-Duration: {min_duration}-{max_duration} seconds (STRICT - MANDATORY RANGE)
-Count: {target_min} minimum, {target_max} maximum
+🚨🚨🚨 DURATION: {min_duration}-{max_duration} seconds (ABSOLUTE MANDATORY RANGE) 🚨🚨🚨
+
+BEFORE INCLUDING ANY CLIP:
+1. Calculate: duration = end_time - start_time
+2. Check: Is {min_duration} <= duration <= {max_duration}?
+3. If NO: DO NOT INCLUDE THIS CLIP. Find a different segment or adjust boundaries.
+4. If YES: Proceed with including the clip.
+
+Count: {target_min} minimum, {target_max} maximum (but ONLY if they meet duration requirements)
 Distribution: Spread across beginning (25%), middle (50%), end (25%)
 Overlap: Clips should NOT overlap in time
-Quality: Every clip should be genuinely share-worthy
+Quality: Every clip should be genuinely share-worthy AND within duration range
 
-🚨 CRITICAL: Every clip MUST be between {min_duration} and {max_duration} seconds.
-   - Clips shorter than {min_duration}s will be REJECTED
-   - Clips longer than {max_duration}s will be REJECTED
-   - This is a HARD requirement, not a suggestion
+🚨 ABSOLUTE RULE: EVERY clip MUST satisfy: {min_duration} <= (end_time - start_time) <= {max_duration}
+   - Example: If min={min_duration}, max={max_duration}:
+     ✅ VALID: start=100.0, end=100.0+{min_duration}={min_duration + 100.0} (duration={min_duration}s)
+     ✅ VALID: start=100.0, end=100.0+{max_duration}={max_duration + 100.0} (duration={max_duration}s)
+     ❌ INVALID: start=100.0, end=100.0+{min_duration - 5}={min_duration + 95.0} (duration={min_duration - 5}s - TOO SHORT)
+     ❌ INVALID: start=100.0, end=100.0+{max_duration + 10}={max_duration + 110.0} (duration={max_duration + 10}s - TOO LONG)
+
+   IF YOU CANNOT FIND {target_min} CLIPS WITHIN THE DURATION RANGE, RETURN FEWER CLIPS.
+   RETURNING 2 VALID CLIPS IS BETTER THAN RETURNING 5 CLIPS WHERE 3 VIOLATE THE DURATION.
 
 ═══════════════════════════════════════════════════════════════
 📝 EXAMPLES (SHOWING CORRECT BOUNDARY SELECTION):
@@ -346,14 +374,29 @@ REMEMBER:
 
         # Validate and filter segments
         valid_segments = []
+        rejected_count = 0
         for seg in segments:
             duration = seg.get("end_time", 0) - seg.get("start_time", 0)
             
             # Log segment info for debugging
             logger.info(f"Segment: {seg.get('title')} | Duration: {duration:.1f}s | Start: {seg.get('start_time')}s | End: {seg.get('end_time')}s")
             
-            # Accept all AI-generated segments - the strict prompt enforces duration range
+            # STRICT validation: reject clips outside the duration range
+            if duration < min_clip_duration:
+                logger.warning(f"❌ REJECTED: '{seg.get('title')}' - TOO SHORT ({duration:.1f}s < {min_clip_duration}s)")
+                rejected_count += 1
+                continue
+            if duration > max_clip_duration:
+                logger.warning(f"❌ REJECTED: '{seg.get('title')}' - TOO LONG ({duration:.1f}s > {max_clip_duration}s)")
+                rejected_count += 1
+                continue
+            
+            # Only accept clips within the strict duration range
+            logger.info(f"✅ ACCEPTED: '{seg.get('title')}' - {duration:.1f}s (within {min_clip_duration}-{max_clip_duration}s range)")
             valid_segments.append(seg)
+        
+        if rejected_count > 0:
+            logger.warning(f"⚠️ Rejected {rejected_count} clips that violated duration constraints ({min_clip_duration}-{max_clip_duration}s)")
 
         # Enforce global cap to avoid over-generation
         if len(valid_segments) > settings.MAX_CLIPS_PER_EPISODE:
