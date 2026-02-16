@@ -279,6 +279,8 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
         url = job_data.get("url")
         video_id = job_data.get("video_id")
         auto_process = job_data.get("auto_process", True)
+        min_clip_duration = job_data.get("min_clip_duration", 30)
+        max_clip_duration = job_data.get("max_clip_duration", 60)
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
 
@@ -465,6 +467,8 @@ async def process_youtube_download_job(job_id: str, job_data: dict):
                     "file_path": file_path,
                     "original_job_id": job_id,
                     "user_id": user_id,  # Pass user_id to processing job
+                    "min_clip_duration": min_clip_duration,
+                    "max_clip_duration": max_clip_duration,
                 },
             )
         
@@ -517,7 +521,8 @@ async def process_video_job(job_id: str, job_data: dict):
         file_path = job_data.get("file_path")
         original_job_id = job_data.get("original_job_id")
         user_id = job_data.get("user_id")
-        target_clip_duration = job_data.get("target_clip_duration")  # From frontend
+        min_clip_duration = job_data.get("min_clip_duration", 30)
+        max_clip_duration = job_data.get("max_clip_duration", 60)
 
         # If user_id is not provided, fetch it from DB
         if not user_id:
@@ -529,7 +534,8 @@ async def process_video_job(job_id: str, job_data: dict):
                 user_id = None
 
         logger.info(f"Processing video job {job_id} for video {video_id}")
-        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
+        logger.info(f"   Min Clip Duration: {min_clip_duration}s")
+        logger.info(f"   Max Clip Duration: {max_clip_duration}s")
         
         # ⏱️ START PIPELINE TIMING
         import time
@@ -622,10 +628,10 @@ async def process_video_job(job_id: str, job_data: dict):
         # ⏱️ STEP 2: AI CONTENT ANALYSIS
         step_start = time.time()
         logger.info("🤖 STEP 2: Starting AI content analysis (OpenAI clip detection)...")
-        logger.info(f"   Target clip duration: {target_clip_duration}s")
+        logger.info(f"   Clip duration range: {min_clip_duration}-{max_clip_duration}s")
         
         
-        segments = await analyze_content(transcript, target_clip_duration=target_clip_duration)
+        segments = await analyze_content(transcript, min_clip_duration=min_clip_duration, max_clip_duration=max_clip_duration)
         
         # Check if cancelled immediately after analysis
         if user_id:
@@ -1151,6 +1157,8 @@ async def process_s3_download_job(job_id: str, job_data: dict):
         video_id = job_data.get("video_id")
         s3_key = job_data.get("s3_key")
         local_path = job_data.get("local_path")
+        min_clip_duration = job_data.get("min_clip_duration", 30)
+        max_clip_duration = job_data.get("max_clip_duration", 60)
 
         logger.info(f"Processing S3 download job {job_id} for video {video_id}")
 
@@ -1169,7 +1177,12 @@ async def process_s3_download_job(job_id: str, job_data: dict):
         job_queue.update_job(job_id, {"message": "File downloaded from S3, starting processing"})
 
         # Now process the video like a regular processing job
-        await process_video_job(job_id, {"video_id": video_id, "file_path": local_path})
+        await process_video_job(job_id, {
+            "video_id": video_id,
+            "file_path": local_path,
+            "min_clip_duration": min_clip_duration,
+            "max_clip_duration": max_clip_duration
+        })
 
     except Exception as e:
         logger.error(f"Error in S3 download job {job_id}: {str(e)}", exc_info=True)
@@ -1322,14 +1335,16 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
         video_id = job_data.get("video_id")
         s3_key = job_data.get("s3_key")
         user_id = job_data.get("user_id")
-        target_clip_duration = job_data.get("target_clip_duration", 60)
+        min_clip_duration = job_data.get("min_clip_duration", 30)
+        max_clip_duration = job_data.get("max_clip_duration", 60)
 
         logger.info(f"Processing uploaded video job {job_id} for video {video_id}")
         logger.info(f"   Job ID (task_id): {job_id}")
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   S3 Key: {s3_key}")
         logger.info(f"   User ID: {user_id}")
-        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
+        logger.info(f"   Min Clip Duration: {min_clip_duration}s")
+        logger.info(f"   Max Clip Duration: {max_clip_duration}s")
 
         # Check if cancelled before starting
         if user_id and video_id:
@@ -1401,7 +1416,8 @@ async def process_uploaded_video_job(job_id: str, job_data: dict):
                 "video_id": video_id,
                 "file_path": local_path,
                 "user_id": user_id,
-                "target_clip_duration": target_clip_duration
+                "min_clip_duration": min_clip_duration,
+                "max_clip_duration": max_clip_duration
             })
             
             # Release lock on successful completion
@@ -1466,13 +1482,36 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         url = job_data.get("url")
         auto_process = job_data.get("auto_process", True)
         user_id = job_data.get("user_id")
-        target_clip_duration = job_data.get("target_clip_duration")  # From frontend
+        min_clip_duration = job_data.get("min_clip_duration", 30)
+        max_clip_duration = job_data.get("max_clip_duration", 60)
+        
+        # Wait for video_id to be set (it starts as None, updated after video creation)
+        wait_count = 0
+        max_waits = 10  # Wait up to 10 seconds
+        while video_id is None and wait_count < max_waits:
+            logger.info(f"Job {job_id}: Waiting for video_id to be set (attempt {wait_count + 1}/{max_waits})...")
+            await asyncio.sleep(1)
+            # Refresh job data from Redis
+            job = job_queue.get_job(job_id)
+            if job:
+                job_data_str = job.get("data", "{}")
+                if isinstance(job_data_str, str):
+                    import json
+                    job_data = json.loads(job_data_str)
+                else:
+                    job_data = job_data_str
+                video_id = job_data.get("video_id")
+            wait_count += 1
+        
+        if video_id is None:
+            raise Exception("video_id was not set after 10 seconds - video creation may have failed")
 
         logger.info(f"Processing YouTube download job {job_id} for URL: {url}")
         logger.info(f"   Job ID (task_id): {job_id}")
         logger.info(f"   Video ID: {video_id}")
         logger.info(f"   User ID: {user_id}")
-        logger.info(f"   Target Clip Duration: {target_clip_duration}s")
+        logger.info(f"   Min Clip Duration: {min_clip_duration}s")
+        logger.info(f"   Max Clip Duration: {max_clip_duration}s")
 
         # Update MongoDB video status
         if user_id:
@@ -1556,7 +1595,8 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
                     "video_id": video_id,
                     "file_path": file_path,
                     "user_id": user_id,
-                    "target_clip_duration": target_clip_duration,
+                    "min_clip_duration": min_clip_duration,
+                    "max_clip_duration": max_clip_duration,
                 },
             )
             
