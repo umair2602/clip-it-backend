@@ -13,11 +13,11 @@ argon2-cffi>=23.1.0
 # AI/ML dependencies
 openai-whisper>=20231117
 torch>=2.0.0
+torchvision>=0.15.0
 numpy>=1.24.0
 opencv-python>=4.8.0
 opencv-contrib-python>=4.8.0
-protobuf<5.0.0  # Pin for MediaPipe compatibility
-mediapipe>=0.10.21  # Requires protobuf <5
+ultralytics>=8.0.0  # YOLOv8 for face detection (GPU-accelerated)
 scipy>=1.11.0
 matplotlib>=3.7.0
 
