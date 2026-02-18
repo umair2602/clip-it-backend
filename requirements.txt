@@ -5,7 +5,8 @@ openai>=1.0.0
 torch>=2.0.0
 torchvision>=0.15.0
 opencv-python>=4.8.0
-mediapipe>=0.10.0
+protobuf<5.0.0  # Pin for MediaPipe compatibility
+mediapipe>=0.10.7,<0.10.22  # Pin to legacy solutions API (0.10.22+ changed API)
 ultralytics>=8.0.0
 numpy>=1.24.0
 pydantic>=2.0.0
@@ -72,9 +73,10 @@ respx>=0.20.0
 assemblyai>=0.17.0
 
 # Google API client
-google-auth
-google-auth-oauthlib
-google-api-python-client
+google-auth>=2.20.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.90.0
+requests-oauthlib>=1.3.1
 
 # TalkNet ASD (Active Speaker Detection)
 gdown>=4.7.0

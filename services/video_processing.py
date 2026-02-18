@@ -462,14 +462,14 @@ async def generate_optimized_crop_positions(
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     
-    # Calculate crop dimensions for 9:16 aspect ratio (vertical video)
+    # Calculate crop dimensions - use as much width as possible for less zoom
+    # Use 80% of height as width for a good balance (less zoom than strict 9:16)
     crop_h = input_h
-    crop_w = int(crop_h * 0.5625)  # 9:16 aspect ratio to fill vertical space
+    crop_w = int(crop_h * 0.8)  # Wider crop = less zoom on subject
     if crop_w > input_w:
         crop_w = input_w
-        crop_h = int(crop_w / 0.5625)  # Adjust height if width is constrained
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (9:16 aspect ratio)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (will scale to 9:16)")
     logger.info(f"      📊 Using {len(speaker_map)} pre-mapped speakers")
     
     # Generate positions directly from transcript (NO heavy computation!)
@@ -600,18 +600,15 @@ async def detect_talknet_crop_positions(
     TalkNet uses audio-visual cross-attention for accurate speaker detection.
     
     Strategy:
-    1. Detect all faces in each frame using basic face detection
+    1. Detect all faces in each frame using YOLO8 face detection
     2. Use TalkNet to determine which face is actively speaking
     3. Track the active speaker's position across frames
     4. Generate smooth crop positions that follow the speaker
-    5. Fallback to visual cues (lip movement) only if TalkNet fails
+    5. Fallback to visual cues only if TalkNet fails
     """
     import cv2
-    import mediapipe as mp
     import numpy as np
-    
-    mp_pose = mp.solutions.pose
-    mp_face = mp.solutions.face_detection
+    from services.yolo_face_detection import detect_faces as detect_faces_yolo
     
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -621,16 +618,16 @@ async def detect_talknet_crop_positions(
     
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
-    # Calculate crop dimensions for 9:16 aspect ratio (vertical video)
+    # Calculate crop dimensions - use as much width as possible for less zoom
+    # Use 80% of height as width for a good balance (less zoom than strict 9:16)
     crop_h = input_h
-    crop_w = int(crop_h * 0.5625)  # 9:16 aspect ratio to fill vertical space
+    crop_w = int(crop_h * 0.8)  # Wider crop = less zoom on subject
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
-        crop_h = int(crop_w / 0.5625)  # Adjust height if width is constrained
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (9:16 aspect ratio)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (will scale to 9:16)")
     
     # STEP 1: Build speaker timeline from transcript
     logger.info(f"      🔍 Checking transcript data...")
@@ -646,132 +643,83 @@ async def detect_talknet_crop_positions(
         logger.warning(f"      ⚠️ No speaker timeline data found - will use visual tracking only")
         logger.warning(f"         This means crop won't follow active speaker intelligently")
     
-    # STEP 2: Detect all faces and track basic lip movement
-    # NOTE: MediaPipe Face Mesh is used ONLY for face detection and basic lip movement tracking
+    # STEP 2: Detect all faces using YOLO8
+    # NOTE: YOLO8 is used for face/person detection
     # TalkNet ASD (below) handles the actual speaker detection using audio-visual cross-attention
-    person_detections = []  # List of all detected people with lip movement data
+    person_detections = []  # List of all detected people
     # FRAME SKIPPING: Reduce sampling rate to stabilize speaker selection
     # Lower FPS = less sensitivity to momentary speaker changes = smoother tracking
     sample_interval = max(1, int(fps / FRAME_SKIP_INTERVAL))  # Process every Nth frame based on FPS
     
-    mp_face_mesh = mp.solutions.face_mesh
+    frame_idx = 0
+    cancellation_check_counter = 0  # Counter for periodic cancellation checks
     
-    # Lip landmark indices for basic visual tracking (fallback only)
-    # Upper lip: 61, 291, 0  |  Lower lip: 17, 314, 0
-    # We'll track vertical distance between upper and lower lips
-    UPPER_LIP_INDICES = [13, 14]  # Top lip landmarks
-    LOWER_LIP_INDICES = [78, 308]  # Bottom lip landmarks
-    
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=False,
-        max_num_faces=5,  # Track up to 5 people
-        refine_landmarks=False,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    ) as face_mesh:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
         
-        frame_idx = 0
-        prev_lip_distances = {}  # Track lip distance per person for movement detection
-        cancellation_check_counter = 0  # Counter for periodic cancellation checks
+        # Periodic cancellation check (every 30 sampled frames, roughly every 3 seconds)
+        cancellation_check_counter += 1
+        if cancellation_check_counter >= 30:
+            cancellation_check_counter = 0
+            await check_cancellation()
         
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Periodic cancellation check (every 30 sampled frames, roughly every 3 seconds)
-            cancellation_check_counter += 1
-            if cancellation_check_counter >= 30:
-                cancellation_check_counter = 0
-                await check_cancellation()
-            
-            # Sample frames for efficiency
-            if frame_idx % sample_interval != 0:
-                frame_idx += 1
-                continue
-            
-            # Current timestamp in the clip
-            frame_time = (frame_idx / fps)
-            
-            # Convert BGR to RGB for MediaPipe
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Detect faces and lips
-            results = face_mesh.process(rgb_frame)
-            
-            if results.multi_face_landmarks:
-                # Process each detected face
-                for face_idx, face_landmarks in enumerate(results.multi_face_landmarks):
-                    # Get face bounding box for position
-                    x_coords = [landmark.x for landmark in face_landmarks.landmark]
-                    y_coords = [landmark.y for landmark in face_landmarks.landmark]
-                    
-                    face_center_x = int(np.mean(x_coords) * input_w)
-                    face_center_y = int(np.mean(y_coords) * input_h)
-                    
-                    face_width = (max(x_coords) - min(x_coords)) * input_w
-                    face_height = (max(y_coords) - min(y_coords)) * input_h
-                    face_size = (face_width * face_height) / (input_w * input_h)  # Normalized size
-                    
-                    # Calculate lip distance (vertical opening)
-                    upper_lip_y = np.mean([face_landmarks.landmark[i].y for i in UPPER_LIP_INDICES])
-                    lower_lip_y = np.mean([face_landmarks.landmark[i].y for i in LOWER_LIP_INDICES])
-                    lip_distance = abs(lower_lip_y - upper_lip_y) * input_h
-                    
-                    # Calculate lip movement (change from previous frame)
-                    person_key = f"person_{face_center_x // 100}"  # Group by rough X position
-                    lip_movement = 0
-                    
-                    if person_key in prev_lip_distances:
-                        lip_movement = abs(lip_distance - prev_lip_distances[person_key])
-                    
-                    prev_lip_distances[person_key] = lip_distance
-                    
-                    # IMPROVED: Adaptive lip movement threshold based on face size and resolution
-                    # Larger faces (closer to camera) have larger absolute lip movements
-                    # Normalize threshold: base_threshold * sqrt(face_size) * resolution_factor
-                    base_threshold = 1.5  # Base threshold in pixels
-                    resolution_factor = input_h / 1080.0  # Normalize for different resolutions
-                    size_factor = max(0.5, min(2.0, np.sqrt(face_size) * 10))  # Scale by face size
-                    adaptive_threshold = base_threshold * size_factor * resolution_factor
-                    
-                    is_speaking = lip_movement > adaptive_threshold
-                    
-                    # IMPROVED: Calculate confidence score based on face size, position, and lip movement
-                    # Confidence components:
-                    # 1. Face size (larger = more confident, 0-1 scale)
-                    size_confidence = min(1.0, face_size * 20)  # Normalize face size to 0-1
-                    # 2. Lip movement strength (how much above threshold, 0-1 scale)
-                    movement_strength = min(1.0, lip_movement / (adaptive_threshold * 3)) if is_speaking else 0.0
-                    # 3. Face position (center faces are more likely to be main speaker, 0-1 scale)
-                    center_distance = abs(face_center_x - input_w / 2) / (input_w / 2)
-                    position_confidence = 1.0 - (center_distance * 0.5)  # Center gets 1.0, edges get 0.5
-                    
-                    # Combined confidence (weighted average)
-                    detection_confidence = (
-                        size_confidence * 0.3 +  # 30% weight on size
-                        movement_strength * 0.5 +  # 50% weight on lip movement
-                        position_confidence * 0.2  # 20% weight on position
-                    )
-                    
-                    person_detections.append({
-                        'frame': frame_idx,
-                        'time': frame_time,
-                        'x': face_center_x,
-                        'y': face_center_y,
-                        'size': face_size,
-                        'lip_distance': lip_distance,
-                        'lip_movement': lip_movement,
-                        'is_speaking': is_speaking,
-                        'confidence': detection_confidence,
-                        'adaptive_threshold': adaptive_threshold,  # Store for debugging
-                        'face_landmarks': face_landmarks,  # Store for potential future use
-                        'type': 'face_mesh'
-                    })
-            
+        # Sample frames for efficiency
+        if frame_idx % sample_interval != 0:
             frame_idx += 1
+            continue
         
-        cap.release()
+        # Current timestamp in the clip
+        frame_time = (frame_idx / fps)
+        
+        # Detect faces using YOLO8
+        detections = detect_faces_yolo(frame)
+        
+        if detections:
+            # Process each detected face
+            for detection in detections:
+                face_center_x = detection['center_x']
+                face_center_y = detection['center_y']
+                face_width = detection['face_width']
+                face_height = detection['face_height']
+                confidence = detection['confidence']
+                
+                # Calculate normalized face size
+                face_size = (face_width * face_height) / (input_w * input_h)
+                
+                # Calculate confidence score based on face size, position, and YOLO confidence
+                # Confidence components:
+                # 1. Face size (larger = more confident, 0-1 scale)
+                size_confidence = min(1.0, face_size * 20)  # Normalize face size to 0-1
+                # 2. YOLO detection confidence (already 0-1)
+                yolo_confidence = confidence
+                # 3. Face position (center faces are more likely to be main speaker, 0-1 scale)
+                center_distance = abs(face_center_x - input_w / 2) / (input_w / 2)
+                position_confidence = 1.0 - (center_distance * 0.5)  # Center gets 1.0, edges get 0.5
+                
+                # Combined confidence (weighted average)
+                detection_confidence = (
+                    size_confidence * 0.3 +  # 30% weight on size
+                    yolo_confidence * 0.5 +  # 50% weight on YOLO confidence
+                    position_confidence * 0.2  # 20% weight on position
+                )
+                
+                person_detections.append({
+                    'frame': frame_idx,
+                    'time': frame_time,
+                    'x': face_center_x,
+                    'y': face_center_y,
+                    'size': face_size,
+                    'confidence': detection_confidence,
+                    'yolo_confidence': confidence,
+                    'bbox': detection['bbox'],
+                    'type': 'yolo8'
+                })
+        
+        frame_idx += 1
+    
+    cap.release()
     
     logger.info(f"      ✅ Detected {len(person_detections)} person instances across frames")
     
@@ -1162,17 +1110,17 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
     
-    # Calculate crop dimensions for 9:16 aspect ratio (vertical video)
+    # Calculate crop dimensions - use as much width as possible for less zoom
+    # Use 80% of height as width for a good balance (less zoom than strict 9:16)
     crop_h = input_h
-    crop_w = int(crop_h * 0.5625)  # 9:16 aspect ratio to fill vertical space
+    crop_w = int(crop_h * 0.8)  # Wider crop = less zoom on subject
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
-        crop_h = int(crop_w / 0.5625)  # Adjust height if width is constrained
     
     logger.info(f"      📐 Video: {input_w}x{input_h}, {total_frames} frames @ {fps:.1f}fps")
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (9:16 aspect ratio)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (will scale to 9:16)")
     
     # IMPROVED: Build frame-by-frame crop positions with smooth interpolation
     if len(crop_positions) > 1 and crop_w < input_w:
