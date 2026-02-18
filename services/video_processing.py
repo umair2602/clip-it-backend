@@ -462,13 +462,14 @@ async def generate_optimized_crop_positions(
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     
-    # Calculate crop dimensions
+    # Calculate crop dimensions for 9:16 aspect ratio (vertical video)
     crop_h = input_h
-    crop_w = int(crop_h * 1.0)
+    crop_w = int(crop_h * 0.5625)  # 9:16 aspect ratio to fill vertical space
     if crop_w > input_w:
         crop_w = input_w
+        crop_h = int(crop_w / 0.5625)  # Adjust height if width is constrained
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h}")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (9:16 aspect ratio)")
     logger.info(f"      📊 Using {len(speaker_map)} pre-mapped speakers")
     
     # Generate positions directly from transcript (NO heavy computation!)
@@ -620,16 +621,16 @@ async def detect_talknet_crop_positions(
     
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
-    # Calculate crop dimensions - tighter crop for better zoom on speaker
-    # Use 1.0x height as width - less zoom, shows more of the scene
+    # Calculate crop dimensions for 9:16 aspect ratio (vertical video)
     crop_h = input_h
-    crop_w = int(crop_h * 1.0)  # Full height ratio - less zoom on speaker
+    crop_w = int(crop_h * 0.5625)  # 9:16 aspect ratio to fill vertical space
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
+        crop_h = int(crop_w / 0.5625)  # Adjust height if width is constrained
     
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (1.0x aspect ratio - less zoom)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (9:16 aspect ratio)")
     
     # STEP 1: Build speaker timeline from transcript
     logger.info(f"      🔍 Checking transcript data...")
@@ -1161,16 +1162,17 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
     
-    # Less zoom for wider view - use 1.0x height as width
+    # Calculate crop dimensions for 9:16 aspect ratio (vertical video)
     crop_h = input_h
-    crop_w = int(crop_h * 1.0)  # Full height ratio - less zoom on speaker
+    crop_w = int(crop_h * 0.5625)  # 9:16 aspect ratio to fill vertical space
     
     # Ensure crop width doesn't exceed video width
     if crop_w > input_w:
         crop_w = input_w
+        crop_h = int(crop_w / 0.5625)  # Adjust height if width is constrained
     
     logger.info(f"      📐 Video: {input_w}x{input_h}, {total_frames} frames @ {fps:.1f}fps")
-    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (1.0x aspect ratio - less zoom)")
+    logger.info(f"      ✂️  Crop dimensions: {crop_w}x{crop_h} (9:16 aspect ratio)")
     
     # IMPROVED: Build frame-by-frame crop positions with smooth interpolation
     if len(crop_positions) > 1 and crop_w < input_w:
@@ -1332,7 +1334,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
                     "-i", temp_path,  # Original for audio
                     "-map", "0:v",  # Video from temp_output
                     "-map", "1:a?",  # Audio from original (if exists)
-                    "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                    "-vf", "scale=1080:1920",  # Scale to exact 9:16 dimensions (no padding needed)
                     "-c:v", "h264_nvenc",
                     "-preset", "p4",  # NVENC preset (p1=fastest, p7=quality)
                     "-rc", "constqp",
@@ -1351,7 +1353,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
                     "-i", temp_path,  # Original for audio
                     "-map", "0:v",  # Video from temp_output
                     "-map", "1:a?",  # Audio from original (if exists)
-                    "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                    "-vf", "scale=1080:1920",  # Scale to exact 9:16 dimensions (no padding needed)
                     "-c:v", "libx264",
                     "-preset", "fast",
                     "-crf", "23",

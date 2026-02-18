@@ -40,7 +40,7 @@ setup_logging(log_dir="logs", log_file="backend.log", log_level=logging.INFO)
 from config import settings
 from services.user_video_service import utc_now
 from services.content_analysis import analyze_content
-from services.face_tracking import track_faces
+# from services.face_tracking import track_faces  # Not used - replaced by YOLO8
 
 # Import services
 from services.video_processing import create_clip, generate_thumbnail, process_video

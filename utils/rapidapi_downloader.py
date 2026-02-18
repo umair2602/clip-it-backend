@@ -303,9 +303,13 @@ async def _download_file(url: str, output_dir: Path, title: str) -> Optional[str
         
         logger.info(f"⬇️  Downloading to: {file_path}")
         
-        # Download with progress
+        # Download with progress - increased timeouts for large files and slow connections
+        timeout = aiohttp.ClientTimeout(
+            total=1800,  # 30 minutes total
+            sock_read=300  # 5 minutes between chunks (handles slow downloads)
+        )
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as response:
+            async with session.get(url, timeout=timeout) as response:
                 if response.status != 200:
                     logger.error(f"❌ Download failed with status {response.status}")
                     return None
