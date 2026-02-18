@@ -5,6 +5,7 @@ openai-whisper>=20231117
 # torch is installed separately in Dockerfile to control CPU/GPU version
 # torchvision is also installed with torch for YOLO8
 opencv-python>=4.8.0
+mediapipe>=0.10.0
 ultralytics>=8.0.0
 numpy>=1.24.0
 pydantic[email]>=2.0.0
