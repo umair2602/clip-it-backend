@@ -22,6 +22,7 @@ from fastapi import (
     UploadFile,
     Depends,
     Response,
+    APIRouter,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
@@ -263,18 +264,24 @@ async def _upload_thumbnail_to_s3_async(
 # Logging is now configured in logging_config.py (imported above)
 # The old basicConfig has been removed to avoid conflicts
 
-# Create FastAPI app
+# Create FastAPI app WITHOUT global dependencies
 app = FastAPI(
     title="AI Podcast Clipper API",
     description="API for AI-powered podcast clipping with user authentication",
     version="1.0.0",
 )
 
-# CRITICAL: Define health check FIRST before any routers to ensure it's not intercepted
-@app.get("/health", include_in_schema=False, tags=["health"])
-async def health_check_early():
-    """Health check endpoint for load balancer - NO authentication required"""
+# Create a public router for unauthenticated endpoints (health check, verification, etc.)
+public_router = APIRouter(tags=["Public"])
+
+# CRITICAL: Health check endpoint - NO authentication required
+@public_router.get("/health", include_in_schema=False)
+async def health_check():
+    """Health check endpoint for load balancer and monitoring - NO authentication required"""
     return {"status": "ok"}
+
+# Include public router FIRST to ensure highest priority
+app.include_router(public_router)
 
 # Initialize progress tracker (will be used in endpoints)
 # Note: job_queue is imported locally in functions, so we'll initialize progress_tracker there too
@@ -300,7 +307,7 @@ app.include_router(instagram_router)
 VERIFICATION_FILENAME = "tiktok4QPEpS6YFmd4DmFfdr2Kjw4YKsWvEWky.txt"
 
 
-@app.get(f"/{VERIFICATION_FILENAME}", include_in_schema=False)
+@public_router.get(f"/{VERIFICATION_FILENAME}", include_in_schema=False)
 def serve_tiktok_verification():
     # Must be 200, no redirects, text/plain
     verification_path = Path(__file__).parent / "verify" / VERIFICATION_FILENAME
@@ -415,7 +422,7 @@ tasks = {}  # ⚠️ DO NOT USE in production with multiple instances!
 
 
 # Tiktok
-@app.get(f"/tiktok{settings.TIKTOK_VERIFICATION_KEY}.txt")
+@public_router.get(f"/tiktok{settings.TIKTOK_VERIFICATION_KEY}.txt")
 async def verify_tiktok_domain():
     return Response(
         content=f"tiktok-developers-site-verification={settings.TIKTOK_VERIFICATION_KEY}",
@@ -424,7 +431,7 @@ async def verify_tiktok_domain():
 
 
 # Routes
-@app.get("/")
+@public_router.get("/")
 async def read_root(
     code: Optional[str] = None,
     state: Optional[str] = None,
@@ -462,7 +469,7 @@ async def read_root(
     return {"message": "Welcome to AI Podcast Clipper API"}
 
 
-@app.get("/auth")
+@public_router.get("/auth")
 async def auth_endpoint(
     code: Optional[str] = None,
     state: Optional[str] = None,
@@ -507,13 +514,13 @@ async def auth_endpoint(
 #     return {"status": "ok"}
 
 
-@app.get("/api/stages")
+@public_router.get("/api/stages")
 async def get_pipeline_stages():
     """Get all defined pipeline stages and their progress percentages"""
     return ProgressTracker.get_all_stages()
 
 
-@app.get("/heartbeat")
+@public_router.get("/heartbeat")
 async def heartbeat():
     """Enhanced heartbeat endpoint that provides system status information
     and acts as a lightweight ping even when the server is busy
