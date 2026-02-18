@@ -270,6 +270,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# CRITICAL: Define health check FIRST before any routers to ensure it's not intercepted
+@app.get("/health", include_in_schema=False, tags=["health"])
+async def health_check_early():
+    """Health check endpoint for load balancer - NO authentication required"""
+    return {"status": "ok"}
+
 # Initialize progress tracker (will be used in endpoints)
 # Note: job_queue is imported locally in functions, so we'll initialize progress_tracker there too
 
@@ -310,15 +316,27 @@ def serve_tiktok_verification():
 
 @app.on_event("startup")
 async def startup_event():
-    # Initialize MongoDB connection
+    # Initialize MongoDB connection (non-blocking - don't block app startup)
     try:
         logging.info("Connecting to MongoDB...")
-        if mongodb.connect():
-            logging.info("MongoDB connected successfully")
-        else:
-            logging.error("Failed to connect to MongoDB")
+        # Use asyncio to timeout the connection attempt
+        import asyncio
+        
+        async def connect_mongo():
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, mongodb.connect)
+        
+        try:
+            # Timeout after 5 seconds - don't block startup forever
+            connected = await asyncio.wait_for(connect_mongo(), timeout=5.0)
+            if connected:
+                logging.info("MongoDB connected successfully")
+            else:
+                logging.warning("Failed to connect to MongoDB - will retry on first request")
+        except asyncio.TimeoutError:
+            logging.warning("MongoDB connection timeout - continuing startup anyway")
     except Exception as e:
-        logging.error(f"Error connecting to MongoDB: {str(e)}")
+        logging.warning(f"Error connecting to MongoDB: {str(e)} - continuing startup anyway")
 
 
 # Configure CORS
@@ -482,10 +500,11 @@ async def auth_endpoint(
     return {"message": "Auth endpoint - TikTok OAuth callback handler"}
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint to verify the API is running"""
-    return {"status": "ok"}
+# Health check already defined at top of file - this is a duplicate for backwards compatibility
+# @app.get("/health")
+# async def health_check():
+#     """Health check endpoint to verify the API is running"""
+#     return {"status": "ok"}
 
 
 @app.get("/api/stages")
