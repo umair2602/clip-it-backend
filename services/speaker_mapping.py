@@ -25,6 +25,7 @@ async def map_speakers_from_sample(
 ) -> Dict[str, int]:
     """
     Analyze first N seconds of video to map speaker labels to X positions.
+    Uses YOLO8 for face detection (GPU-accelerated) + TalkNet for speaker identification.
     
     Args:
         video_path: Path to video file
@@ -36,9 +37,10 @@ async def map_speakers_from_sample(
         Example: {"A": 400, "B": 1200, "C": 800}
     """
     from services.talknet_asd import detect_active_speaker_simple, TALKNET_AVAILABLE
-    import mediapipe as mp
+    from services.yolo_face_detection import detect_faces, get_device
     
     logger.info(f"🎯 Mapping speakers using first {sample_duration}s of video...")
+    logger.info(f"   Using YOLO8 face detection on {get_device().upper()}")
     
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -59,59 +61,69 @@ async def map_speakers_from_sample(
     
     logger.info(f"   Found {len(sample_utterances)} utterances in sample window")
     
-    # STEP 1: Run face detection on sample frames
-    logger.info(f"   📷 Detecting faces in sample window...")
+    # STEP 1: Run YOLO8 face detection on sample frames
+    logger.info(f"   📷 Detecting faces in sample window using YOLO8...")
     person_detections = []
     
-    mp_face_mesh = mp.solutions.face_mesh
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=False,
-        max_num_faces=5,
-        refine_landmarks=False,
-        min_detection_confidence=0.3,  # Lowered from 0.5 for better detection
-        min_tracking_confidence=0.3     # Lower threshold for tracking
-    ) as face_mesh:
+    frame_idx = 0
+    max_sample_frames = int(sample_duration * fps)
+    
+    # Collect frames for batch processing (better GPU utilization)
+    frames_batch = []
+    frame_indices = []
+    
+    while cap.isOpened() and frame_idx < max_sample_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
         
-        frame_idx = 0
-        max_sample_frames = int(sample_duration * fps)
-        
-        while cap.isOpened() and frame_idx < max_sample_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Sample every 5th frame for efficiency
+        if frame_idx % 5 == 0:
+            frames_batch.append(frame)
+            frame_indices.append(frame_idx)
             
-            # Sample every 5th frame for efficiency
-            if frame_idx % 5 == 0:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh.process(rgb_frame)
+            # Process in batches of 8 frames for optimal GPU usage
+            if len(frames_batch) == 8:
+                from services.yolo_face_detection import detect_faces_batch_yolo
+                batch_detections = detect_faces_batch_yolo(frames_batch)
                 
-                if results.multi_face_landmarks:
-                    for face_landmarks in results.multi_face_landmarks:
-                        x_coords = [landmark.x for landmark in face_landmarks.landmark]
-                        y_coords = [landmark.y for landmark in face_landmarks.landmark]
-                        
-                        face_center_x = int(np.mean(x_coords) * input_w)
-                        face_center_y = int(np.mean(y_coords) * input_h)
-                        
-                        face_width = (max(x_coords) - min(x_coords)) * input_w
-                        face_height = (max(y_coords) - min(y_coords)) * input_h
-                        
+                for batch_idx, frame_detections in enumerate(batch_detections):
+                    current_frame_idx = frame_indices[batch_idx]
+                    for detection in frame_detections:
                         person_detections.append({
-                            'frame': frame_idx,
-                            'x': face_center_x,
-                            'y': face_center_y,
-                            'width': face_width,
-                            'height': face_height,
-                            'time': frame_idx / fps,
-                            'bbox': [
-                                int(min(x_coords) * input_w),
-                                int(min(y_coords) * input_h),
-                                int(max(x_coords) * input_w),
-                                int(max(y_coords) * input_h)
-                            ]
+                            'frame': current_frame_idx,
+                            'x': detection['center_x'],
+                            'y': detection['center_y'],
+                            'width': detection['face_width'],
+                            'height': detection['face_height'],
+                            'time': current_frame_idx / fps,
+                            'bbox': detection['bbox'],
+                            'confidence': detection['confidence']
                         })
-            
-            frame_idx += 1
+                
+                frames_batch = []
+                frame_indices = []
+        
+        frame_idx += 1
+    
+    # Process remaining frames
+    if frames_batch:
+        from services.yolo_face_detection import detect_faces_batch_yolo
+        batch_detections = detect_faces_batch_yolo(frames_batch)
+        
+        for batch_idx, frame_detections in enumerate(batch_detections):
+            current_frame_idx = frame_indices[batch_idx]
+            for detection in frame_detections:
+                person_detections.append({
+                    'frame': current_frame_idx,
+                    'x': detection['center_x'],
+                    'y': detection['center_y'],
+                    'width': detection['face_width'],
+                    'height': detection['face_height'],
+                    'time': current_frame_idx / fps,
+                    'bbox': detection['bbox'],
+                    'confidence': detection['confidence']
+                })
     
     cap.release()
     
@@ -242,13 +254,13 @@ async def _fallback_visual_mapping(
     transcript: Dict[str, Any]
 ) -> Dict[str, int]:
     """
-    Fallback: If no utterances in sample window, detect all unique speakers visually.
+    Fallback: If no utterances in sample window, detect all unique speakers visually using YOLO8.
     Returns mapping of detected positions to generic labels.
     """
     import cv2
-    import mediapipe as mp
+    from services.yolo_face_detection import detect_faces
     
-    logger.info("   Using fallback visual mapping...")
+    logger.info("   Using fallback visual mapping with YOLO8...")
     
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -257,21 +269,16 @@ async def _fallback_visual_mapping(
     # Detect all faces in first 100 frames
     x_positions = []
     
-    mp_face_mesh = mp.solutions.face_mesh
-    with mp_face_mesh.FaceMesh(max_num_faces=5) as face_mesh:
-        for frame_idx in range(100):
-            ret, frame = cap.read()
-            if not ret:
-                break
+    for frame_idx in range(100):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        if frame_idx % 10 == 0:
+            detections = detect_faces(frame)
             
-            if frame_idx % 10 == 0:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh.process(rgb_frame)
-                
-                if results.multi_face_landmarks:
-                    for face_landmarks in results.multi_face_landmarks:
-                        x_coords = [landmark.x for landmark in face_landmarks.landmark]
-                        x_positions.append(int(np.mean(x_coords) * input_w))
+            for detection in detections:
+                x_positions.append(detection['center_x'])
     
     cap.release()
     
