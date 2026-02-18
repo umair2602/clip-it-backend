@@ -4,9 +4,9 @@ Video routes for user-specific video operations, S3 uploads, and YouTube downloa
 
 import logging
 from typing import Annotated, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import HttpUrl
+from pydantic import HttpUrl, BaseModel
 from bson import ObjectId
 
 from models.user import User
@@ -23,7 +23,7 @@ from jobs import job_queue
 logger = logging.getLogger(__name__)
 
 # Create router
-router = APIRouter(prefix="/videos", tags=["Videos"])
+router = APIRouter(tags=["Videos"])
 
 # Security scheme
 security = HTTPBearer()
@@ -195,25 +195,32 @@ async def register_uploaded_video(
 @router.post("/youtube-download")
 async def download_youtube_video(
     current_user: Annotated[User, Depends(get_current_user)],
-    url: HttpUrl = Query(..., description="YouTube video URL"),
-    title: Optional[str] = Query(None, description="Custom title for the video"),
-    description: Optional[str] = Query(None, description="Video description")
+    url: str = Body(..., description="YouTube video URL"),
+    min_clip_duration: int = Body(30, description="Minimum clip duration in seconds"),
+    max_clip_duration: int = Body(60, description="Maximum clip duration in seconds"),
+    auto_process: bool = Body(True, description="Auto process after download"),
+    title: Optional[str] = Body(None, description="Custom video title"),
+    description: Optional[str] = Body(None, description="Video description")
 ):
     """
     Register YouTube video for download and storage in S3 for the user.
     """
     try:
-        logger.info(f"="*80)
+        logger.info("="*80)
         logger.info(f"📺 YOUTUBE DOWNLOAD REQUEST RECEIVED")
         logger.info(f"   User ID: {current_user.id}")
         logger.info(f"   User Email: {current_user.email}")
         logger.info(f"   URL: {url}")
         logger.info(f"   Custom Title: {title}")
         logger.info(f"   Description: {description}")
+        logger.info(f"   Min Clip Duration: {min_clip_duration}s")
+        logger.info(f"   Max Clip Duration: {max_clip_duration}s")
         logger.info(f"="*80)
         
         # Extract video ID from URL
-        video_id_from_url = url.path.split('/')[-1] if url.path else "unknown"
+        from pydantic import HttpUrl
+        url_obj = HttpUrl(url)
+        video_id_from_url = url_obj.path.split('/')[-1] if url_obj.path else "unknown"
         logger.info(f"🔍 Extracted video ID from URL: {video_id_from_url}")
         
         # Create background job FIRST to get the job_id
@@ -221,10 +228,12 @@ async def download_youtube_video(
         job_id = job_queue.add_job(
             "process_youtube_download",  # Use new unified job type
             {
-                "url": str(url),
+                "url": url,
                 "video_id": None,  # Will be set after video is created
                 "user_id": current_user.id,
-                "auto_process": True
+                "auto_process": auto_process,
+                "min_clip_duration": min_clip_duration,
+                "max_clip_duration": max_clip_duration
             }
         )
         logger.info(f"✅ Background job created: {job_id}")
@@ -235,7 +244,7 @@ async def download_youtube_video(
             "title": title or f"YouTube Video {video_id_from_url}",
             "description": description or "Video submitted for processing",
             "filename": f"youtube_{video_id_from_url}.mp4",
-            "source_url": str(url),
+            "source_url": url,
             "status": VideoStatus.DOWNLOADING,
             "video_type": VideoType.YOUTUBE,
             "process_task_id": job_id,  # Set immediately!
@@ -295,9 +304,10 @@ async def download_youtube_video(
                 "status": "downloading",
                 "process_task_id": job_id,
                 "job_id": job_id,
-                "source_url": str(url),
+                "source_url": url,
                 "video_type": "youtube"
             },
+            "task_id": job_id,  # For frontend compatibility
             "job_id": job_id,
             "process_task_id": job_id,  # Include in response for immediate frontend tracking
             "status": "downloading"
