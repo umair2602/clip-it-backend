@@ -45,6 +45,7 @@ class VideoStatus(str, Enum):
     ANALYZING = "analyzing"
     PROCESSING = "processing"
     COMPLETED = "completed"
+    COMPLETED_NO_CLIPS = "completed_no_clips"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
