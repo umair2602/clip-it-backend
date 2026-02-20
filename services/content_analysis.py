@@ -44,16 +44,21 @@ async def analyze_content(transcript: Dict[str, Any], min_clip_duration: int, ma
             logger.warning(
                 "No transcript segments found - video appears to be silent or have no speech"
             )
-            logger.info("Creating default segment for silent video")
-            # Return a default segment for silent videos (30 seconds from start)
-            return [
-                {
-                    "start_time": 0,
-                    "end_time": 30,
-                    "title": "Silent Video Clip",
-                    "description": "Automatically generated clip from silent or speech-free video",
-                }
-            ]
+            # Only create a default segment if it fits within the user's requested range
+            default_duration = min_clip_duration  # Use the user's minimum as the default
+            if default_duration <= max_clip_duration:
+                logger.info(f"Creating default segment for silent video ({default_duration}s)")
+                return [
+                    {
+                        "start_time": 0,
+                        "end_time": default_duration,
+                        "title": "Silent Video Clip",
+                        "description": "Automatically generated clip from silent or speech-free video",
+                    }
+                ]
+            else:
+                logger.warning(f"Cannot create default segment - min_clip_duration ({min_clip_duration}s) > max_clip_duration ({max_clip_duration}s)")
+                return []
 
         # Check if we have the AI-ready transcript with speaker labels
         # This is the preferred format for clip generation
@@ -579,8 +584,9 @@ async def identify_engaging_segments(
 
         logger.info(f"📊 Parsed {len(segments)} segments from OpenAI")
 
-        # Validate and format segments
+        # Validate and format segments with STRICT duration filtering
         valid_segments = []
+        rejected_count = 0
         for i, segment in enumerate(segments):
             if (
                 isinstance(segment, dict)
@@ -591,7 +597,17 @@ async def identify_engaging_segments(
                 duration = segment["end_time"] - segment["start_time"]
                 logger.info(f"Segment {i}: '{segment.get('title', 'No title')}' - Duration: {duration:.1f}s (start: {segment['start_time']:.1f}, end: {segment['end_time']:.1f})")
                 
-                # Accept all AI-generated segments - the strict prompt enforces duration range
+                # STRICT validation: reject clips outside the duration range
+                if duration < min_clip_duration:
+                    logger.warning(f"  ❌ REJECTED: '{segment.get('title', 'No title')}' - TOO SHORT ({duration:.1f}s < {min_clip_duration}s)")
+                    rejected_count += 1
+                    continue
+                if duration > max_clip_duration:
+                    logger.warning(f"  ❌ REJECTED: '{segment.get('title', 'No title')}' - TOO LONG ({duration:.1f}s > {max_clip_duration}s)")
+                    rejected_count += 1
+                    continue
+                
+                # Only accept clips within the strict duration range
                 valid_segments.append(
                     {
                         "start_time": segment["start_time"],
@@ -600,7 +616,10 @@ async def identify_engaging_segments(
                         "description": segment.get("description", ""),
                     }
                 )
-                logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s)")
+                logger.info(f"  ✅ ACCEPTED (duration: {duration:.1f}s, within {min_clip_duration}-{max_clip_duration}s range)")
+
+        if rejected_count > 0:
+            logger.warning(f"⚠️ Rejected {rejected_count} clips that violated duration constraints ({min_clip_duration}-{max_clip_duration}s)")
 
         logger.info("=" * 60)
         # Enforce global cap to avoid over-generation
@@ -608,7 +627,7 @@ async def identify_engaging_segments(
             logger.info(f"⚠️ Truncating segments to MAX_CLIPS_PER_EPISODE={settings.MAX_CLIPS_PER_EPISODE}")
             valid_segments = valid_segments[:settings.MAX_CLIPS_PER_EPISODE]
 
-        logger.info(f"✅ FINAL RESULT: {len(valid_segments)} valid segments out of {len(segments)} total")
+        logger.info(f"✅ FINAL RESULT: {len(valid_segments)} valid segments out of {len(segments)} total (rejected {rejected_count})")
         logger.info("=" * 60)
 
         return valid_segments
