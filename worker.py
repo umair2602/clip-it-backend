@@ -638,50 +638,13 @@ async def process_video_job(job_id: str, job_data: dict):
             await check_if_cancelled(user_id, video_id)
         
         if not segments:
-            no_clips_msg = f"No clips could be generated within the requested duration range ({min_clip_duration}-{max_clip_duration}s). Try widening the range between minimum and maximum clip duration."
-            logger.warning(f"⚠️ {no_clips_msg}")
-            
-            # Update video status so the frontend knows what happened
-            if user_id:
-                await update_user_video(user_id, video_id, {
-                    "status": "completed_no_clips",
-                    "error_message": no_clips_msg,
-                    "processed_at": utc_now(),
-                    "updated_at": utc_now()
-                })
-            
-            # Update job status
-            progress_tracker.update_progress(job_id, PipelineStage.COMPLETED)
-            job_queue.update_job(job_id, {
-                "message": no_clips_msg,
-                "clips": json.dumps([]),
-            })
-            if original_job_id:
-                progress_tracker.update_progress(original_job_id, PipelineStage.COMPLETED)
-                job_queue.update_job(original_job_id, {
-                    "message": no_clips_msg,
-                    "clips": json.dumps([]),
-                })
-            
-            # Clean up local files
-            try:
-                video_upload_dir = upload_dir / video_id
-                if video_upload_dir.exists():
-                    shutil.rmtree(video_upload_dir)
-                    logger.info(f"🗑️ Cleaned up upload directory: {video_upload_dir}")
-            except Exception as cleanup_error:
-                logger.warning(f"⚠️ Failed to clean up: {cleanup_error}")
-            
-            # Release locks and clean up jobs
-            job_queue.release_job_lock(job_id)
-            if original_job_id:
-                job_queue.release_job_lock(original_job_id)
-            job_queue.delete_job(job_id)
-            if original_job_id:
-                job_queue.delete_job(original_job_id)
-            
-            logger.info(f"Job {job_id} completed with 0 clips (duration range too narrow)")
-            return
+            logger.warning(
+                f"Content analysis found no engaging segments within the requested duration range ({min_clip_duration}-{max_clip_duration}s). No clips will be generated."
+            )
+            # Do NOT create a default clip outside the user's requested range.
+            # If no clips fit the constraints, we return 0 clips rather than
+            # fabricating one that violates the duration settings.
+            segments = []
         
         step_elapsed = time.time() - step_start
         logger.info(f"✅ STEP 2 COMPLETE: AI analysis finished in {step_elapsed:.2f} seconds")
