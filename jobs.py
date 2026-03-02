@@ -59,7 +59,70 @@ class JobQueue:
             self._memory_storage[job_id] = job
 
         logger.info(f"Added job {job_id} of type {job_type} to queue")
+
+        # Trigger GPU worker scale-up (no-op if already running or disabled)
+        self.scale_up_gpu_worker()
+
         return job_id
+
+    def scale_up_gpu_worker(self):
+        """Scale up the GPU worker ECS service + ASG when a new job arrives.
+
+        Only runs if AUTO_SCALE_ENABLED=true (so local dev is unaffected).
+        If the service is already running (desiredCount > 0) this is a no-op.
+        """
+        from config import settings
+        if not settings.AUTO_SCALE_ENABLED:
+            return
+
+        try:
+            import boto3
+
+            region = settings.AWS_REGION or "us-east-1"
+            cluster_name = settings.ECS_CLUSTER_NAME
+            worker_service_name = settings.WORKER_SERVICE_NAME
+            asg_name = settings.WORKER_ASG_NAME
+
+            ecs_client = boto3.client("ecs", region_name=region)
+
+            # Check current desired count
+            response = ecs_client.describe_services(
+                cluster=cluster_name,
+                services=[worker_service_name]
+            )
+
+            if not response.get("services"):
+                logger.warning(f"GPU worker service '{worker_service_name}' not found, skipping scale-up")
+                return
+
+            current_desired = response["services"][0]["desiredCount"]
+
+            if current_desired == 0:
+                logger.info("GPU worker is stopped (desiredCount=0), scaling up...")
+
+                # Step 1: Scale the ASG to 1 so an EC2 instance is available
+                if asg_name:
+                    asg_client = boto3.client("autoscaling", region_name=region)
+                    asg_client.set_desired_capacity(
+                        AutoScalingGroupName=asg_name,
+                        DesiredCapacity=1,
+                        HonorCooldown=False
+                    )
+                    logger.info(f"Scaled ASG '{asg_name}' desired capacity to 1")
+
+                # Step 2: Scale ECS service to 1
+                ecs_client.update_service(
+                    cluster=cluster_name,
+                    service=worker_service_name,
+                    desiredCount=1
+                )
+                logger.info("GPU worker ECS service scaled up to 1 task")
+            else:
+                logger.debug(f"GPU worker already active (desiredCount={current_desired}), no scale-up needed")
+
+        except Exception as e:
+            # Scale-up failure must not block the job — just log it
+            logger.error(f"Failed to scale up GPU worker: {e}")
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get job details by ID"""

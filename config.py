@@ -189,6 +189,19 @@ class Settings:
         os.getenv("SPEAKER_DIARIZATION_ENABLED", "false").lower() == "true"
     )
 
+    # -------------------------------------------------------------------------
+    # Smart GPU worker: scale-to-zero configuration
+    # AUTO_SCALE_ENABLED is injected as "true" by the CDK stack in production.
+    # Leave it unset (defaults to False) for local development.
+    # -------------------------------------------------------------------------
+    AUTO_SCALE_ENABLED = os.getenv("AUTO_SCALE_ENABLED", "false").lower() == "true"
+    ECS_CLUSTER_NAME = os.getenv("ECS_CLUSTER_NAME", "clip-it-cluster")
+    WORKER_SERVICE_NAME = os.getenv("WORKER_SERVICE_NAME", "clip-it-gpu-worker-service")
+    WORKER_ASG_NAME = os.getenv("WORKER_ASG_NAME", "clip-it-gpu-worker-asg")
+    # Seconds of empty queue + no active tasks before the worker shuts itself down.
+    # Set to 0 to disable auto-shutdown entirely.
+    IDLE_TIMEOUT_SECONDS = int(os.getenv("IDLE_TIMEOUT_SECONDS", "300"))
+
     # Proxy base URL
 
     PROXY_BASE_URL = clean_env_value(

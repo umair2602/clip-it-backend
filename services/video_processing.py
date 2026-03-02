@@ -462,10 +462,10 @@ async def generate_optimized_crop_positions(
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     
-    # Calculate crop dimensions - use as much width as possible for less zoom
-    # Use 80% of height as width for a good balance (less zoom than strict 9:16)
+    # Calculate crop dimensions - exact 9:16 ratio for full vertical frame (no black bars)
+    # This is the widest possible crop that fills the entire 1080x1920 output
     crop_h = input_h
-    crop_w = int(crop_h * 0.8)  # Wider crop = less zoom on subject
+    crop_w = int(crop_h * 9 / 16)  # Exact 9:16 = fills vertical frame completely
     if crop_w > input_w:
         crop_w = input_w
     
@@ -618,12 +618,10 @@ async def detect_talknet_crop_positions(
     
     logger.info(f"      Video: {input_w}x{input_h} @ {fps:.2f}fps, {total_frames} frames")
     
-    # Calculate crop dimensions - use as much width as possible for less zoom
-    # Use 80% of height as width for a good balance (less zoom than strict 9:16)
+    # Calculate crop dimensions - exact 9:16 ratio for full vertical frame (no black bars)
+    # This is the widest possible crop that fills the entire 1080x1920 output
     crop_h = input_h
-    crop_w = int(crop_h * 0.8)  # Wider crop = less zoom on subject
-    
-    # Ensure crop width doesn't exceed video width
+    crop_w = int(crop_h * 9 / 16)  # Exact 9:16 = fills vertical frame completely
     if crop_w > input_w:
         crop_w = input_w
     
@@ -1110,12 +1108,10 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
     
-    # Calculate crop dimensions - use as much width as possible for less zoom
-    # Use 80% of height as width for a good balance (less zoom than strict 9:16)
+    # Calculate crop dimensions - exact 9:16 ratio for full vertical frame (no black bars)
+    # This is the widest possible crop that fills the entire 1080x1920 output
     crop_h = input_h
-    crop_w = int(crop_h * 0.8)  # Wider crop = less zoom on subject
-    
-    # Ensure crop width doesn't exceed video width
+    crop_w = int(crop_h * 9 / 16)  # Exact 9:16 = fills vertical frame completely
     if crop_w > input_w:
         crop_w = input_w
     
@@ -1202,7 +1198,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
             # Fallback to static crop - use most common keyframe position
             from collections import Counter
             dominant_crop_x = Counter(keyframe_crop_x).most_common(1)[0][0] if keyframe_crop_x else (input_w - crop_w) // 2
-            filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+            filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920"
             cmd = ["ffmpeg", "-y", "-i", temp_path, "-vf", filter_str, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
             subprocess.run(cmd, check=True, capture_output=True)
             return
@@ -1320,7 +1316,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
                     cmd = [
                         "ffmpeg", "-y", "-i", temp_output, "-i", temp_path,
                         "-map", "0:v", "-map", "1:a?",
-                        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+                        "-vf", "scale=1080:1920",
                         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
                     ]
@@ -1341,7 +1337,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
             
             from collections import Counter
             dominant_crop_x = Counter(keyframe_crop_x).most_common(1)[0][0] if keyframe_crop_x else (input_w - crop_w) // 2
-            filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+            filter_str = f"crop={crop_w}:{crop_h}:{int(dominant_crop_x)}:0,scale=1080:1920"
             hw_fb = get_hardware_acceleration_cmd()
             if hw_fb and "cuda" in " ".join(hw_fb):
                 cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-i", temp_path, "-vf", filter_str, "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "constqp", "-qp", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path]
@@ -1359,7 +1355,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
         # Single position - use static crop with ffmpeg (faster)
         crop_x = crop_positions[0]['crop_x']
         logger.info(f"      📍 Using static crop at X={crop_x}")
-        filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+        filter_str = f"crop={crop_w}:{crop_h}:{crop_x}:0,scale=1080:1920"
         
         # Use GPU encoding if available
         hw_single = get_hardware_acceleration_cmd()
@@ -1397,57 +1393,7 @@ async def apply_smart_crop_with_transitions(temp_path: str, output_path: str, cr
                 raise
         logger.info(f"      ✅ Crop applied successfully")
     
-    # Check if we're using full width (no cropping needed)
-    if crop_w >= input_w:
-        # Full width mode - no cropping, just scale and pad to 9:16
-        logger.info(f"      📍 Using full frame (no crop) with padding to 9:16")
-        
-        # Calculate padding needed for 9:16 aspect ratio (1080:1920 = 0.5625)
-        target_aspect = 9 / 16  # 0.5625
-        current_aspect = input_w / input_h
-        
-        if current_aspect > target_aspect:
-            # Video is wider than 9:16 - add vertical padding (top/bottom black bars)
-            scale_filter = f"scale=1080:-1,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
-        else:
-            # Video is taller than 9:16 - add horizontal padding (left/right black bars)
-            scale_filter = f"scale=-1:1920,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
-        
-        # Use GPU encoding if available for full-width processing
-        hw_full = get_hardware_acceleration_cmd()
-        use_gpu_full = hw_full and "cuda" in " ".join(hw_full)
-        
-        if use_gpu_full:
-            cmd = [
-                "ffmpeg", "-y", "-hwaccel", "cuda",
-                "-i", temp_path, "-vf", scale_filter,
-                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "constqp", "-qp", "23",
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
-            ]
-            logger.info(f"      🚀 Scale + pad filter (GPU): {scale_filter}")
-        else:
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", temp_path, "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
-            ]
-            logger.info(f"      💻 Scale + pad filter (CPU): {scale_filter}")
-        
-        try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as full_error:
-            if use_gpu_full:
-                logger.warning(f"      ⚠️ GPU encoding failed for full-frame, falling back to CPU: {full_error}")
-                cmd = [
-                    "ffmpeg", "-y", "-i", temp_path, "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
-                ]
-                subprocess.run(cmd, check=True)
-            else:
-                raise
-        logger.info(f"      ✅ Full frame processed with padding")
+
 # async def create_clip(
 #     video_path: str, output_dir: str, start_time: float, end_time: float, clip_id: str
 # ) -> str:
