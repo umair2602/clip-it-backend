@@ -150,17 +150,17 @@ class ClipItStack(Stack):
             "cat /etc/ecs/ecs.config",
             "echo '=== GPU Check ==='",
             "nvidia-smi || echo 'nvidia-smi failed'",
-            "echo '=== Pulling ECS Agent Image ===",
+            "echo '=== Pulling ECS Agent Image ==='",
             "# Pull ECS agent Docker image (missing from AMI)",
             "docker pull amazon/amazon-ecs-agent:latest",
-            "echo '=== Starting ECS Agent ===",
+            "echo '=== Starting ECS Agent ==='",
             "# Enable and start ECS service",
             "systemctl enable ecs",
             "# Start in background to avoid hanging UserData",
             "/usr/libexec/amazon-ecs-init start &",
             "# Wait for agent to register",
             "sleep 10",
-            "echo '=== Setup Complete ===",
+            "echo '=== Setup Complete ==='",
             "date"
         )
 
@@ -175,7 +175,21 @@ class ClipItStack(Stack):
             require_imdsv2=True,
             associate_public_ip_address=True,
             security_group=worker_sg,
-            key_name="clip-it-gpu-debug"  # SSH key for debugging
+            key_name="clip-it-gpu-debug",  # SSH key for debugging
+            # Large root volume: GPU worker image contains CUDA + PyTorch (~50–70 GB unpacked).
+            # The ECS-optimized GPU AMI default (30 GB) fills up when Docker pulls the image,
+            # causing "no space left on device" and TaskFailedToStart errors.
+            block_devices=[
+                ec2.BlockDevice(
+                    device_name="/dev/xvda",
+                    volume=ec2.BlockDeviceVolume.ebs(
+                        200,  # GB — enough for OS + Docker layers + model cache
+                        volume_type=ec2.EbsDeviceVolumeType.GP3,
+                        delete_on_termination=True,  # Clean up EBS when instance terminates
+                        encrypted=True,
+                    )
+                )
+            ]
         )
 
         # Auto Scaling Group for GPU Worker — starts at 0, scales up on demand
