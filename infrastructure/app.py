@@ -150,10 +150,14 @@ class ClipItStack(Stack):
             # already running, it registers 0 GPUs and tasks with gpu_count=1
             # will stay Pending forever.
             # ----------------------------------------------------------------
-            "echo '=== Stopping ECS agent to apply GPU config ==='",
+            "echo '=== Stopping ECS agent to apply GPU config ===' " ,
             "systemctl stop ecs 2>/dev/null || true",
-            "# Wipe stale agent state so it re-reads config fresh",
-            "rm -f /var/lib/ecs/data/agent.db",
+            "sleep 3",
+            "# Kill + remove the ecs-agent Docker container if still running from boot",
+            "docker stop ecs-agent 2>/dev/null || true",
+            "docker rm   ecs-agent 2>/dev/null || true",
+            "# Wipe ALL stale agent state so it re-registers as a fresh instance",
+            "rm -rf /var/lib/ecs/data/*",
             # Write full config (overwrite, not append, to avoid duplicates)
             f"echo 'ECS_CLUSTER={cluster.cluster_name}' > /etc/ecs/ecs.config",
             "echo 'ECS_ENABLE_GPU_SUPPORT=true' >> /etc/ecs/ecs.config",
@@ -166,15 +170,15 @@ class ClipItStack(Stack):
             "systemctl enable ecs",
             "systemctl start ecs",
             "echo '=== Waiting for ECS agent to register GPUs ==='",
-            "sleep 30",
-            "echo '=== Setup Complete ==='",
+            "sleep 60",
+            "echo '=== Setup Complete ===' " ,
             "date"
         )
 
         # Launch Template for GPU instances
         # We use a unique ID to ensure updates are picked up correctly
         spot_launch_template = ec2.LaunchTemplate(
-            self, "GPUWorkerLaunchTemplateV3",  # Bumped to V3 to force new LT version with GPU-config fix
+            self, "GPUWorkerLaunchTemplateV4",  # Bumped to V4 — kill docker container + managed_scaling=False fix
             instance_type=ec2.InstanceType("g4dn.xlarge"),
             machine_image=gpu_ami,
             role=ec2_instance_role,
@@ -213,12 +217,15 @@ class ClipItStack(Stack):
         )
 
         # Capacity Provider for GPU ASG
+        # enable_managed_scaling=False: jobs.py and worker.py own ALL scaling
+        # decisions (ASG + ECS desired count). Managed scaling would fight with
+        # manual set_desired_capacity calls — e.g. it would see 0 desired tasks
+        # and reset ASG to 0 while an instance is still booting and registering.
         gpu_capacity_provider = ecs.AsgCapacityProvider(
             self, "GPUCapacityProvider",
             auto_scaling_group=gpu_asg,
-            enable_managed_termination_protection=False, # Keeping this disabled to avoid complexity with scale-to-zero
-            enable_managed_scaling=True,
-            target_capacity_percent=100
+            enable_managed_termination_protection=False,
+            enable_managed_scaling=False,  # Manual control only — no interference
         )
         cluster.add_asg_capacity_provider(gpu_capacity_provider)
 
@@ -721,8 +728,8 @@ class ClipItStack(Stack):
         worker_service = ecs.Ec2Service(
             self, "WorkerService",  # Changed from GPUWorkerService to match existing CloudFormation resource
             cluster=cluster,
-            task_definition=worker_task_definition, # Assuming worker_task_definition is the correct variable name
-            desired_count=0,  # Start at 0, auto-scale when jobs arrive (true scale-to-zero)
+            task_definition=worker_task_definition,
+            desired_count=0,  # Start at 0; jobs.py sets to 1 when work arrives
             service_name="clip-it-gpu-worker-service",
             capacity_provider_strategies=[
                 ecs.CapacityProviderStrategy(
@@ -731,12 +738,16 @@ class ClipItStack(Stack):
                 )
             ],
             # Note: No security_groups needed with BRIDGE network mode
-            # The task uses the EC2 instance's security group (worker_sg) which has allow_all_outbound=True
             enable_execute_command=True,
             # Allow stopping old task before new one starts (required for single GPU)
             min_healthy_percent=0,
             max_healthy_percent=200
         )
+
+        # NOTE on desiredCount: CDK will reset it to 0 on every deploy.
+        # That is acceptable — jobs.py calls scale_up_gpu_worker() which sets it to 1
+        # when a job arrives. The scale-down path (worker.py scale_down_self) sets it
+        # back to 0 when idle. No CFN override needed.
 
 
         # Register web service with target group
