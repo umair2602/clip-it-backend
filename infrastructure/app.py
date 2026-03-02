@@ -178,15 +178,16 @@ class ClipItStack(Stack):
             key_name="clip-it-gpu-debug"  # SSH key for debugging
         )
 
-        # Auto Scaling Group for 1 Spot Worker
+        # Auto Scaling Group for GPU Worker — starts at 0, scales up on demand
         # Note: role is set in LaunchTemplate, not here
         gpu_asg = autoscaling.AutoScalingGroup(
             self, "GPUWorkerASG",
             vpc=vpc,
             launch_template=spot_launch_template,
-            min_capacity=1,  # Always keep 1 instance running (24/7)
+            min_capacity=0,   # Scale-to-zero: no idle GPU cost
             max_capacity=1,
-            desired_capacity=1,  # Always running for 24/7 availability
+            desired_capacity=0,  # Off by default; scaled to 1 when a job arrives
+            auto_scaling_group_name="clip-it-gpu-worker-asg",  # Fixed name for boto3 calls
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
 
@@ -267,6 +268,52 @@ class ClipItStack(Stack):
             )
         )
 
+        # Allow the web-service task to scale the GPU worker up/down
+        # (called from jobs.py scale_up_gpu_worker())
+        task_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "ecs:UpdateService",
+                    "ecs:DescribeServices",
+                ],
+                resources=["*"]
+            )
+        )
+        task_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "autoscaling:SetDesiredCapacity",
+                    "autoscaling:DescribeAutoScalingGroups",
+                ],
+                resources=["*"]
+            )
+        )
+
+        # Allow the EC2 GPU worker instance to scale itself down after idle
+        # (called from worker.py scale_down_self())
+        ec2_instance_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "ecs:UpdateService",
+                    "ecs:DescribeServices",
+                ],
+                resources=["*"]
+            )
+        )
+        ec2_instance_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "autoscaling:SetDesiredCapacity",
+                    "autoscaling:DescribeAutoScalingGroups",
+                ],
+                resources=["*"]
+            )
+        )
+
         # Create CloudWatch log group
         log_group = logs.LogGroup(
             self, "ClipItLogGroup",
@@ -294,7 +341,13 @@ class ClipItStack(Stack):
             "SPEAKER_DIARIZATION_ENABLED": "false",
             # Email service configuration
             "RESEND_FROM_EMAIL": "Klipz <noreply@klipz.ai>",
-            "FRONTEND_URL": "https://klipz.ai"
+            "FRONTEND_URL": "https://klipz.ai",
+            # Smart GPU worker: scale-to-zero configuration
+            "AUTO_SCALE_ENABLED": "true",
+            "ECS_CLUSTER_NAME": cluster.cluster_name,
+            "WORKER_SERVICE_NAME": "clip-it-gpu-worker-service",
+            "WORKER_ASG_NAME": "clip-it-gpu-worker-asg",
+            "IDLE_TIMEOUT_SECONDS": "300",  # Shut down after 5 min idle
         }
         
         # Secrets from SSM (sensitive values)
@@ -666,8 +719,10 @@ class ClipItStack(Stack):
             target_utilization_percent=70
         )
 
-        # No auto-scaling for GPU worker (fixed to 1)
-        # We manually keep it at 1 for cost management as per request
+        # GPU worker is scale-to-zero:
+        # - Scales to 1 automatically when a job is added (via jobs.py scale_up_gpu_worker)
+        # - Scales back to 0 after IDLE_TIMEOUT_SECONDS with no work (via worker.py scale_down_self)
+        # No additional ECS auto-scaling policy needed.
 
 
         # Store important values in SSM Parameter Store
@@ -681,6 +736,12 @@ class ClipItStack(Stack):
             self, "RedisEndpointParam",
             parameter_name="/clip-it/redis-endpoint",
             string_value=redis_cluster.attr_redis_endpoint_address
+        )
+
+        ssm.StringParameter(
+            self, "WorkerASGNameParam",
+            parameter_name="/clip-it/worker-asg-name",
+            string_value="clip-it-gpu-worker-asg"
         )
 
         ssm.StringParameter(

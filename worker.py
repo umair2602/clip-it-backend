@@ -1650,6 +1650,56 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
         job_queue.release_job_lock(job_id)
 
 
+async def scale_down_self():
+    """Scale the GPU worker ECS service and ASG back to zero after the queue is idle.
+
+    This causes the EC2 GPU instance to terminate, stopping GPU billing.
+    Only runs when AUTO_SCALE_ENABLED=true.
+    """
+    from config import settings
+    if not settings.AUTO_SCALE_ENABLED:
+        logger.info("AUTO_SCALE_ENABLED is false — skipping self-scale-down")
+        return
+
+    try:
+        import boto3
+
+        region = settings.AWS_REGION or "us-east-1"
+        cluster_name = settings.ECS_CLUSTER_NAME
+        worker_service_name = settings.WORKER_SERVICE_NAME
+        asg_name = settings.WORKER_ASG_NAME
+
+        logger.info("Queue idle — scaling down GPU worker to save costs...")
+
+        ecs_client = boto3.client("ecs", region_name=region)
+
+        # Scale ECS service to 0 (stops the task; ECS managed scaling will
+        # eventually shrink the ASG, but we also do it explicitly below)
+        ecs_client.update_service(
+            cluster=cluster_name,
+            service=worker_service_name,
+            desiredCount=0
+        )
+        logger.info("GPU worker ECS service scaled down to 0 tasks")
+
+        # Scale the ASG to 0 explicitly to terminate the instance immediately
+        if asg_name:
+            asg_client = boto3.client("autoscaling", region_name=region)
+            asg_client.set_desired_capacity(
+                AutoScalingGroupName=asg_name,
+                DesiredCapacity=0,
+                HonorCooldown=False
+            )
+            logger.info(f"ASG '{asg_name}' scaled down to 0 instances — EC2 GPU instance will terminate")
+
+    except Exception as e:
+        logger.error(f"Failed to scale down GPU worker: {e}")
+
+    # Exit the worker process — the ECS task will stop cleanly
+    logger.info("Worker process exiting after scale-down.")
+    sys.exit(0)
+
+
 async def worker_main():
     """Main worker loop - supports concurrent job processing"""
     logger.info("Starting worker...")
@@ -1663,10 +1713,19 @@ async def worker_main():
 
     logger.info("Worker ready, waiting for jobs...")
     
+    # How long (seconds) to wait with an empty queue before shutting down.
+    # Configured via settings.IDLE_TIMEOUT_SECONDS (default 300s / 5 min).
+    # Set IDLE_TIMEOUT_SECONDS=0 to disable auto-shutdown.
+    from config import settings
+    idle_timeout_seconds = settings.IDLE_TIMEOUT_SECONDS
+
     # Track last cleanup time
     import time
     last_cleanup_time = time.time()
     cleanup_interval = 3600  # Run cleanup every hour
+
+    # Idle tracking: timestamp when queue first went empty (None = not idle)
+    idle_since: Optional[float] = None
     
     # Semaphore to limit concurrent jobs
     job_semaphore = asyncio.Semaphore(max_concurrent_jobs)
@@ -1733,6 +1792,9 @@ async def worker_main():
                 job_id = job_queue.get_next_job()
 
                 if job_id:
+                    # A job arrived — reset idle timer
+                    idle_since = None
+
                     # Get job details
                     job = job_queue.get_job(job_id)
                     if not job:
@@ -1760,7 +1822,27 @@ async def worker_main():
                     
                     logger.info(f"📋 Queued job {job_id} (total active: {len(active_tasks)})")
                 else:
-                    # No job available, sleep for a bit
+                    # No job available in the queue
+                    if len(active_tasks) == 0:
+                        # Queue is empty AND no tasks are running — start/advance idle timer
+                        if idle_since is None:
+                            idle_since = time.time()
+                            logger.info("Queue is empty and no active tasks — starting idle timer")
+
+                        idle_seconds = time.time() - idle_since
+                        if idle_timeout_seconds > 0 and idle_seconds >= idle_timeout_seconds:
+                            logger.info(
+                                f"Queue has been idle for {idle_seconds:.0f}s "
+                                f"(threshold: {idle_timeout_seconds}s) — initiating shutdown"
+                            )
+                            await scale_down_self()
+                            # scale_down_self() calls sys.exit() so we never reach here,
+                            # but break anyway for safety
+                            break
+                    else:
+                        # Still have active tasks — reset idle timer until they finish
+                        idle_since = None
+
                     await asyncio.sleep(2)
             else:
                 # At max capacity, wait a bit before checking again
