@@ -313,6 +313,19 @@ class ClipItStack(Stack):
                 resources=["*"]
             )
         )
+        # Allow the worker to terminate its own EC2 instance directly
+        ec2_instance_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ec2:TerminateInstances"],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "ec2:ResourceTag/aws:autoscaling:groupName": "clip-it-gpu-worker-asg"
+                    }
+                }
+            )
+        )
 
         # Create CloudWatch log group
         log_group = logs.LogGroup(
