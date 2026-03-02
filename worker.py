@@ -1692,6 +1692,12 @@ async def scale_down_self():
             )
             logger.info(f"ASG '{asg_name}' scaled down to 0 instances — EC2 GPU instance will terminate")
 
+        # Wait for ECS to register the desiredCount=0 update before this task exits.
+        # Without this sleep, ECS sees an unexpected task exit while desiredCount is
+        # still 1 in its internal state and immediately restarts the task.
+        logger.info("Waiting 30s for ECS to process desiredCount=0 before exiting...")
+        await asyncio.sleep(30)
+
     except Exception as e:
         logger.error(f"Failed to scale down GPU worker: {e}")
 
