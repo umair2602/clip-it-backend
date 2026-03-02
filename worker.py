@@ -1708,22 +1708,26 @@ async def scale_down_self():
         logger.info("Waiting 15s for ECS to register desiredCount=0...")
         await asyncio.sleep(15)
 
-        # Step 4: Terminate the EC2 instance directly — this is instant and guaranteed
+        # Step 4: Set ASG DesiredCapacity=0 AFTER ECS desiredCount=0 is registered.
+        # This order matters: ECS managed scaling won't override ASG=0 because there
+        # are now 0 desired tasks. If we did this before setting ECS to 0, ECS managed
+        # scaling would immediately override it back to 1.
+        asg_name = settings.WORKER_ASG_NAME
+        if asg_name:
+            asg_client = boto3.client("autoscaling", region_name=region)
+            asg_client.set_desired_capacity(
+                AutoScalingGroupName=asg_name,
+                DesiredCapacity=0,
+                HonorCooldown=False
+            )
+            logger.info(f"ASG '{asg_name}' DesiredCapacity set to 0 — no replacement instance will launch")
+
+        # Step 4: Terminate the EC2 instance directly for immediate billing stop.
+        # Without this, the ASG termination can take 5-10 minutes.
         if instance_id:
             ec2_client = boto3.client("ec2", region_name=region)
             ec2_client.terminate_instances(InstanceIds=[instance_id])
-            logger.info(f"EC2 instance {instance_id} terminated — GPU billing stopped")
-        else:
-            # Fallback: scale ASG to 0 if we couldn't get instance ID
-            asg_name = settings.WORKER_ASG_NAME
-            if asg_name:
-                asg_client = boto3.client("autoscaling", region_name=region)
-                asg_client.set_desired_capacity(
-                    AutoScalingGroupName=asg_name,
-                    DesiredCapacity=0,
-                    HonorCooldown=False
-                )
-                logger.info(f"ASG '{asg_name}' desired capacity set to 0 (fallback)")
+            logger.info(f"EC2 instance {instance_id} terminated — GPU billing stopped immediately")
 
     except Exception as e:
         logger.error(f"Failed to scale down GPU worker: {e}")
