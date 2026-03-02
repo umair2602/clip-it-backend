@@ -143,23 +143,30 @@ class ClipItStack(Stack):
             "set -x",
             "echo '=== GPU Worker Instance Setup Started ==='",
             "date",
-            f"echo ECS_CLUSTER={cluster.cluster_name} >> /etc/ecs/ecs.config",
-            "echo ECS_ENABLE_GPU_SUPPORT=true >> /etc/ecs/ecs.config",
-            "echo ECS_AVAILABLE_LOGGING_DRIVERS='[\"json-file\",\"awslogs\"]' >> /etc/ecs/ecs.config",
+            # ----------------------------------------------------------------
+            # CRITICAL: Stop ECS agent BEFORE writing config.
+            # The ECS-optimized AMI starts the agent at boot via systemd, BEFORE
+            # UserData runs. If we just append to ecs.config while the agent is
+            # already running, it registers 0 GPUs and tasks with gpu_count=1
+            # will stay Pending forever.
+            # ----------------------------------------------------------------
+            "echo '=== Stopping ECS agent to apply GPU config ==='",
+            "systemctl stop ecs 2>/dev/null || true",
+            "# Wipe stale agent state so it re-reads config fresh",
+            "rm -f /var/lib/ecs/data/agent.db",
+            # Write full config (overwrite, not append, to avoid duplicates)
+            f"echo 'ECS_CLUSTER={cluster.cluster_name}' > /etc/ecs/ecs.config",
+            "echo 'ECS_ENABLE_GPU_SUPPORT=true' >> /etc/ecs/ecs.config",
+            "echo 'ECS_AVAILABLE_LOGGING_DRIVERS=[\"json-file\",\"awslogs\"]' >> /etc/ecs/ecs.config",
             "echo '=== ECS Configuration ==='",
             "cat /etc/ecs/ecs.config",
             "echo '=== GPU Check ==='",
             "nvidia-smi || echo 'nvidia-smi failed'",
-            "echo '=== Pulling ECS Agent Image ==='",
-            "# Pull ECS agent Docker image (missing from AMI)",
-            "docker pull amazon/amazon-ecs-agent:latest",
-            "echo '=== Starting ECS Agent ==='",
-            "# Enable and start ECS service",
+            "echo '=== Starting ECS Agent with GPU support ==='",
             "systemctl enable ecs",
-            "# Start in background to avoid hanging UserData",
-            "/usr/libexec/amazon-ecs-init start &",
-            "# Wait for agent to register",
-            "sleep 10",
+            "systemctl start ecs",
+            "echo '=== Waiting for ECS agent to register GPUs ==='",
+            "sleep 30",
             "echo '=== Setup Complete ==='",
             "date"
         )
@@ -167,7 +174,7 @@ class ClipItStack(Stack):
         # Launch Template for GPU instances
         # We use a unique ID to ensure updates are picked up correctly
         spot_launch_template = ec2.LaunchTemplate(
-            self, "GPUWorkerLaunchTemplateV2", # Changed ID to force recreation/update check
+            self, "GPUWorkerLaunchTemplateV3",  # Bumped to V3 to force new LT version with GPU-config fix
             instance_type=ec2.InstanceType("g4dn.xlarge"),
             machine_image=gpu_ami,
             role=ec2_instance_role,
