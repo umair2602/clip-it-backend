@@ -1651,9 +1651,12 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
 
 
 async def scale_down_self():
-    """Scale the GPU worker ECS service and ASG back to zero after the queue is idle.
+    """Scale the GPU worker ECS service back to zero after the queue is idle.
 
-    This causes the EC2 GPU instance to terminate, stopping GPU billing.
+    Sets ECS desiredCount=0 and polls until ECS confirms it before exiting.
+    ECS managed scaling then drains the ASG automatically — we do NOT touch the
+    ASG directly because the AsgCapacityProvider's managed scaling would
+    immediately override any direct set_desired_capacity(0) call back to 1.
     Only runs when AUTO_SCALE_ENABLED=true.
     """
     from config import settings
@@ -1667,41 +1670,41 @@ async def scale_down_self():
         region = settings.AWS_REGION or "us-east-1"
         cluster_name = settings.ECS_CLUSTER_NAME
         worker_service_name = settings.WORKER_SERVICE_NAME
-        asg_name = settings.WORKER_ASG_NAME
 
         logger.info("Queue idle — scaling down GPU worker to save costs...")
 
         ecs_client = boto3.client("ecs", region_name=region)
 
-        # Scale ECS service to 0 (stops the task; ECS managed scaling will
-        # eventually shrink the ASG, but we also do it explicitly below)
+        # Step 1: Set desiredCount=0 on the ECS service
         ecs_client.update_service(
             cluster=cluster_name,
             service=worker_service_name,
             desiredCount=0
         )
-        logger.info("GPU worker ECS service scaled down to 0 tasks")
+        logger.info("GPU worker ECS service desiredCount set to 0")
 
-        # Scale the ASG to 0 explicitly to terminate the instance immediately
-        if asg_name:
-            asg_client = boto3.client("autoscaling", region_name=region)
-            asg_client.set_desired_capacity(
-                AutoScalingGroupName=asg_name,
-                DesiredCapacity=0,
-                HonorCooldown=False
+        # Step 2: Poll until ECS confirms desiredCount=0 (up to 60s).
+        # This prevents the task from exiting before ECS applies the update,
+        # which would look like a crash and trigger an immediate restart.
+        for attempt in range(12):  # 12 x 5s = 60s max wait
+            await asyncio.sleep(5)
+            resp = ecs_client.describe_services(
+                cluster=cluster_name,
+                services=[worker_service_name]
             )
-            logger.info(f"ASG '{asg_name}' scaled down to 0 instances — EC2 GPU instance will terminate")
-
-        # Wait for ECS to register the desiredCount=0 update before this task exits.
-        # Without this sleep, ECS sees an unexpected task exit while desiredCount is
-        # still 1 in its internal state and immediately restarts the task.
-        logger.info("Waiting 30s for ECS to process desiredCount=0 before exiting...")
-        await asyncio.sleep(30)
+            desired = resp["services"][0]["desiredCount"] if resp.get("services") else 1
+            logger.info(f"ECS desiredCount check ({attempt+1}/12): {desired}")
+            if desired == 0:
+                logger.info("ECS confirmed desiredCount=0 — safe to exit")
+                break
+        else:
+            logger.warning("ECS did not confirm desiredCount=0 within 60s — exiting anyway")
 
     except Exception as e:
         logger.error(f"Failed to scale down GPU worker: {e}")
 
-    # Exit the worker process — the ECS task will stop cleanly
+    # Exit cleanly — ECS will not restart because desiredCount is now 0.
+    # The AsgCapacityProvider managed scaling will then terminate the EC2 instance.
     logger.info("Worker process exiting after scale-down.")
     sys.exit(0)
 
