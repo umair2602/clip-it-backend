@@ -1657,6 +1657,12 @@ async def scale_down_self():
     - ECS managed scaling is too slow and won't drain the ASG while tasks are pending
     - Direct ASG set_desired_capacity is overridden by ECS managed scaling
     - Only runs when AUTO_SCALE_ENABLED=true
+
+    Race-condition protection:
+    - Sets a Redis key 'worker:scaling_down' (TTL=120s) so that concurrent
+      scale_up_gpu_worker() calls know a shutdown is in progress and can cancel it.
+    - After the 15s ECS propagation wait, re-checks the queue. If a job arrived
+      in the meantime, aborts the shutdown and restores desiredCount=1.
     """
     from config import settings
     if not settings.AUTO_SCALE_ENABLED:
@@ -1672,6 +1678,14 @@ async def scale_down_self():
         worker_service_name = settings.WORKER_SERVICE_NAME
 
         logger.info("Queue idle — scaling down GPU worker to save costs...")
+
+        # Acquire a Redis lock so scale_up_gpu_worker() (called from the web service
+        # when a new job arrives) knows a scale-down is in flight and cancels it
+        # rather than quietly losing the race.  TTL=120s is a dead-man's switch in
+        # case this process dies before it can clean up.
+        if job_queue.redis_client:
+            job_queue.redis_client.set("worker:scaling_down", "1", ex=120)
+            logger.info("Scale-down lock set (worker:scaling_down=1, TTL=120s)")
 
         # Step 1: Set ECS desiredCount=0 so no new tasks are scheduled after this one exits
         ecs_client = boto3.client("ecs", region_name=region)
@@ -1704,11 +1718,37 @@ async def scale_down_self():
         except Exception as meta_err:
             logger.warning(f"Could not retrieve instance ID from metadata: {meta_err}")
 
-        # Step 3: Give ECS a few seconds to register desiredCount=0
+        # Step 3: Give ECS time to register desiredCount=0
         logger.info("Waiting 15s for ECS to register desiredCount=0...")
         await asyncio.sleep(15)
 
-        # Step 4: Set ASG DesiredCapacity=0 AFTER ECS desiredCount=0 is registered.
+        # Step 3b: Safety check — abort if a new job arrived while we were waiting,
+        # OR if the web-service called scale_up and cleared our lock.
+        lock_still_set = (
+            job_queue.redis_client and
+            job_queue.redis_client.exists("worker:scaling_down")
+        ) if job_queue.redis_client else True  # if no Redis, proceed anyway
+
+        queue_len = 0
+        if job_queue.redis_client:
+            queue_len = job_queue.redis_client.llen("job_queue")
+
+        if not lock_still_set or queue_len > 0:
+            logger.warning(
+                f"Aborting scale-down — lock_present={lock_still_set}, "
+                f"queue_len={queue_len}. A new job arrived during shutdown wait. "
+                "Restoring ECS desiredCount=1 and continuing to process jobs."
+            )
+            ecs_client.update_service(
+                cluster=cluster_name,
+                service=worker_service_name,
+                desiredCount=1
+            )
+            if job_queue.redis_client:
+                job_queue.redis_client.delete("worker:scaling_down")
+            return  # stay alive — the main loop will pick up the queued job
+
+        # Step 4: Set ASG DesiredCapacity=0 AFTER ECS desiredCount=0 is confirmed.
         # This order matters: ECS managed scaling won't override ASG=0 because there
         # are now 0 desired tasks. If we did this before setting ECS to 0, ECS managed
         # scaling would immediately override it back to 1.
@@ -1722,7 +1762,7 @@ async def scale_down_self():
             )
             logger.info(f"ASG '{asg_name}' DesiredCapacity set to 0 — no replacement instance will launch")
 
-        # Step 4: Terminate the EC2 instance directly for immediate billing stop.
+        # Step 5: Terminate the EC2 instance directly for immediate billing stop.
         # Without this, the ASG termination can take 5-10 minutes.
         if instance_id:
             ec2_client = boto3.client("ec2", region_name=region)
@@ -1731,6 +1771,12 @@ async def scale_down_self():
 
     except Exception as e:
         logger.error(f"Failed to scale down GPU worker: {e}")
+        # Clean up lock on any error so the system can recover
+        try:
+            if job_queue.redis_client:
+                job_queue.redis_client.delete("worker:scaling_down")
+        except Exception:
+            pass
 
     logger.info("Worker process exiting after scale-down.")
     sys.exit(0)

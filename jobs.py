@@ -70,6 +70,14 @@ class JobQueue:
 
         Only runs if AUTO_SCALE_ENABLED=true (so local dev is unaffected).
         If the service is already running (desiredCount > 0) this is a no-op.
+
+        Race-condition handling:
+        If the worker is currently in the middle of a scale-down (indicated by
+        the 'worker:scaling_down' Redis key), we cancel that scale-down by
+        deleting the key.  scale_down_self() checks for the key after its 15s
+        wait and will abort termination if the key is gone, then restores
+        desiredCount=1.  So we don't need to touch ECS/ASG here — the worker
+        process stays alive and picks up the queued job itself.
         """
         from config import settings
         if not settings.AUTO_SCALE_ENABLED:
@@ -77,6 +85,18 @@ class JobQueue:
 
         try:
             import boto3
+
+            # If the worker is mid-shutdown, cancel it by deleting the lock key.
+            # scale_down_self() will see the key is gone, abort termination, and
+            # restore ECS desiredCount=1 on its own — no AWS API calls needed here.
+            if self.redis_client and self.redis_client.exists("worker:scaling_down"):
+                self.redis_client.delete("worker:scaling_down")
+                logger.info(
+                    "New job arrived while worker was shutting down — "
+                    "scale-down cancelled (worker:scaling_down lock cleared). "
+                    "Worker will stay alive and process the job."
+                )
+                return
 
             region = settings.AWS_REGION or "us-east-1"
             cluster_name = settings.ECS_CLUSTER_NAME
