@@ -157,7 +157,8 @@ class ClipItStack(Stack):
             "docker stop ecs-agent 2>/dev/null || true",
             "docker rm   ecs-agent 2>/dev/null || true",
             "# Wipe ALL stale agent state so it re-registers as a fresh instance",
-            "rm -rf /var/lib/ecs/data/*",
+            "rm -rf /var/lib/ecs/data/",
+            "mkdir -p /var/lib/ecs/data/",
             # Write full config (overwrite, not append, to avoid duplicates)
             f"echo 'ECS_CLUSTER={cluster.cluster_name}' > /etc/ecs/ecs.config",
             "echo 'ECS_ENABLE_GPU_SUPPORT=true' >> /etc/ecs/ecs.config",
@@ -178,7 +179,7 @@ class ClipItStack(Stack):
         # Launch Template for GPU instances
         # We use a unique ID to ensure updates are picked up correctly
         spot_launch_template = ec2.LaunchTemplate(
-            self, "GPUWorkerLaunchTemplateV4",  # Bumped to V4 — kill docker container + managed_scaling=False fix
+            self, "GPUWorkerLaunchTemplateV5",  # V5 — fix single-quoted glob preventing stale data wipe
             instance_type=ec2.InstanceType("g4dn.xlarge"),
             machine_image=gpu_ami,
             role=ec2_instance_role,
