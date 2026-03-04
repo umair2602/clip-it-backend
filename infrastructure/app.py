@@ -190,6 +190,11 @@ class ClipItStack(Stack):
             associate_public_ip_address=True,
             security_group=worker_sg,
             key_name="clip-it-gpu-debug",  # SSH key for debugging
+            # HttpPutResponseHopLimit=2 is required so that ECS tasks running in
+            # BRIDGE network mode (which adds 1 extra hop) can reach IMDSv2.
+            # Without this, urllib calls to 169.254.169.254 time out from inside
+            # the container and instance self-termination silently fails.
+            http_put_response_hop_limit=2,
             # Large root volume: GPU worker image contains CUDA + PyTorch (~50–70 GB unpacked).
             # The ECS-optimized GPU AMI default (30 GB) fills up when Docker pulls the image,
             # causing "no space left on device" and TaskFailedToStart errors.
