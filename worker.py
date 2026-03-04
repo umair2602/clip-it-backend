@@ -1689,7 +1689,10 @@ async def scale_down_self():
             job_queue.redis_client.set("worker:scaling_down", "1", ex=120)
             logger.info("Scale-down lock set (worker:scaling_down=1, TTL=120s)")
 
-        # Step 1: Get this instance's ID from EC2 Instance Metadata Service (IMDSv2)
+        # Step 1: Get this instance's ID.
+        # Primary: IMDSv2 (fast, works when hop limit >= 2 in launch template).
+        # Fallback: ASG API — since asg DesiredCapacity was just set to 0 and
+        #   there should be exactly 1 InService instance, we terminate it directly.
         # MUST happen before setting desiredCount=0 — ECS sends SIGTERM within
         # seconds of desiredCount=0 and kills this process before we can act.
         instance_id = None
@@ -1705,9 +1708,26 @@ async def scale_down_self():
                 headers={"X-aws-ec2-metadata-token": token}
             )
             instance_id = urllib.request.urlopen(id_req, timeout=2).read().decode()
-            logger.info(f"This instance ID: {instance_id}")
+            logger.info(f"This instance ID (from IMDSv2): {instance_id}")
         except Exception as meta_err:
-            logger.warning(f"Could not retrieve instance ID from metadata: {meta_err}")
+            logger.warning(f"IMDSv2 unavailable ({meta_err}) — falling back to ASG lookup")
+            # Fallback: find the single InService instance in the ASG
+            try:
+                asg_name_tmp = settings.WORKER_ASG_NAME
+                if asg_name_tmp:
+                    asg_client_tmp = boto3.client("autoscaling", region_name=region)
+                    asg_resp = asg_client_tmp.describe_auto_scaling_groups(
+                        AutoScalingGroupNames=[asg_name_tmp]
+                    )
+                    instances = asg_resp["AutoScalingGroups"][0].get("Instances", [])
+                    in_service = [i["InstanceId"] for i in instances if i["LifecycleState"] == "InService"]
+                    if in_service:
+                        instance_id = in_service[0]
+                        logger.info(f"This instance ID (from ASG fallback): {instance_id}")
+                    else:
+                        logger.warning("No InService instances found in ASG")
+            except Exception as asg_err:
+                logger.warning(f"ASG fallback also failed: {asg_err}")
 
         # Quick abort check: if scale_up_gpu_worker() cleared the lock because a
         # new job arrived, cancel the shutdown before touching any AWS resources.
@@ -1722,12 +1742,19 @@ async def scale_down_self():
                 job_queue.redis_client.delete("worker:scaling_down")
             return
 
-        # Step 2: Set ASG DesiredCapacity=0 BEFORE touching ECS.
-        # This prevents ECS managed scaling from launching a replacement instance
-        # after we set desiredCount=0.
+        # Step 2: Set ASG MinSize=0 and DesiredCapacity=0 BEFORE touching ECS.
+        # MinSize must be lowered first, otherwise set_desired_capacity(0) is
+        # rejected when min_size=1 (the error is raised but may be swallowed).
+        # This also prevents ECS managed scaling from launching a replacement
+        # instance after we set desiredCount=0.
         asg_name = settings.WORKER_ASG_NAME
         if asg_name:
             asg_client = boto3.client("autoscaling", region_name=region)
+            asg_client.update_auto_scaling_group(
+                AutoScalingGroupName=asg_name,
+                MinSize=0
+            )
+            logger.info(f"ASG '{asg_name}' MinSize set to 0")
             asg_client.set_desired_capacity(
                 AutoScalingGroupName=asg_name,
                 DesiredCapacity=0,

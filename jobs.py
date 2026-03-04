@@ -122,9 +122,16 @@ class JobQueue:
             if current_desired == 0:
                 logger.info("GPU worker is stopped (desiredCount=0), scaling up...")
 
-                # Step 1: Scale the ASG to 1 so an EC2 instance is available
+                # Step 1: Scale the ASG to 1 so an EC2 instance is available.
+                # Restore MinSize=1 first (scale_down_self sets it to 0 to allow
+                # DesiredCapacity=0 — we need to bring it back here).
                 if asg_name:
                     asg_client = boto3.client("autoscaling", region_name=region)
+                    asg_client.update_auto_scaling_group(
+                        AutoScalingGroupName=asg_name,
+                        MinSize=1
+                    )
+                    logger.info(f"ASG '{asg_name}' MinSize restored to 1")
                     asg_client.set_desired_capacity(
                         AutoScalingGroupName=asg_name,
                         DesiredCapacity=1,
