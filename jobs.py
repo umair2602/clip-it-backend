@@ -98,7 +98,9 @@ class JobQueue:
                 )
                 return
 
-            region = settings.AWS_REGION or "us-east-1"
+            # Use ECS_REGION (plain env var) not AWS_REGION (may come from Secrets
+            # Manager with a wrong value like us-east-2 which causes ClusterNotFoundException)
+            region = settings.ECS_REGION
             cluster_name = settings.ECS_CLUSTER_NAME
             worker_service_name = settings.WORKER_SERVICE_NAME
             asg_name = settings.WORKER_ASG_NAME
