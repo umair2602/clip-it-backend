@@ -1689,28 +1689,17 @@ async def scale_down_self():
             job_queue.redis_client.set("worker:scaling_down", "1", ex=120)
             logger.info("Scale-down lock set (worker:scaling_down=1, TTL=120s)")
 
-        # Step 1: Set ECS desiredCount=0 so no new tasks are scheduled after this one exits
-        ecs_client = boto3.client("ecs", region_name=region)
-        ecs_client.update_service(
-            cluster=cluster_name,
-            service=worker_service_name,
-            desiredCount=0
-        )
-        logger.info("ECS worker service desiredCount set to 0")
-
-        # Step 2: Get this instance's ID from EC2 Instance Metadata Service (IMDSv2)
-        # The worker runs ON the GPU instance so we can terminate ourselves directly
+        # Step 1: Get this instance's ID from EC2 Instance Metadata Service (IMDSv2)
+        # MUST happen before setting desiredCount=0 — ECS sends SIGTERM within
+        # seconds of desiredCount=0 and kills this process before we can act.
         instance_id = None
         try:
-            # IMDSv2: first get a token
             token_req = urllib.request.Request(
                 "http://169.254.169.254/latest/api/token",
                 headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
                 method="PUT"
             )
             token = urllib.request.urlopen(token_req, timeout=2).read().decode()
-
-            # Then use token to get instance ID
             id_req = urllib.request.Request(
                 "http://169.254.169.254/latest/meta-data/instance-id",
                 headers={"X-aws-ec2-metadata-token": token}
@@ -1720,40 +1709,22 @@ async def scale_down_self():
         except Exception as meta_err:
             logger.warning(f"Could not retrieve instance ID from metadata: {meta_err}")
 
-        # Step 3: Give ECS time to register desiredCount=0
-        logger.info("Waiting 15s for ECS to register desiredCount=0...")
-        await asyncio.sleep(15)
+        # Quick abort check: if scale_up_gpu_worker() cleared the lock because a
+        # new job arrived, cancel the shutdown before touching any AWS resources.
+        if job_queue.redis_client and not job_queue.redis_client.exists("worker:scaling_down"):
+            logger.warning("Scale-down lock was cleared by incoming job — aborting shutdown, staying alive.")
+            return
 
-        # Step 3b: Safety check — abort if a new job arrived while we were waiting,
-        # OR if the web-service called scale_up and cleared our lock.
-        lock_still_set = (
-            job_queue.redis_client and
-            job_queue.redis_client.exists("worker:scaling_down")
-        ) if job_queue.redis_client else True  # if no Redis, proceed anyway
-
-        queue_len = 0
-        if job_queue.redis_client:
-            queue_len = job_queue.redis_client.llen("job_queue")
-
-        if not lock_still_set or queue_len > 0:
-            logger.warning(
-                f"Aborting scale-down — lock_present={lock_still_set}, "
-                f"queue_len={queue_len}. A new job arrived during shutdown wait. "
-                "Restoring ECS desiredCount=1 and continuing to process jobs."
-            )
-            ecs_client.update_service(
-                cluster=cluster_name,
-                service=worker_service_name,
-                desiredCount=1
-            )
+        queue_len = job_queue.redis_client.llen("job_queue") if job_queue.redis_client else 0
+        if queue_len > 0:
+            logger.warning(f"New job in queue (len={queue_len}) — aborting shutdown, staying alive.")
             if job_queue.redis_client:
                 job_queue.redis_client.delete("worker:scaling_down")
-            return  # stay alive — the main loop will pick up the queued job
+            return
 
-        # Step 4: Set ASG DesiredCapacity=0 AFTER ECS desiredCount=0 is confirmed.
-        # This order matters: ECS managed scaling won't override ASG=0 because there
-        # are now 0 desired tasks. If we did this before setting ECS to 0, ECS managed
-        # scaling would immediately override it back to 1.
+        # Step 2: Set ASG DesiredCapacity=0 BEFORE touching ECS.
+        # This prevents ECS managed scaling from launching a replacement instance
+        # after we set desiredCount=0.
         asg_name = settings.WORKER_ASG_NAME
         if asg_name:
             asg_client = boto3.client("autoscaling", region_name=region)
@@ -1764,12 +1735,26 @@ async def scale_down_self():
             )
             logger.info(f"ASG '{asg_name}' DesiredCapacity set to 0 — no replacement instance will launch")
 
-        # Step 5: Terminate the EC2 instance directly for immediate billing stop.
-        # Without this, the ASG termination can take 5-10 minutes.
+        # Step 3: Set ECS desiredCount=0.
+        # WARNING: ECS will send SIGTERM to this container within seconds of this
+        # call. All critical AWS API calls (Steps 1-2) must be done before this.
+        ecs_client = boto3.client("ecs", region_name=region)
+        ecs_client.update_service(
+            cluster=cluster_name,
+            service=worker_service_name,
+            desiredCount=0
+        )
+        logger.info("ECS worker service desiredCount set to 0")
+
+        # Step 4: Terminate the EC2 instance directly for immediate billing stop.
+        # This must happen right after desiredCount=0 — SIGTERM is already in flight.
+        # No sleep needed: we're self-terminating so ASG cannot launch a replacement.
         if instance_id:
             ec2_client = boto3.client("ec2", region_name=region)
             ec2_client.terminate_instances(InstanceIds=[instance_id])
             logger.info(f"EC2 instance {instance_id} terminated — GPU billing stopped immediately")
+        else:
+            logger.warning("Could not get instance ID — EC2 instance will not be terminated automatically")
 
     except Exception as e:
         logger.error(f"Failed to scale down GPU worker: {e}")
