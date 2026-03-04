@@ -110,7 +110,9 @@ class ClipItStack(Stack):
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AmazonEC2ContainerServiceforEC2Role"
                 ),
-                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
+                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess"),
+                # SSM: allows remote command execution on instances without SSH keys
+                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSSMManagedInstanceCore"),
             ]
         )
 
