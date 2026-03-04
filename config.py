@@ -89,6 +89,10 @@ class Settings:
         "/clip-it/aws-secret-access-key", "AWS_SECRET_ACCESS_KEY"
     )
     AWS_REGION = get_secret("/clip-it/aws-region", "AWS_REGION", "us-east-1")
+    # ECS_REGION is read directly from the plain env var (never from Secrets Manager)
+    # to avoid the Secrets Manager /clip-it/aws-region returning a wrong region (e.g.
+    # us-east-2) and breaking scale_down_self() / scale_up_gpu_worker() boto3 calls.
+    ECS_REGION = os.getenv("ECS_REGION", "us-east-1")
     S3_BUCKET = get_secret("/clip-it/s3-bucket", "S3_BUCKET")
     S3_UPLOAD_PREFIX = "uploads/"
     S3_OUTPUT_PREFIX = "outputs/"

@@ -389,6 +389,10 @@ class ClipItStack(Stack):
             # Smart GPU worker: scale-to-zero configuration
             "AUTO_SCALE_ENABLED": "true",
             "ECS_CLUSTER_NAME": cluster.cluster_name,
+            # ECS_REGION is a plain env var so scale_down_self() / scale_up_gpu_worker()
+            # always use the correct region even if the Secrets Manager secret
+            # /clip-it/aws-region returns a different value (e.g. us-east-2).
+            "ECS_REGION": self.region,
             "WORKER_SERVICE_NAME": "clip-it-gpu-worker-service",
             "WORKER_ASG_NAME": "clip-it-gpu-worker-asg",
             "IDLE_TIMEOUT_SECONDS": "300",  # Shut down after 5 min idle

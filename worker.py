@@ -1673,11 +1673,13 @@ async def scale_down_self():
         import boto3
         import urllib.request
 
-        region = settings.AWS_REGION or "us-east-1"
+        # Use ECS_REGION (plain env var) not AWS_REGION (may come from Secrets
+        # Manager with a wrong value like us-east-2 which causes ClusterNotFoundException)
+        region = settings.ECS_REGION
         cluster_name = settings.ECS_CLUSTER_NAME
         worker_service_name = settings.WORKER_SERVICE_NAME
 
-        logger.info("Queue idle — scaling down GPU worker to save costs...")
+        logger.info(f"Queue idle — scaling down GPU worker to save costs... (region={region}, cluster={cluster_name}, service={worker_service_name})")
 
         # Acquire a Redis lock so scale_up_gpu_worker() (called from the web service
         # when a new job arrives) knows a scale-down is in flight and cancels it
