@@ -25,7 +25,7 @@ async def map_speakers_from_sample(
 ) -> Dict[str, int]:
     """
     Analyze first N seconds of video to map speaker labels to X positions.
-    Uses YOLO8 for face detection (GPU-accelerated) + TalkNet for speaker identification.
+    Uses YOLO26 for face detection (GPU-accelerated) + TalkNet for speaker identification.
     
     Args:
         video_path: Path to video file
@@ -40,7 +40,7 @@ async def map_speakers_from_sample(
     from services.yolo_face_detection import detect_faces, get_device
     
     logger.info(f"🎯 Mapping speakers using first {sample_duration}s of video...")
-    logger.info(f"   Using YOLO8 face detection on {get_device().upper()}")
+    logger.info(f"   Using YOLO26 face detection on {get_device().upper()}")
     
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -61,8 +61,8 @@ async def map_speakers_from_sample(
     
     logger.info(f"   Found {len(sample_utterances)} utterances in sample window")
     
-    # STEP 1: Run YOLO8 face detection on sample frames
-    logger.info(f"   📷 Detecting faces in sample window using YOLO8...")
+    # STEP 1: Run YOLO26 face detection on sample frames
+    logger.info(f"   📷 Detecting faces in sample window using YOLO26...")
     person_detections = []
     
     frame_idx = 0
@@ -90,6 +90,12 @@ async def map_speakers_from_sample(
                 for batch_idx, frame_detections in enumerate(batch_detections):
                     current_frame_idx = frame_indices[batch_idx]
                     for detection in frame_detections:
+                        # Filter out tiny persons (e.g. intro-collage grid thumbnails).
+                        # Real on-screen speakers occupy at least 35% of frame height;
+                        # collage thumbnail people are typically <32% tall.
+                        _, _, _pw, _ph = detection['bbox']
+                        if _ph < input_h * 0.35:
+                            continue
                         person_detections.append({
                             'frame': current_frame_idx,
                             'x': detection['center_x'],
@@ -114,6 +120,10 @@ async def map_speakers_from_sample(
         for batch_idx, frame_detections in enumerate(batch_detections):
             current_frame_idx = frame_indices[batch_idx]
             for detection in frame_detections:
+                # Filter out tiny persons (e.g. intro-collage grid thumbnails)
+                _, _, _pw, _ph = detection['bbox']
+                if _ph < input_h * 0.35:
+                    continue
                 person_detections.append({
                     'frame': current_frame_idx,
                     'x': detection['center_x'],
@@ -127,7 +137,7 @@ async def map_speakers_from_sample(
     
     cap.release()
     
-    logger.info(f"   ✅ Detected {len(person_detections)} person instances")
+    logger.info(f"   ✅ Detected {len(person_detections)} person instances (after size filter: body_h >= {input_h * 0.35:.0f}px = 35% of {input_h}px frame)")
     
     # If no faces detected in first 10s, try a longer sample or middle of video
     if len(person_detections) == 0 and sample_duration < 30:
@@ -254,13 +264,13 @@ async def _fallback_visual_mapping(
     transcript: Dict[str, Any]
 ) -> Dict[str, int]:
     """
-    Fallback: If no utterances in sample window, detect all unique speakers visually using YOLO8.
+    Fallback: If no utterances in sample window, detect all unique speakers visually using YOLO26.
     Returns mapping of detected positions to generic labels.
     """
     import cv2
     from services.yolo_face_detection import detect_faces
     
-    logger.info("   Using fallback visual mapping with YOLO8...")
+    logger.info("   Using fallback visual mapping with YOLO26...")
     
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)

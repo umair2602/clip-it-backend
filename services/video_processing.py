@@ -671,7 +671,7 @@ async def detect_talknet_crop_positions(
         # Current timestamp in the clip
         frame_time = (frame_idx / fps)
         
-        # Detect faces using YOLO8
+        # Detect faces using YOLO26
         detections = detect_faces_yolo(frame)
         
         if detections:
