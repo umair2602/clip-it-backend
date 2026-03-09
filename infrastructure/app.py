@@ -322,7 +322,19 @@ class ClipItStack(Stack):
                 actions=[
                     "autoscaling:SetDesiredCapacity",
                     "autoscaling:DescribeAutoScalingGroups",
+                    "autoscaling:UpdateAutoScalingGroup",
+                    "autoscaling:ResumeProcesses",
+                    "autoscaling:SuspendProcesses",
                 ],
+                resources=["*"]
+            )
+        )
+        # Allow the web-service task to start the stopped GPU instance
+        # (called from jobs.py scale_up_gpu_worker() stop/start flow)
+        task_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ec2:StartInstances", "ec2:DescribeInstances"],
                 resources=["*"]
             )
         )
@@ -345,15 +357,18 @@ class ClipItStack(Stack):
                 actions=[
                     "autoscaling:SetDesiredCapacity",
                     "autoscaling:DescribeAutoScalingGroups",
+                    "autoscaling:UpdateAutoScalingGroup",
+                    "autoscaling:ResumeProcesses",
+                    "autoscaling:SuspendProcesses",
                 ],
                 resources=["*"]
             )
         )
-        # Allow the worker to terminate its own EC2 instance directly
+        # Allow the worker to stop/terminate its own EC2 instance directly
         ec2_instance_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=["ec2:TerminateInstances"],
+                actions=["ec2:StopInstances", "ec2:TerminateInstances"],
                 resources=["*"],
                 conditions={
                     "StringEquals": {

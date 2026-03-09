@@ -1651,11 +1651,11 @@ async def process_youtube_download_job_v2(job_id: str, job_data: dict):
 
 
 async def scale_down_self():
-    """Scale the GPU worker ECS service to 0 and terminate the EC2 instance directly.
+    """Scale the GPU worker ECS service to 0 and STOP the EC2 instance (not terminate).
 
-    Terminating the instance directly is the only reliable way to stop billing:
-    - ECS managed scaling is too slow and won't drain the ASG while tasks are pending
-    - Direct ASG set_desired_capacity is overridden by ECS managed scaling
+    Stopping (not terminating) preserves the EBS volume and Docker image cache (~15GB
+    CUDA/PyTorch layers). Next startup takes ~45s vs 5-7min cold boot with terminate.
+    Ongoing cost while stopped: ~$16/month for 200GB GP3 EBS only (no compute charge).
     - Only runs when AUTO_SCALE_ENABLED=true
 
     Race-condition protection:
@@ -1742,14 +1742,20 @@ async def scale_down_self():
                 job_queue.redis_client.delete("worker:scaling_down")
             return
 
-        # Step 2: Set ASG MinSize=0 and DesiredCapacity=0 BEFORE touching ECS.
-        # MinSize must be lowered first, otherwise set_desired_capacity(0) is
-        # rejected when min_size=1 (the error is raised but may be swallowed).
-        # This also prevents ECS managed scaling from launching a replacement
-        # instance after we set desiredCount=0.
+        # Step 2: Suspend ASG scaling processes BEFORE setting desired=0.
+        # Without suspending, ASG would terminate the stopped instance (it detects
+        # a stopped instance as unhealthy via ReplaceUnhealthy / HealthCheck).
+        # Suspending Launch + Terminate + HealthCheck + ReplaceUnhealthy keeps the
+        # instance in the ASG's registry so jobs.py can find and restart it.
+        # MinSize must be lowered to 0 to allow DesiredCapacity=0 without rejection.
         asg_name = settings.WORKER_ASG_NAME
         if asg_name:
             asg_client = boto3.client("autoscaling", region_name=region)
+            asg_client.suspend_processes(
+                AutoScalingGroupName=asg_name,
+                ScalingProcesses=["Launch", "Terminate", "HealthCheck", "ReplaceUnhealthy", "AZRebalance"]
+            )
+            logger.info(f"ASG '{asg_name}' scaling processes suspended — instance will be stopped, not terminated")
             asg_client.update_auto_scaling_group(
                 AutoScalingGroupName=asg_name,
                 MinSize=0
@@ -1760,7 +1766,7 @@ async def scale_down_self():
                 DesiredCapacity=0,
                 HonorCooldown=False
             )
-            logger.info(f"ASG '{asg_name}' DesiredCapacity set to 0 — no replacement instance will launch")
+            logger.info(f"ASG '{asg_name}' DesiredCapacity set to 0")
 
         # Step 3: Set ECS desiredCount=0.
         # WARNING: ECS will send SIGTERM to this container within seconds of this
@@ -1773,15 +1779,16 @@ async def scale_down_self():
         )
         logger.info("ECS worker service desiredCount set to 0")
 
-        # Step 4: Terminate the EC2 instance directly for immediate billing stop.
-        # This must happen right after desiredCount=0 — SIGTERM is already in flight.
-        # No sleep needed: we're self-terminating so ASG cannot launch a replacement.
+        # Step 4: STOP (not terminate) the EC2 instance.
+        # Stopping preserves the 200GB EBS volume with Docker image layers cached
+        # (~15GB CUDA/PyTorch). Next boot takes ~45s instead of 5-7min cold start.
+        # Only ongoing cost while stopped: ~$16/month EBS (no compute charge).
         if instance_id:
             ec2_client = boto3.client("ec2", region_name=region)
-            ec2_client.terminate_instances(InstanceIds=[instance_id])
-            logger.info(f"EC2 instance {instance_id} terminated — GPU billing stopped immediately")
+            ec2_client.stop_instances(InstanceIds=[instance_id])
+            logger.info(f"EC2 instance {instance_id} stopped — GPU compute billing paused, EBS + Docker cache preserved (~$16/mo)")
         else:
-            logger.warning("Could not get instance ID — EC2 instance will not be terminated automatically")
+            logger.warning("Could not get instance ID — EC2 instance will not be stopped automatically")
 
     except Exception as e:
         logger.error(f"Failed to scale down GPU worker: {e}")
