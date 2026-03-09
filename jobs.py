@@ -122,22 +122,45 @@ class JobQueue:
             if current_desired == 0:
                 logger.info("GPU worker is stopped (desiredCount=0), scaling up...")
 
-                # Step 1: Scale the ASG to 1 so an EC2 instance is available.
-                # Restore MinSize=1 first (scale_down_self sets it to 0 to allow
-                # DesiredCapacity=0 — we need to bring it back here).
+                # Step 1: Start the existing stopped EC2 instance.
+                # Resume ASG processes that were suspended during scale_down_self(),
+                # then start the stopped instance directly via EC2 API.
+                # Using stop/start preserves EBS + Docker image cache (~15GB CUDA/PyTorch)
+                # so startup takes ~45s instead of 5-7min cold boot.
                 if asg_name:
                     asg_client = boto3.client("autoscaling", region_name=region)
+                    # Resume processes suspended during the stop flow
+                    asg_client.resume_processes(
+                        AutoScalingGroupName=asg_name,
+                        ScalingProcesses=["Launch", "Terminate", "HealthCheck", "ReplaceUnhealthy", "AZRebalance"]
+                    )
+                    logger.info(f"ASG '{asg_name}' processes resumed")
+                    # Restore min/desired so ASG tracks the instance correctly
                     asg_client.update_auto_scaling_group(
                         AutoScalingGroupName=asg_name,
                         MinSize=1
                     )
                     logger.info(f"ASG '{asg_name}' MinSize restored to 1")
-                    asg_client.set_desired_capacity(
-                        AutoScalingGroupName=asg_name,
-                        DesiredCapacity=1,
-                        HonorCooldown=False
+                    # Find the existing stopped instance and start it
+                    asg_resp = asg_client.describe_auto_scaling_groups(
+                        AutoScalingGroupNames=[asg_name]
                     )
-                    logger.info(f"Scaled ASG '{asg_name}' desired capacity to 1")
+                    instances = asg_resp["AutoScalingGroups"][0].get("Instances", [])
+                    instance_ids = [i["InstanceId"] for i in instances]
+                    if instance_ids:
+                        ec2_client = boto3.client("ec2", region_name=region)
+                        ec2_client.start_instances(InstanceIds=instance_ids)
+                        logger.info(f"Started stopped GPU instance(s): {instance_ids} — expect ~45s to ready (EBS + Docker cache preserved)")
+                    else:
+                        # No existing stopped instance — fall back to cold ASG launch
+                        # (e.g., first deploy before any instance exists)
+                        logger.info("No existing stopped instance found — launching new instance via ASG (cold boot ~5-7min)")
+                        asg_client.set_desired_capacity(
+                            AutoScalingGroupName=asg_name,
+                            DesiredCapacity=1,
+                            HonorCooldown=False
+                        )
+                        logger.info(f"Scaled ASG '{asg_name}' desired capacity to 1")
 
                 # Step 2: Scale ECS service to 1
                 ecs_client.update_service(
