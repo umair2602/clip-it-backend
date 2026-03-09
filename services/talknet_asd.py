@@ -186,13 +186,28 @@ class TalkNetASD:
         if audio.ndim > 1:
             audio = audio.flatten()
         
-        mfcc = python_speech_features.mfcc(
-            audio, 
-            sample_rate, 
-            numcep=13, 
-            winlen=0.025, 
-            winstep=0.010
-        )
+        # Normalize audio to prevent float division by zero in filterbank computation.
+        # python_speech_features.mfcc divides by frame energy; near-zero audio causes ZeroDivisionError.
+        max_val = np.max(np.abs(audio))
+        if max_val > 1e-7:
+            audio = (audio / max_val).astype(np.float64)
+        else:
+            logger.warning("Audio signal is silent or near-zero, returning zero MFCC features")
+            n_frames = max(1, int(len(audio) / sample_rate * 100))
+            return np.zeros((n_frames, 13))
+        
+        try:
+            mfcc = python_speech_features.mfcc(
+                audio, 
+                sample_rate, 
+                numcep=13, 
+                winlen=0.025, 
+                winstep=0.010
+            )
+        except (ZeroDivisionError, FloatingPointError, ValueError) as mfcc_err:
+            logger.warning(f"MFCC extraction failed ({mfcc_err}), returning zero features")
+            n_frames = max(1, int(len(audio) / sample_rate * 100))
+            return np.zeros((n_frames, 13))
         
         # Ensure MFCC is a proper 2D array
         if not isinstance(mfcc, np.ndarray):
