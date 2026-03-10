@@ -10,10 +10,14 @@ import logging
 import asyncio
 import aiohttp
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, Callable
 import json
 
 logger = logging.getLogger(__name__)
+
+
+class _Url404Error(Exception):
+    """Raised when the CDN download URL returns 404 (URL has expired)."""
 
 
 async def download_youtube_video_rapidapi(url: str, output_dir: Path) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
@@ -57,15 +61,48 @@ async def download_youtube_video_rapidapi(url: str, output_dir: Path) -> Tuple[O
         logger.info(f"   Title: {download_info.get('title', 'Unknown')}")
         logger.info(f"   Duration: {download_info.get('duration', 'Unknown')}")
         
-        # Step 2: Download the video file
+        # Step 2: Download the video file.
+        # 1080p CDN URLs expire in ~30 s; retry up to MAX_CDN_RETRIES times by
+        # re-requesting a fresh URL from the API before giving up.
         video_url = download_info.get('video_url')
         if not video_url:
             logger.error("❌ No video download URL in response")
             return None, None, None
-        
-        logger.info(f"⬇️  Downloading video file...")
-        file_path = await _download_file(video_url, output_dir, download_info.get('title', 'video'))
-        
+
+        MAX_CDN_RETRIES = 3
+        file_path = None
+        for cdn_attempt in range(1, MAX_CDN_RETRIES + 1):
+            logger.info(f"⬇️  Downloading video file (CDN attempt {cdn_attempt}/{MAX_CDN_RETRIES})...")
+            try:
+                file_path = await _download_file(video_url, output_dir, download_info.get('title', 'video'))
+                break  # success
+            except _Url404Error:
+                if cdn_attempt >= MAX_CDN_RETRIES:
+                    logger.error(f"❌ CDN URL returned 404 on all {MAX_CDN_RETRIES} attempts")
+                    break
+                logger.warning(
+                    f"⚠️  CDN URL expired (404) on attempt {cdn_attempt} — "
+                    f"requesting fresh URL from API..."
+                )
+                # Re-fetch a fresh CDN URL for the same format without going
+                # through the full format-fallback loop.
+                refresh_params = download_info.get('_params')
+                refresh_headers = download_info.get('_headers')
+                refresh_api_url = download_info.get('_api_url')
+                if refresh_params and refresh_headers and refresh_api_url:
+                    fresh = await _refresh_cdn_url(
+                        refresh_api_url, refresh_params, refresh_headers, api_key
+                    )
+                    if fresh:
+                        video_url = fresh
+                        logger.info(f"✅ Got fresh CDN URL (attempt {cdn_attempt + 1})")
+                    else:
+                        logger.warning("⚠️  Could not refresh CDN URL, giving up on this format")
+                        break
+                else:
+                    logger.warning("⚠️  No refresh metadata available, giving up on this format")
+                    break
+
         if not file_path:
             logger.error("❌ Failed to download video file")
             return None, None, None
@@ -106,12 +143,14 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
         # RapidAPI endpoint
         api_url = "https://youtube-info-download-api.p.rapidapi.com/ajax/download.php"
         
-        # Try multiple format options (720p and 360p are fastest for clips)
+        # 1080p is the primary target. Its CDN URLs have a short TTL (~30s), so
+        # the caller retries the full get-URL + download cycle on 404 before
+        # falling through to 720p / 480p / 360p.
         format_options = [
-            {'format': '720', 'add_info': '1'},   # Try 720p quality (Fastest priority)
-            {'format': '360', 'add_info': '1'},   # Try 360p quality
-            {'format': '1080', 'add_info': '1'},  # Try 1080p if others fail
-            {'format': '480', 'add_info': '1'},   # Fallback
+            {'format': '1080', 'add_info': '1'},  # Primary — retried on CDN 404
+            {'format': '720', 'add_info': '1'},   # First fallback
+            {'format': '480', 'add_info': '1'},   # Second fallback
+            {'format': '360', 'add_info': '1'},   # Last resort
         ]
         
         headers = {
@@ -175,7 +214,11 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
                                             'title': data.get('title', 'Unknown'),
                                             'duration': data.get('info', {}).get('duration'),
                                             'thumbnail': data.get('info', {}).get('thumbnail'),
-                                            'channel': data.get('info', {}).get('channel') or data.get('info', {}).get('uploader')
+                                            'channel': data.get('info', {}).get('channel') or data.get('info', {}).get('uploader'),
+                                            'format': format_config.get('format'),
+                                            '_api_url': api_url,
+                                            '_params': {k: v for k, v in {**format_config, 'url': url, 'no_merge': 'true', 'allow_extended_duration': 'true'}.items()},
+                                            '_headers': headers,
                                         }
                                     else:
                                         logger.warning(f"⚠️ Format {format_config.get('format')}: Failed to get download URL from progress endpoint")
@@ -227,6 +270,32 @@ async def _get_download_info(url: str, api_key: str) -> Optional[Dict[str, Any]]
     except Exception as e:
         logger.error(f"❌ Error getting download info from RapidAPI: [{type(e).__name__}] {str(e)}")
         logger.exception("Full stack trace:")
+        return None
+
+
+async def _refresh_cdn_url(
+    api_url: str,
+    params: dict,
+    headers: dict,
+    api_key: str,
+) -> Optional[str]:
+    """
+    Re-call the RapidAPI endpoint with the same parameters to get a fresh CDN URL.
+    Used when a previous CDN URL has expired (404) mid-download.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=120, connect=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(api_url, params=params, headers=headers) as response:
+                if response.status != 200:
+                    logger.warning(f"⚠️  Refresh request returned {response.status}")
+                    return None
+                data = await response.json()
+                if data.get('success') and 'progress_url' in data:
+                    return await _poll_progress_url(data['progress_url'], api_key)
+                return None
+    except Exception as e:
+        logger.warning(f"⚠️  Error refreshing CDN URL: {e}")
         return None
 
 
@@ -310,6 +379,9 @@ async def _download_file(url: str, output_dir: Path, title: str) -> Optional[str
         )
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=timeout) as response:
+                if response.status == 404:
+                    logger.error(f"❌ Download failed with status 404 (CDN URL expired)")
+                    raise _Url404Error("CDN URL returned 404")
                 if response.status != 200:
                     logger.error(f"❌ Download failed with status {response.status}")
                     return None

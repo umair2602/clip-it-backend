@@ -410,6 +410,73 @@ async def get_video_history_with_clips(
     }
 
 
+@router.get("/history/in-progress")
+async def get_in_progress_videos(
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """
+    Get videos that are currently being processed for the authenticated user.
+
+    Used by the frontend to resume status polling after a page refresh or
+    re-login — the client no longer needs to scan the full history and
+    filter on its own.
+
+    Returns a lightweight list of in-progress video objects, each including
+    the `process_task_id` required to resume polling.
+    """
+    ACTIVE_STATUSES = {
+        "uploading", "downloading", "downloaded",
+        "processing_started", "queued", "transcribing",
+        "analyzing", "processing",
+    }
+    try:
+        from database.connection import get_database
+        db = get_database()
+        users_collection = db["users"]
+
+        user = users_collection.find_one({"_id": ObjectId(current_user.id)})
+        if not user:
+            return {"videos": []}
+
+        all_videos = user.get("videos", [])
+        in_progress = [
+            v for v in all_videos
+            if str(v.get("status", "")).lower() in ACTIVE_STATUSES
+        ]
+
+        # Sort newest-first so the frontend picks the most recent task
+        in_progress.sort(
+            key=lambda v: v.get("created_at") or "",
+            reverse=True,
+        )
+
+        result = []
+        for v in in_progress:
+            created_at = v.get("created_at")
+            result.append({
+                "id": str(v.get("id", "")),
+                "title": v.get("title"),
+                "filename": v.get("filename"),
+                "status": v.get("status"),
+                "process_task_id": v.get("process_task_id"),
+                "job_id": v.get("job_id"),
+                "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+                "error_message": v.get("error_message"),
+            })
+
+        logger.info(
+            f"[in-progress] User {current_user.id} has {len(result)} video(s) in progress"
+        )
+        return {"videos": result}
+
+    except Exception as e:
+        logger.error(f"Error getting in-progress videos for user {getattr(current_user, 'id', '?')}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        )
+
+
 @router.get("/{video_id}")
 async def get_video(
     current_user: Annotated[User, Depends(get_current_user)],
