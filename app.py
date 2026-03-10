@@ -712,7 +712,7 @@ async def upload_video(
 
 @app.get("/status/{task_id}")
 @app.get("/api/status/{task_id}")  # Alias for frontend consistency
-async def get_status(task_id: str):
+async def get_status(task_id: str, current_user: Annotated[User, Depends(get_current_user)]):
     """Get task status from Redis job queue, in-memory tasks, or MongoDB video document
 
     Optimized for fast responses to prevent timeout issues.
